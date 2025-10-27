@@ -1,0 +1,45 @@
+{
+  "name": "overpass-proxy",
+  "version": "1.0.0",
+  "description": "Transparent Overpass API proxy with optional Redis tile caching.",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint \"src/**/*.ts\"",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "cross-env USE_DOCKER=0 vitest run",
+    "test:watch": "cross-env USE_DOCKER=0 vitest",
+    "test:docker": "cross-env USE_DOCKER=1 vitest run",
+    "test:ci": "cross-env USE_DOCKER=0 vitest run --coverage"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@fastify/formbody": "^7.4.0",
+    "fastify": "^4.26.2",
+    "fastify-plugin": "^4.5.1",
+    "got": "^12.6.0",
+    "ioredis": "^5.3.2",
+    "merge-deep": "^3.0.3",
+    "ngeohash": "^0.6.0",
+    "pino": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/supertest": "^2.0.16",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "cross-env": "^10.1.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.29.1",
+    "supertest": "^6.3.3",
+    "testcontainers": "^10.7.1",
+    "tsx": "^4.7.1",
+    "typescript": "^5.4.5",
+    "vitest": "^1.5.0"
+  }
+}
