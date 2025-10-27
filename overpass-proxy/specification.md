@@ -23,45 +23,45 @@ The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public
 ```mermaid
 flowchart TD
     subgraph Bootstrap
-        A["Load ENV via config.ts"] --> B["Create logger (logger.ts)"]
-        B --> C["Create Redis client (store.ts)"]
-        C --> D["Instantiate Fastify server (index.ts)"]
+        A["Load env (config.ts)"] --> B["Create logger (logger.ts)"]
+        B --> C["Initialise Redis client (store.ts)"]
+        C --> D["Instantiate Fastify (index.ts)"]
         D --> E["Register interpreter routes (interpreter.ts)"]
     end
 
     subgraph RequestLifecycle
-        F["Inbound request /api/*"] --> G{"Route match"}
-        G -->|/api/interpreter| H["Normalize query/body"]
-        G -->|Other /api path| T["Transparent proxy"]
+        F["Inbound /api/* request"] --> G{"Match interpreter?"}
+        G -->|Yes| H["Normalise query/body"]
+        G -->|No| ProxyTransparent
         H --> I{"Transparent only?"}
-        I -->|Yes| T
-        I -->|No| J["Check out:json"]
-        J -->|No| T
+        I -->|Yes| ProxyTransparent
+        I -->|No| J["Check for out:json"]
+        J -->|No| ProxyTransparent
         J -->|Yes| K["Extract bbox (bbox.ts)"]
         K --> L{"BBox found?"}
-        L -->|No| T
+        L -->|No| ProxyTransparent
         L -->|Yes| M["Compute tiles (tiling.ts)"]
-        M --> N{"Tiles > MAX?"}
-        N -->|Yes| U["Throw TooManyTilesError"]
-        N -->|No| O["Bulk fetch from Redis (store.ts)"]
-        O --> P{"Fresh?"}
-        P -->|All fresh| Q["Assemble payload (assemble.ts)"]
-        P -->|Missing/stale| R["Fetch upstream tiles (upstream.ts)"]
-        R --> S["Persist refreshed tiles (store.ts)"]
-        S --> Q
-        Q --> V["Generate headers (headers.ts)"]
-        V --> W["Return JSON response"]
+        M --> N{"Tiles exceed MAX?"}
+        N -->|Yes| Err413["Throw TooManyTilesError"]
+        N -->|No| Lookup["Fetch tiles from Redis (store.ts)"]
+        Lookup --> P{"All tiles fresh?"}
+        P -->|Yes| Assemble["Assemble payload (assemble.ts)"]
+        P -->|No| FetchTiles["Fetch upstream tiles (upstream.ts)"]
+        FetchTiles --> Persist["Persist refreshed tiles (store.ts)"]
+        Persist --> Assemble
     end
 
-    T --> X["Proxy upstream via upstream.ts"]
-    X --> Y["Stream response to client"]
-    U --> Y
-    W --> Y
+    ProxyTransparent --> Upstream["Proxy upstream request (upstream.ts)"]
+    Err413 --> Response["Respond to client"]
+    Assemble --> Headers["Generate headers (headers.ts)"]
+    Headers --> Response
+    Upstream --> Response
 
-    Y --> Z["Emit structured logs (logger.ts)"]
-    W --> AA["Optionally schedule SWR refresh locks (store.ts)"]
-    R --> AB["Respect rateLimit token bucket (rateLimit.ts, optional)"]
-    Y --> AC["Errors normalized via errors.ts"]
+    Assemble -.-> SWR["Schedule SWR refresh lock (store.ts)"]
+    FetchTiles -.-> RateLimit["Respect rate limiter (rateLimit.ts)"]
+
+    Response --> Logging["Emit structured logs (logger.ts)"]
+    Response --> Errors["Normalise errors (errors.ts)"]
 ```
 
 ## 4. Tile Caching Pipeline
