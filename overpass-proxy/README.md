@@ -46,10 +46,14 @@ Environment variables are read at startup. Defaults are shown below:
 | `REDIS_URL` | `redis://redis:6379` | Redis connection URL |
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
-| `TILE_PRECISION` | `7` | Geohash precision for tiles |
-| `MAX_TILES_PER_REQUEST` | `400` | Maximum tiles per request |
+| `TILE_PRECISION` | `5` | Geohash precision for tiles |
+| `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `PORT` | `8080` | Listen port |
 | `NODE_ENV` | `production` | Runtime environment |
+
+The defaults for `TILE_PRECISION` and `MAX_TILES_PER_REQUEST` are tuned for the ToiletFinder iOS client: a precision of 5 keeps
+tile counts below the 1 024-tile ceiling even for the app’s widest live-map fetches (~70 km across) and cache-preload passes
+(~100 km combined width/height) while still yielding reusable tiles for the 2 km spatial grid used during normal browsing.
 
 ## Running locally
 

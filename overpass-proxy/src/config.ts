@@ -30,8 +30,8 @@ export const loadConfig = (): AppConfig => {
     redisUrl: env.REDIS_URL ?? 'redis://redis:6379',
     cacheTtlSeconds: cacheTtl,
     swrSeconds: toNumber(env.SWR_SECONDS, swr),
-    tilePrecision: toNumber(env.TILE_PRECISION, 7),
-    maxTilesPerRequest: toNumber(env.MAX_TILES_PER_REQUEST, 400),
+    tilePrecision: toNumber(env.TILE_PRECISION, 5),
+    maxTilesPerRequest: toNumber(env.MAX_TILES_PER_REQUEST, 1024),
     nodeEnv: env.NODE_ENV ?? 'production'
   };
 };

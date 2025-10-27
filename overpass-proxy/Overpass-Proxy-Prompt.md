@@ -60,7 +60,7 @@ This is the backend foundation for the ToiletFinder app, enabling local or hoste
 - Parse the query *only enough to detect bbox coordinates*. No further parsing is required.
 
 - For cacheable requests:
-  - Divide bbox into geohash tiles (`TILE_PRECISION`, default 7).
+  - Divide bbox into geohash tiles (`TILE_PRECISION`, default 5).
   - Fetch and store each tile’s elements from upstream as raw Overpass JSON (including all metadata).
   - Reassemble Overpass-compatible responses (meta intact) from cached elements for arbitrary bbox queries.
   - TTL-based cache with stale-while-revalidate (SWR) behavior.
@@ -174,8 +174,8 @@ Coverage targets:
 | `UPSTREAM_URL` | `https://overpass-api.de/api/interpreter` | Overpass backend |
 | `REDIS_URL` | `redis://redis:6379` | Redis connection |
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
-| `TILE_PRECISION` | `7` | Geohash precision |
-| `MAX_TILES_PER_REQUEST` | `400` | Limit for cacheable tiles |
+| `TILE_PRECISION` | `5` | Geohash precision |
+| `MAX_TILES_PER_REQUEST` | `1024` | Limit for cacheable tiles |
 | `TRANSPARENT_ONLY` | `false` | Disable caching |
 | `PORT` | `8080` | Listen port |
 | `NODE_ENV` | `production` | Environment |
