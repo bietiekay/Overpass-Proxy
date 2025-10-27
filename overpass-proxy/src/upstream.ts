@@ -37,20 +37,32 @@ export const proxyTransparent = async (
 ): Promise<void> => {
   try {
     const upstreamUrl = new URL(request.url, config.upstreamUrl);
-    const body =
-      request.method === 'GET' || request.method === 'HEAD'
-        ? undefined
-        : typeof request.body === 'string'
-          ? request.body
-          : Buffer.isBuffer(request.body)
-            ? request.body
-            : request.body && typeof request.body === 'object'
-              ? new URLSearchParams(request.body as Record<string, string>).toString()
-              : undefined;
+    let body: string | Buffer | undefined;
+    let bodyReencoded = false;
+
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      body = undefined;
+    } else if (typeof request.body === 'string') {
+      body = request.body;
+    } else if (Buffer.isBuffer(request.body)) {
+      body = request.body;
+    } else if (request.body && typeof request.body === 'object') {
+      body = new URLSearchParams(request.body as Record<string, string>).toString();
+      bodyReencoded = true;
+    }
+
+    const headers = {
+      ...request.headers,
+      host: undefined
+    } as Record<string, string | string[] | undefined>;
+    if (bodyReencoded) {
+      delete headers['content-length'];
+      delete headers['Content-Length'];
+    }
 
     const response = await got(upstreamUrl.toString(), {
       method: request.method,
-      headers: { ...request.headers, host: undefined },
+      headers,
       body,
       throwHttpErrors: false,
       responseType: 'buffer',
