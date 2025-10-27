@@ -15,7 +15,7 @@ export const buildTileQuery = (bbox: BoundingBox): string => `[
 );
 out body meta;
 >;
-> out skel qt;`;
+out skel qt;`;
 
 export const fetchTile = async (config: AppConfig, bbox: BoundingBox): Promise<OverpassResponse> => {
   const query = buildTileQuery(bbox);
