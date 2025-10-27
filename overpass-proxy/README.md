@@ -2,6 +2,17 @@
 
 Transparent Overpass API proxy with optional Redis-backed tile caching for JSON bounding-box queries. The proxy mirrors the official Overpass API surface so existing clients (like the ToiletFinder iOS app) can switch endpoints without any behavioural changes.
 
+## Summary
+
+The `overpass-proxy` subproject delivers a production-ready Fastify service that mirrors the public Overpass API surface while
+adding Redis-backed geohash tile caching for JSON bounding-box queries. It includes:
+
+- Full TypeScript source code covering request routing, caching, upstream proxying, rate limiting, and telemetry helpers.
+- A dual-mode testing setup (Vitest + Supertest) that supports local execution without Docker by default, with optional
+  Testcontainers-powered Redis and mock Overpass services when `USE_DOCKER=1`.
+- Comprehensive documentation in `specification.md`, including architectural deep-dives and a Mermaid flow diagram that traces
+  bootstrap, request handling, cache population, and transparent proxy paths end-to-end.
+
 ## Features
 
 - Fastify-based HTTP server exposing the `/api/*` Overpass endpoints
