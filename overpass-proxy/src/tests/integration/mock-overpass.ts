@@ -2,7 +2,7 @@ import formbody from '@fastify/formbody';
 import Fastify, { type FastifyRequest } from 'fastify';
 
 import type { BoundingBox } from '../../bbox.js';
-import { extractBoundingBox, hasJsonOutput } from '../../bbox.js';
+import { extractBoundingBox, hasAmenityFilter, hasJsonOutput } from '../../bbox.js';
 
 const buildResponse = (bbox: BoundingBox) => ({
   version: 0.6,
@@ -11,8 +11,20 @@ const buildResponse = (bbox: BoundingBox) => ({
     timestamp_osm_base: new Date().toISOString()
   },
   elements: [
-    { type: 'node', id: 1, lat: bbox.south, lon: bbox.west, tags: { mock: 'true' } },
-    { type: 'node', id: 2, lat: bbox.north, lon: bbox.east, tags: { mock: 'true' } }
+    {
+      type: 'node',
+      id: 1,
+      lat: bbox.south,
+      lon: bbox.west,
+      tags: { amenity: 'toilets', mock: 'true' }
+    },
+    {
+      type: 'node',
+      id: 2,
+      lat: bbox.north,
+      lon: bbox.east,
+      tags: { amenity: 'toilets', mock: 'true' }
+    }
   ]
 });
 
@@ -30,9 +42,18 @@ export const createMockOverpass = () => {
           ? formBody.data
           : '';
     if (!hasJsonOutput(query)) {
-      reply.type('text/plain');
+      reply.code(400);
+      reply.type('application/json');
       // eslint-disable-next-line @typescript-eslint/no-floating-promises
-      reply.send('ok');
+      reply.send({ error: 'json required' });
+      return;
+    }
+
+    if (!hasAmenityFilter(query)) {
+      reply.code(400);
+      reply.type('application/json');
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      reply.send({ error: 'amenity required' });
       return;
     }
 

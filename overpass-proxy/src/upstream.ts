@@ -9,9 +9,9 @@ import type { OverpassResponse } from './store.js';
 export const buildTileQuery = (bbox: BoundingBox): string => `[
   out:json][timeout:120];
 (
-  node(${bbox.south},${bbox.west},${bbox.north},${bbox.east});
-  way(${bbox.south},${bbox.west},${bbox.north},${bbox.east});
-  relation(${bbox.south},${bbox.west},${bbox.north},${bbox.east});
+  node["amenity"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
+  way["amenity"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
+  relation["amenity"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
 );
 out body meta;
 >;

@@ -1,24 +1,23 @@
 # Overpass Proxy
 
-Transparent Overpass API proxy with optional Redis-backed tile caching for JSON bounding-box queries. The proxy mirrors the official Overpass API surface so existing clients (like the ToiletFinder iOS app) can switch endpoints without any behavioural changes.
+Overpass API proxy specialised for amenity lookups with Redis-backed tile caching for JSON bounding-box queries. The proxy mirrors the official Overpass API surface so existing clients (like the ToiletFinder iOS app) can switch endpoints without any behavioural changes when querying amenities.
 
 ## Summary
 
 The `overpass-proxy` subproject delivers a production-ready Fastify service that mirrors the public Overpass API surface while
-adding Redis-backed geohash tile caching for JSON bounding-box queries. It includes:
+adding Redis-backed geohash tile caching for amenity-focused JSON bounding-box queries. It includes:
 
 - Full TypeScript source code covering request routing, caching, upstream proxying, rate limiting, and telemetry helpers.
 - A dual-mode testing setup (Vitest + Supertest) that supports local execution without Docker by default, with optional
   Testcontainers-powered Redis and mock Overpass services when `USE_DOCKER=1`.
 - Comprehensive documentation in `specification.md`, including architectural deep-dives and a Mermaid flow diagram that traces
-  bootstrap, request handling, cache population, and transparent proxy paths end-to-end.
+  bootstrap, request handling, cache population, and validation paths end-to-end.
 
 ## Features
 
 - Fastify-based HTTP server exposing the `/api/*` Overpass endpoints
-- Transparent pass-through for non-cacheable requests (XML, complex QL)
-- Redis-backed geohash tile caching for Overpass JSON bbox queries with stale-while-revalidate refresh
-- Optional `TRANSPARENT_ONLY` mode to disable caching entirely
+- Strict amenity-only handling for `/api/interpreter`; non-JSON or non-amenity queries are rejected with helpful errors
+- Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh
 - Structured logging via Pino
 - Comprehensive Vitest unit and integration test suites
 - GitHub Actions CI workflow running linting and tests with coverage
@@ -35,7 +34,7 @@ The proxy implements the core Overpass API endpoints:
 - `POST /api/kill_my_queries`
 - Any other `/api/*` path is transparently proxied upstream
 
-Requests preserve HTTP methods, headers, payloads, and status codes. For cacheable Overpass QL requests (`out:json` with a bbox) the proxy satisfies the response locally when tiles are cached.
+Requests preserve HTTP methods, headers, payloads, and status codes. `/api/interpreter` requires JSON amenity queries with a bounding box; the proxy satisfies the response locally when tiles are cached and fetches amenity tiles upstream on cache misses.
 
 ## Configuration
 
@@ -49,7 +48,6 @@ Environment variables are read at startup. Defaults are shown below:
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
 | `TILE_PRECISION` | `7` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `400` | Maximum tiles per request |
-| `TRANSPARENT_ONLY` | `false` | Disable caching when `true` |
 | `PORT` | `8080` | Listen port |
 | `NODE_ENV` | `production` | Runtime environment |
 
@@ -97,10 +95,12 @@ npm run test:ci      # coverage-enabled run without Docker
 ## Example requests
 
 ```bash
-# Transparent XML request
-curl -X GET "http://localhost:8080/api/interpreter?data=%5Bout:xml%5D;node(52.5,13.3,52.6,13.4);out;"
+# JSON amenity bbox request (cacheable)
+curl -X POST http://localhost:8080/api/interpreter \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data '[out:json];node["amenity"="toilets"](52.5,13.3,52.6,13.4);out;'
 
-# JSON bbox request (cacheable)
+# Validation error when amenity filter missing
 curl -X POST http://localhost:8080/api/interpreter \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   --data '[out:json];node(52.5,13.3,52.6,13.4);out;'

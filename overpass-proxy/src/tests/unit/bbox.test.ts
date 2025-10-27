@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { extractBoundingBox, hasJsonOutput } from '../../bbox.js';
+import { extractBoundingBox, hasAmenityFilter, hasJsonOutput } from '../../bbox.js';
 
 describe('extractBoundingBox', () => {
   it('extracts bbox from tuple syntax', () => {
@@ -35,5 +35,23 @@ describe('hasJsonOutput', () => {
 
   it('returns false when not json', () => {
     expect(hasJsonOutput('out:xml;')).toBe(false);
+  });
+});
+
+describe('hasAmenityFilter', () => {
+  it('detects amenity filter with value', () => {
+    expect(hasAmenityFilter('node["amenity"="toilets"];')).toBe(true);
+  });
+
+  it('detects amenity existence filter', () => {
+    expect(hasAmenityFilter('node["amenity"];')).toBe(true);
+  });
+
+  it('is case insensitive', () => {
+    expect(hasAmenityFilter('node["AMENITY"];')).toBe(true);
+  });
+
+  it('returns false when amenity absent', () => {
+    expect(hasAmenityFilter('node["shop"];')).toBe(false);
   });
 });

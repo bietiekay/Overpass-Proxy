@@ -1,7 +1,7 @@
 {
   "name": "overpass-proxy",
   "version": "1.0.0",
-  "description": "Transparent Overpass API proxy with optional Redis tile caching.",
+  "description": "Amenity-focused Overpass API proxy with Redis tile caching.",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {

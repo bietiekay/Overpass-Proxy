@@ -49,3 +49,5 @@ export const extractBoundingBox = (query: string): BoundingBox | null => {
 };
 
 export const hasJsonOutput = (query: string): boolean => /out\s*:\s*json/i.test(query);
+
+export const hasAmenityFilter = (query: string): boolean => /\[\s*"amenity"/i.test(query);

@@ -1,23 +1,23 @@
 # Overpass Proxy Specification
 
 ## 1. Purpose and Context
-The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public Overpass API surface while adding optional Redis-backed tile caching for JSON bounding-box (bbox) queries. It enables ToiletFinder clients to switch endpoints without behavioural changes while benefiting from faster, cached responses for map tiles. The proxy can run as a standalone deployment, via Docker Compose, or locally in developer environments with or without Docker.
+The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public Overpass API surface while adding Redis-backed tile caching for amenity-focused JSON bounding-box (bbox) queries. It enables ToiletFinder clients to switch endpoints without behavioural changes when requesting amenities while benefiting from faster, cached responses for map tiles. The proxy can run as a standalone deployment, via Docker Compose, or locally in developer environments with or without Docker.
 
 ## 2. Architectural Overview
 - **Entry point:** `src/index.ts` builds and starts a Fastify server, wiring configuration, Redis connections, and route registration. Redis connectivity can be injected for testing.
-- **Routing:** `src/interpreter.ts` declares the `/api/*` routes, distinguishing cacheable Overpass requests from transparent pass-throughs. It enforces tile limits, applies conditional headers, and stamps cache metadata headers.
+- **Routing:** `src/interpreter.ts` declares the `/api/*` routes, validating amenity-focused `/api/interpreter` queries before executing the caching pipeline. It enforces tile limits, applies conditional headers, and stamps cache metadata headers.
 - **Caching layer:** `src/store.ts` encapsulates Redis read/write access, including TTL and stale-while-revalidate (SWR) handling via refresh locks.
 - **Query analysis:** `src/bbox.ts` extracts bbox tuples and detects JSON outputs, while `src/tiling.ts` converts bbox envelopes into geohash tiles.
-- **Upstream communication:** `src/upstream.ts` provides helpers to proxy arbitrary Overpass requests and to materialise per-tile JSON queries from bbox coordinates.
+- **Upstream communication:** `src/upstream.ts` provides helpers to proxy non-interpreter endpoints and to materialise amenity-scoped per-tile JSON queries from bbox coordinates.
 - **Response assembly:** `src/assemble.ts` deduplicates and merges cached tile payloads, retaining metadata and filtering by bbox.
 - **Supporting utilities:** `src/headers.ts` implements deterministic weak ETags and If-None-Match handling, `src/rateLimit.ts` offers a token-bucket primitive (currently unused but available for future upstream throttling), and `src/errors.ts` defines typed errors (e.g., `TooManyTilesError`).
 - **Logging:** `src/logger.ts` exposes the shared Pino logger instance configured for structured output.
 
 ## 3. Request Classification Flow
 1. **Body extraction:** Incoming `/api/interpreter` requests are normalised to a query string (supporting GET query parameters and POST payloads) before inspection.
-2. **Transparent bypass:** If no query exists, caching is disabled (`TRANSPARENT_ONLY`), or the Overpass query does not request JSON output, the request is proxied directly upstream with all headers and status codes preserved.
-3. **Bounding box detection:** When JSON output is requested, `extractBoundingBox` scans for `bbox:` directives or tuple literals, tolerating comments and whitespace.
-4. **Fallback to pass-through:** If no bbox is discovered, the request falls back to transparent proxying to guarantee correctness for complex or non-spatial queries.
+2. **Validation:** Requests must contain a query, opt into `out:json`, and include an amenity filter (`["amenity"...]`). Violations trigger HTTP 400 responses with descriptive errors.
+3. **Bounding box detection:** Valid amenity JSON queries are scanned by `extractBoundingBox`, which tolerates directives, tuple literals, comments, and whitespace.
+4. **Bounding box requirement:** Absence of a bbox results in HTTP 400 to ensure downstream caching logic always operates on spatially scoped queries.
 
 ### 3.1 End-to-End Runtime Flow
 ```mermaid
@@ -30,20 +30,22 @@ flowchart TD
     end
 
     subgraph RequestLifecycle
-        F["Inbound /api/* request"] --> G{"Match interpreter?"}
-        G -->|Yes| H["Normalise query/body"]
+        F["Inbound /api/* request"] --> G{"Interpreter endpoint?"}
         G -->|No| ProxyTransparent
-        H --> I{"Transparent only?"}
-        I -->|Yes| ProxyTransparent
-        I -->|No| J["Check for out:json"]
-        J -->|No| ProxyTransparent
-        J -->|Yes| K["Extract bbox (bbox.ts)"]
-        K --> L{"BBox found?"}
-        L -->|No| ProxyTransparent
-        L -->|Yes| M["Compute tiles (tiling.ts)"]
-        M --> N{"Tiles exceed MAX?"}
-        N -->|Yes| Err413["Throw TooManyTilesError"]
-        N -->|No| Lookup["Fetch tiles from Redis (store.ts)"]
+        G -->|Yes| H["Normalise query or body"]
+        H --> I{"Has query?"}
+        I -->|No| Err400Query["400 Missing query"]
+        I -->|Yes| J{"Requests out:json?"}
+        J -->|No| Err400Json["400 JSON required"]
+        J -->|Yes| K{"Contains amenity filter?"}
+        K -->|No| Err400Amenity["400 Amenity filter required"]
+        K -->|Yes| L["Extract bbox (bbox.ts)"]
+        L --> M{"BBox found?"}
+        M -->|No| Err400Bbox["400 Bounding box required"]
+        M -->|Yes| N["Compute tiles (tiling.ts)"]
+        N --> O{"Tiles exceed MAX?"}
+        O -->|Yes| Err413["Throw TooManyTilesError"]
+        O -->|No| Lookup["Fetch tiles from Redis (store.ts)"]
         Lookup --> P{"All tiles fresh?"}
         P -->|Yes| Assemble["Assemble payload (assemble.ts)"]
         P -->|No| FetchTiles["Fetch upstream tiles (upstream.ts)"]
@@ -51,8 +53,12 @@ flowchart TD
         Persist --> Assemble
     end
 
-    ProxyTransparent --> Upstream["Proxy upstream request (upstream.ts)"]
-    Err413 --> Response["Respond to client"]
+    ProxyTransparent --> Upstream["Proxy non-interpreter request (upstream.ts)"]
+    Err400Query --> Response["Respond to client"]
+    Err400Json --> Response
+    Err400Amenity --> Response
+    Err400Bbox --> Response
+    Err413 --> Response
     Assemble --> Headers["Generate headers (headers.ts)"]
     Headers --> Response
     Upstream --> Response
@@ -75,7 +81,7 @@ flowchart TD
 8. **Conditional delivery:** ETags are generated from the assembled JSON payload. Matching `If-None-Match` headers yield a 304 response with no body.
 
 ## 5. Transparent Proxy Behaviour
-- All non-cacheable `/api/interpreter` requests and every other `/api/*` endpoint (`/api/status`, `/api/timestamp`, `/api/timestamp/*`, `/api/kill_my_queries`, and arbitrary paths) are proxied verbatim.
+- Non-interpreter `/api/*` endpoints (`/api/status`, `/api/timestamp`, `/api/timestamp/*`, `/api/kill_my_queries`, and arbitrary paths) are proxied verbatim.
 - The proxy streams binary bodies without transformation, preserves upstream headers (excluding `host`), and relays upstream status codes. Errors contacting the upstream translate to HTTP 502 with a JSON error object.
 
 ## 6. Redis Data Model and SWR Locks
@@ -92,13 +98,12 @@ Environment-driven configuration is loaded at startup with sensible defaults:
 - `CACHE_TTL_SECONDS` and derived `SWR_SECONDS` (min 30s)
 - `TILE_PRECISION`
 - `MAX_TILES_PER_REQUEST`
-- `TRANSPARENT_ONLY`
 - `NODE_ENV`
 The `buildServer` helper allows tests to override any configuration or inject custom Redis clients.
 
 ## 8. Testing Strategy
 - **Unit tests (`src/tests/unit`)** cover bbox parsing, geohash tiling, cache store semantics (including TTL/SWR handling), header utilities, response assembly, and rate limiting.
-- **Integration tests (`src/tests/integration`)** exercise transparent pass-through, cache warm/hit cycles, stale refresh behaviour, ETag handling, endpoint parity, tile limit enforcement, and transparent-only mode. The harness can operate entirely in-process (default) or via Testcontainers (`USE_DOCKER=1`).
+- **Integration tests (`src/tests/integration`)** exercise cache warm/hit cycles, stale refresh behaviour, validation errors, ETag handling, endpoint parity, and tile limit enforcement. The harness can operate entirely in-process (default) or via Testcontainers (`USE_DOCKER=1`).
 - **Coverage gates:** Vitest configuration enforces ≥90% line coverage and ≥85% branch coverage. `npm run test:ci` runs the suite with coverage.
 
 ## 9. Deployment and Operations

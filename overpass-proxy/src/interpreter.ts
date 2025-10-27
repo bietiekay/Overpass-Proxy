@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type Redis from 'ioredis';
 
 import { combineResponses } from './assemble.js';
-import { extractBoundingBox, hasJsonOutput } from './bbox.js';
+import { extractBoundingBox, hasAmenityFilter, hasJsonOutput } from './bbox.js';
 import type { AppConfig } from './config.js';
 import { TooManyTilesError } from './errors.js';
 import { applyConditionalHeaders } from './headers.js';
@@ -60,7 +60,9 @@ const handleCacheable = async (
 ): Promise<void> => {
   const bbox = extractBoundingBox(query);
   if (!bbox) {
-    await proxyTransparent(request, reply, deps.config);
+    reply.code(400);
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    reply.send({ error: 'Bounding box required' });
     return;
   }
 
@@ -77,15 +79,15 @@ const handleCacheable = async (
 
   for (const tile of tiles) {
     const cachedTile = cached.get(tile.hash);
-      if (cachedTile) {
-        responses.push(cachedTile.payload.response);
-        if (cachedTile.stale) {
-          void deps.store
-            .withRefreshLock(tile, async () => {
-              const response = await fetchTile(deps.config, tile.bounds);
-              await deps.store.writeTile(tile, response);
-            })
-            .catch((error) => logger.warn({ err: error }, 'failed to refresh tile'));
+    if (cachedTile) {
+      responses.push(cachedTile.payload.response);
+      if (cachedTile.stale) {
+        void deps.store
+          .withRefreshLock(tile, async () => {
+            const response = await fetchTile(deps.config, tile.bounds);
+            await deps.store.writeTile(tile, response);
+          })
+          .catch((error) => logger.warn({ err: error }, 'failed to refresh tile'));
       }
       continue;
     }
@@ -116,8 +118,21 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
     url: '/api/interpreter',
     handler: async (request, reply) => {
       const query = requestBodyToQuery(request as InterpreterRequest);
-      if (!query || deps.config.transparentOnly || !hasJsonOutput(query)) {
-        await proxyTransparent(request, reply, deps.config);
+      if (!query) {
+        reply.code(400);
+        reply.send({ error: 'Query payload required' });
+        return;
+      }
+
+      if (!hasJsonOutput(query)) {
+        reply.code(400);
+        reply.send({ error: 'Only JSON queries are supported' });
+        return;
+      }
+
+      if (!hasAmenityFilter(query)) {
+        reply.code(400);
+        reply.send({ error: 'Amenity filter is required' });
         return;
       }
 
