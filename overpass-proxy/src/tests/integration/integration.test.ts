@@ -119,19 +119,19 @@ describe('integration', () => {
 });
 
 describe('validation', () => {
-  it('rejects queries without amenity filter', async () => {
+  it('proxies queries without amenity filter', async () => {
     await request(baseUrl)
       .post('/api/interpreter')
       .set('Content-Type', 'application/x-www-form-urlencoded')
       .send(formBody('[out:json];node(1,1,2,2);out;'))
-      .expect(400);
+      .expect(200);
   });
 
-  it('rejects non-json queries', async () => {
+  it('proxies non-json queries', async () => {
     await request(baseUrl)
       .post('/api/interpreter')
       .set('Content-Type', 'application/x-www-form-urlencoded')
       .send(formBody('[out:xml];node["amenity"](1,1,2,2);out;'))
-      .expect(400);
+      .expect(200);
   });
 });

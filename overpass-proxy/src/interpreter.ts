@@ -125,15 +125,9 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
         return;
       }
 
-      if (!hasJsonOutput(query)) {
-        reply.code(400);
-        reply.send({ error: 'Only JSON queries are supported' });
-        return;
-      }
-
-      if (!hasAmenityFilter(query)) {
-        reply.code(400);
-        reply.send({ error: 'Amenity filter is required' });
+      // Proxy any non-cacheable requests upstream to keep full compatibility
+      if (!hasJsonOutput(query) || !hasAmenityFilter(query)) {
+        await proxyTransparent(request, reply, deps.config);
         return;
       }
 
