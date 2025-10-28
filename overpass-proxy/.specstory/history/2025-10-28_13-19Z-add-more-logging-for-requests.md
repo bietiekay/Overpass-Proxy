@@ -177,3 +177,42 @@ Summary:
 
 ---
 
+_**User (2025-10-28 08:42Z)**_
+
+describe and commit
+
+---
+
+_**Assistant (default)**_
+
+
+
+---
+
+I'll commit the logging changes with a clear conventional message.
+
+---
+
+Tool use: **run_terminal_cmd**
+
+```bash
+cd /home/bietiekay/code/ToiletFinder/overpass-proxy && git add -A && git commit -m "feat(logging): log incoming requests and safe-summarized POST bodies\n\n- Add onRequest hook to log method, URL, headers, and remote IP\n- Add preValidation hook to summarize POST bodies (kind, size, 1KB preview)\n- Uses structured logs via Fastify/Pino; avoids dumping full large bodies\n\nThis helps trace incoming traffic and diagnose payload-related issues without excessive log noise."
+```
+
+```
+[master de25814] feat(logging): log incoming requests and safe-summarized POST bodies\n\n- Add onRequest hook to log method, URL, headers, and remote IP\n- Add preValidation hook to summarize POST bodies (kind, size, 1KB preview)\n- Uses structured logs via Fastify/Pino; avoids dumping full large bodies\n\nThis helps trace incoming traffic and diagnose payload-related issues without excessive log noise.
+ 3 files changed, 259 insertions(+), 1 deletion(-)
+ create mode 100644 overpass-proxy/.specstory/history/2025-10-28_13-19Z-add-more-logging-for-requests.md
+
+```
+
+---
+
+Committed.
+
+Summary:
+- Conventional commit: feat(logging): log incoming requests and safe-summarized POST bodies.
+- Includes request-level logging and 1KB POST body previews to aid debugging without noisy dumps.
+
+---
+

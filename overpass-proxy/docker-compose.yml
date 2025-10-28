@@ -5,7 +5,7 @@ services:
     environment:
       PORT: 8080
       UPSTREAM_URL: https://overpass.miataru.com/api/interpreter
-      REDIS_URL: redis://127.0.0.1:6380
+      REDIS_URL: redis://redis:6379
     ports:
       - "127.0.0.1:5002:8080"
     depends_on:
