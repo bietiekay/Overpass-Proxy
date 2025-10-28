@@ -29,6 +29,10 @@ export class InMemoryRedis extends EventEmitter {
     return keys.map((key) => this.store.get(key) ?? null);
   }
 
+  async get(key: string): Promise<string | null> {
+    return this.store.get(key) ?? null;
+  }
+
   async del(key: string): Promise<number> {
     const existed = this.store.delete(key);
     const timeout = this.timeouts.get(key);
