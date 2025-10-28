@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { extractBoundingBox, hasAmenityFilter, hasJsonOutput } from '../../bbox.js';
+import {
+  extractAmenityValue,
+  extractBoundingBox,
+  hasAmenityFilter,
+  hasJsonOutput
+} from '../../bbox.js';
 
 describe('extractBoundingBox', () => {
   it('extracts bbox from tuple syntax', () => {
@@ -53,5 +58,27 @@ describe('hasAmenityFilter', () => {
 
   it('returns false when amenity absent', () => {
     expect(hasAmenityFilter('node["shop"];')).toBe(false);
+  });
+});
+
+describe('extractAmenityValue', () => {
+  it('returns amenity value from double-quoted filter', () => {
+    expect(extractAmenityValue('node["amenity"="drinking_water"];')).toBe('drinking_water');
+  });
+
+  it('returns amenity value from single-quoted filter', () => {
+    expect(extractAmenityValue("node['amenity'='bicycle_parking'];")).toBe('bicycle_parking');
+  });
+
+  it('returns amenity value from unquoted filter', () => {
+    expect(extractAmenityValue('node[amenity=cafe];')).toBe('cafe');
+  });
+
+  it('trims whitespace around the value', () => {
+    expect(extractAmenityValue('node[ amenity =  bar ];')).toBe('bar');
+  });
+
+  it('returns null when no amenity value specified', () => {
+    expect(extractAmenityValue('node["amenity"];')).toBeNull();
   });
 });

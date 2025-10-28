@@ -5,7 +5,7 @@ The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public
 
 ## 2. Architectural Overview
 - **Entry point:** `src/index.ts` builds and starts a Fastify server, wiring configuration, Redis connections, and route registration. Redis connectivity can be injected for testing.
-- **Routing:** `src/interpreter.ts` declares the `/api/*` routes, validating amenity-focused `/api/interpreter` queries before executing the caching pipeline. It enforces tile limits, applies conditional headers, and stamps cache metadata headers.
+- **Routing:** `src/interpreter.ts` declares the `/api/*` routes, validating amenity-focused `/api/interpreter` queries before executing the caching pipeline. It extracts the requested amenity type from the Overpass query, enforces tile limits, applies conditional headers, and stamps cache metadata headers.
 - **Caching layer:** `src/store.ts` encapsulates Redis read/write access, including TTL and stale-while-revalidate (SWR) handling via refresh locks.
 - **Query analysis:** `src/bbox.ts` extracts bbox tuples and detects JSON outputs, while `src/tiling.ts` converts bbox envelopes into geohash tiles.
 - **Upstream communication:** `src/upstream.ts` provides helpers to proxy non-interpreter endpoints and to materialise amenity-scoped per-tile JSON queries from bbox coordinates.
@@ -15,7 +15,7 @@ The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public
 
 ## 3. Request Classification Flow
 1. **Body extraction:** Incoming `/api/interpreter` requests are normalised to a query string (supporting GET query parameters and POST payloads) before inspection.
-2. **Validation:** Requests must contain a query, opt into `out:json`, and include an amenity filter (`["amenity"...]`). Violations trigger HTTP 400 responses with descriptive errors.
+2. **Validation:** Requests must contain a query, opt into `out:json`, and include an amenity filter (`["amenity"...]`). Violations trigger HTTP 400 responses with descriptive errors, while successful parses capture the amenity name for cache segmentation and upstream fetches.
 3. **Bounding box detection:** Valid amenity JSON queries are scanned by `extractBoundingBox`, which tolerates directives, tuple literals, comments, and whitespace.
 4. **Bounding box requirement:** Absence of a bbox results in HTTP 400 to ensure downstream caching logic always operates on spatially scoped queries.
 
@@ -75,8 +75,8 @@ flowchart TD
 2. **Tile budget enforcement:** Requests requiring more than `MAX_TILES_PER_REQUEST` tiles raise a `TooManyTilesError`, returning HTTP 413 (default limit 1024 tiles so ToiletFinder’s ~70 km viewport and preload flows stay cacheable).
 3. **Cache lookup:** For each tile, Redis is queried in bulk. Stored payloads include `response`, `fetchedAt`, and `expiresAt` timestamps.
 4. **Stale tracking:** Tiles past their TTL are marked `stale` but still served immediately while triggering asynchronous refreshes guarded by a per-tile lock (SWR window `SWR_SECONDS`).
-5. **Upstream fetch:** Missing tiles are fetched individually by issuing the canonical Overpass multi-entity bbox query (`node`, `way`, `relation`) via POST `application/x-www-form-urlencoded`.
-6. **Persistence:** Fresh tile responses are persisted with a TTL covering both the primary cache duration and SWR window.
+5. **Upstream fetch:** Missing tiles are fetched individually by issuing the canonical Overpass multi-entity bbox query (`node`, `way`, `relation`) via POST `application/x-www-form-urlencoded`, scoped to the specific amenity type supplied by the client.
+6. **Persistence:** Fresh tile responses are persisted with a TTL covering both the primary cache duration and SWR window, namespaced by amenity.
 7. **Assembly:** All tile responses (cached or freshly fetched) are merged, deduplicated by `(type,id)`, filtered against the original bbox, and returned with `Content-Type: application/json`. The proxy also emits `X-Cache` headers (`HIT`, `STALE`, or `MISS`).
 8. **Conditional delivery:** ETags are generated from the assembled JSON payload. Matching `If-None-Match` headers yield a 304 response with no body.
 
@@ -85,10 +85,10 @@ flowchart TD
 - The proxy streams binary bodies without transformation, preserves upstream headers (excluding `host`), and relays upstream status codes. Errors contacting the upstream translate to HTTP 502 with a JSON error object.
 
 ## 6. Redis Data Model and SWR Locks
-- **Primary key format:** `tile:<geohash>`.
+- **Primary key format:** `tile:<amenity>:<geohash>` where `<amenity>` reflects the normalised amenity requested by the client.
 - **Payload:** JSON string representing `{ response, fetchedAt, expiresAt }`, where `response` mirrors the Overpass JSON envelope.
 - **TTL strategy:** Redis `SET` with PX expiry of `(CACHE_TTL_SECONDS + SWR_SECONDS)` milliseconds, ensuring stale entries remain addressable for refresh locking.
-- **Refresh locks:** Temporary keys (`tile:<geohash>:lock`) guard background refreshes for stale tiles, preventing duplicate upstream fetches during the SWR window.
+- **Refresh locks:** Temporary keys (`tile:<amenity>:<geohash>:lock`) guard background refreshes for stale tiles, preventing duplicate upstream fetches during the SWR window.
 
 ## 7. Configuration Surface
 Environment-driven configuration is loaded at startup with sensible defaults:

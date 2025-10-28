@@ -1,3 +1,4 @@
+import type Redis from 'ioredis';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -6,18 +7,22 @@ import { createTestEnvironment } from './testcontainers.js';
 
 const jsonQuery = '[out:json];node["amenity"="toilets"](52.5,13.3,52.6,13.4);out;';
 const formBody = (query: string) => new URLSearchParams({ data: query }).toString();
+const drinkingWaterQuery =
+  '[out:json];node["amenity"="drinking_water"](52.5,13.3,52.6,13.4);out;';
 
 let stopEnv: (() => Promise<void>) | undefined;
 let baseUrl: string;
 let hits: string[];
 let closeMain: (() => Promise<void>) | undefined;
+let redisClient: Redis | undefined;
 
 beforeAll(async () => {
   const env = await createTestEnvironment();
   stopEnv = env.stop;
   hits = env.hits;
+  redisClient = env.redis;
 
-  await env.redis.flushall();
+  await redisClient.flushall();
 
   const { app } = buildServer({
     configOverrides: {
@@ -49,7 +54,40 @@ afterAll(async () => {
 });
 
 describe('integration', () => {
+  it('keeps caches separate for different amenity types', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(drinkingWaterQuery))
+      .expect(200);
+
+    const hitsAfterFirst = hits.length;
+    expect(hitsAfterFirst).toBeGreaterThan(0);
+    expect(hits[0]).toMatch(/drinking_water$/);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(drinkingWaterQuery))
+      .expect(200);
+
+    expect(hits.length).toBe(hitsAfterFirst);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    expect(hits.some((entry) => entry.endsWith(':drinking_water'))).toBe(true);
+    expect(hits.some((entry) => entry.endsWith(':toilets'))).toBe(true);
+  });
+
   it('caches json bbox requests', async () => {
+    await redisClient?.flushall();
     hits.splice(0, hits.length);
 
     await request(baseUrl)
@@ -71,6 +109,7 @@ describe('integration', () => {
   });
 
   it('returns 304 when etag matches', async () => {
+    await redisClient?.flushall();
     const first = await request(baseUrl)
       .post('/api/interpreter')
       .set('Content-Type', 'application/x-www-form-urlencoded')
@@ -89,6 +128,7 @@ describe('integration', () => {
   });
 
   it('enforces MAX_TILES_PER_REQUEST', async () => {
+    await redisClient?.flushall();
     const env = await createTestEnvironment();
     await env.redis.flushall();
 

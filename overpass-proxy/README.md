@@ -1,6 +1,6 @@
 # Overpass Proxy
 
-Overpass API proxy specialised for amenity lookups with Redis-backed tile caching for JSON bounding-box queries. The proxy mirrors the official Overpass API surface so existing clients (like the ToiletFinder iOS app) can switch endpoints without any behavioural changes when querying amenities.
+Overpass API proxy specialised for amenity lookups with Redis-backed tile caching for JSON bounding-box queries. The proxy mirrors the official Overpass API surface so existing clients (like the ToiletFinder iOS app) can switch endpoints without any behavioural changes when querying amenities, while respecting whichever amenity type the caller encodes in the Overpass query.
 
 ## Summary
 
@@ -16,8 +16,8 @@ adding Redis-backed geohash tile caching for amenity-focused JSON bounding-box q
 ## Features
 
 - Fastify-based HTTP server exposing the `/api/*` Overpass endpoints
-- Strict amenity-only handling for `/api/interpreter`; non-JSON or non-amenity queries are rejected with helpful errors
-- Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh
+- Strict amenity-only handling for `/api/interpreter`; non-JSON or non-amenity queries are rejected with helpful errors, and recognised amenity filters are preserved end-to-end
+- Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh, segmented by requested amenity type
 - Structured logging via Pino
 - Comprehensive Vitest unit and integration test suites
 - GitHub Actions CI workflow running linting and tests with coverage
@@ -102,7 +102,7 @@ npm run test:ci      # coverage-enabled run without Docker
 # JSON amenity bbox request (cacheable)
 curl -X POST http://localhost:8080/api/interpreter \
   -H 'Content-Type: application/x-www-form-urlencoded' \
-  --data '[out:json];node["amenity"="toilets"](52.5,13.3,52.6,13.4);out;'
+  --data '[out:json];node["amenity"="cafe"](52.5,13.3,52.6,13.4);out;'
 
 # Validation error when amenity filter missing
 curl -X POST http://localhost:8080/api/interpreter \

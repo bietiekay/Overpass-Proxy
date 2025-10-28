@@ -18,4 +18,4 @@ export const tilesForBoundingBox = (bbox: BoundingBox, precision: number): TileI
   return Array.from(unique).map((hash) => ({ hash, bounds: boundsForHash(hash) }));
 };
 
-export const tileKey = (hash: string): string => `tile:${hash}`;
+export const tileKey = (hash: string, amenity: string): string => `tile:${amenity}:${hash}`;

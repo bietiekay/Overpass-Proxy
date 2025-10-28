@@ -3,7 +3,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
 
 import { combineResponses } from './assemble.js';
-import { extractBoundingBox, hasAmenityFilter, hasJsonOutput } from './bbox.js';
+import {
+  extractAmenityValue,
+  extractBoundingBox,
+  hasAmenityFilter,
+  hasJsonOutput
+} from './bbox.js';
 import type { AppConfig } from './config.js';
 import { TooManyTilesError } from './errors.js';
 import { applyConditionalHeaders } from './headers.js';
@@ -54,11 +59,72 @@ const requestBodyToQuery = (request: InterpreterRequest): string | null => {
   return null;
 };
 
+const extractAmenityPreference = (request: InterpreterRequest, query: string): string => {
+  const fromQuery = extractAmenityValue(query);
+  if (fromQuery) {
+    return fromQuery;
+  }
+
+  const normalise = (value: unknown): string | null => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const normalised = normalise(item);
+        if (normalised) {
+          return normalised;
+        }
+      }
+    }
+    return null;
+  };
+
+  if (request.method === 'GET') {
+    const queryParams = request.query as Record<string, unknown>;
+    const maybe = normalise(queryParams?.amenity);
+    if (maybe) {
+      return maybe;
+    }
+  }
+
+  if (typeof request.body === 'string') {
+    try {
+      const params = new URLSearchParams(request.body);
+      const maybe = params.get('amenity');
+      if (maybe && maybe.trim().length > 0) {
+        return maybe.trim();
+      }
+    } catch {
+      // ignore parsing errors
+    }
+  } else if (Buffer.isBuffer(request.body)) {
+    try {
+      const params = new URLSearchParams(request.body.toString('utf8'));
+      const maybe = params.get('amenity');
+      if (maybe && maybe.trim().length > 0) {
+        return maybe.trim();
+      }
+    } catch {
+      // ignore parsing errors
+    }
+  } else if (request.body && typeof request.body === 'object') {
+    const maybe = normalise((request.body as Record<string, unknown>).amenity);
+    if (maybe) {
+      return maybe;
+    }
+  }
+
+  return 'toilets';
+};
+
 const handleCacheable = async (
   request: InterpreterRequest,
   reply: FastifyReply,
   deps: InterpreterDeps,
-  query: string
+  query: string,
+  amenity: string
 ): Promise<void> => {
   const bbox = extractBoundingBox(query);
   if (!bbox) {
@@ -70,7 +136,8 @@ const handleCacheable = async (
 
   logger.info(
     {
-      bbox: { west: bbox.west, south: bbox.south, east: bbox.east, north: bbox.north }
+      bbox: { west: bbox.west, south: bbox.south, east: bbox.east, north: bbox.north },
+      amenity
     },
     'cacheable request with bbox'
   );
@@ -80,7 +147,7 @@ const handleCacheable = async (
     throw new TooManyTilesError(`Request requires ${tiles.length} tiles`);
   }
 
-  const cached = await deps.store.readTiles(tiles);
+  const cached = await deps.store.readTiles(tiles, amenity);
   const missing = tiles.filter((tile) => !cached.has(tile.hash));
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
 
@@ -118,7 +185,11 @@ const handleCacheable = async (
 
   const fineTilesByHash = new Map(tiles.map((t) => [t.hash, t] as const));
 
-  const writeFineTilesFromCoarse = async (coarseBounds: { south: number; west: number; north: number; east: number }, response: any, fineHashes: string[]) => {
+  const writeFineTilesFromCoarse = async (
+    coarseBounds: { south: number; west: number; north: number; east: number },
+    response: any,
+    fineHashes: string[]
+  ) => {
     for (const hash of fineHashes) {
       const fine = fineTilesByHash.get(hash);
       if (!fine) continue;
@@ -126,7 +197,7 @@ const handleCacheable = async (
         ...response,
         elements: filterElementsByBbox(response.elements, fine.bounds)
       };
-      await deps.store.writeTile(fine, filtered);
+      await deps.store.writeTile(fine, filtered, amenity);
     }
   };
 
@@ -204,8 +275,8 @@ const handleCacheable = async (
       const representative = fineTilesByHash.get(group.fineHashes[0]);
       if (!representative) return;
       await deps.store
-        .withRefreshLock(representative, async () => {
-          const response = await fetchTile(deps.config, group.bounds);
+        .withRefreshLock(representative, amenity, async () => {
+          const response = await fetchTile(deps.config, group.bounds, amenity);
           await writeFineTilesFromCoarse(group.bounds, response, group.fineHashes);
         })
         .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
@@ -218,8 +289,8 @@ const handleCacheable = async (
   for (const group of missingGroups) {
     const representative = fineTilesByHash.get(group.fineHashes[0]);
     if (!representative) continue;
-    const outcome = await deps.store.withMissLock(representative, async () => {
-      const response = await fetchTile(deps.config, group.bounds);
+    const outcome = await deps.store.withMissLock(representative, amenity, async () => {
+      const response = await fetchTile(deps.config, group.bounds, amenity);
       await writeFineTilesFromCoarse(group.bounds, response, group.fineHashes);
     });
     
@@ -227,7 +298,7 @@ const handleCacheable = async (
     for (const hash of group.fineHashes) {
       const fine = fineTilesByHash.get(hash);
       if (!fine) continue;
-      const fresh = await deps.store.readTile(fine);
+      const fresh = await deps.store.readTile(fine, amenity);
       if (fresh) {
         responses.push(fresh.payload.response);
       } else {
@@ -270,7 +341,8 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
       }
 
       try {
-        await handleCacheable(request as InterpreterRequest, reply, deps, query);
+        const amenity = extractAmenityPreference(request as InterpreterRequest, query);
+        await handleCacheable(request as InterpreterRequest, reply, deps, query, amenity);
       } catch (error) {
         if (error instanceof TooManyTilesError) {
           reply.code(413);

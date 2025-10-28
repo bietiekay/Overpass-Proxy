@@ -7,20 +7,27 @@ import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
 import type { OverpassResponse } from './store.js';
 
-export const buildTileQuery = (bbox: BoundingBox): string => `[
+export const buildTileQuery = (bbox: BoundingBox, amenity: string): string => {
+  const escapedAmenity = amenity.replace(/"/g, '\\"');
+  return `[
   out:json][timeout:120];
 (
-  node["amenity"="toilets"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
-  way["amenity"="toilets"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
-  relation["amenity"="toilets"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
+  node["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
+  way["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
+  relation["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
 );
 out body meta;
 >;
 out skel qt;`;
+};
 
-export const fetchTile = async (config: AppConfig, bbox: BoundingBox): Promise<OverpassResponse> => {
-  const query = buildTileQuery(bbox);
-  logger.info({ bbox }, 'upstream fetch start');
+export const fetchTile = async (
+  config: AppConfig,
+  bbox: BoundingBox,
+  amenity: string
+): Promise<OverpassResponse> => {
+  const query = buildTileQuery(bbox, amenity);
+  logger.info({ bbox, amenity }, 'upstream fetch start');
   const response = await got.post(config.upstreamUrl, {
     body: new URLSearchParams({ data: query }).toString(),
     headers: {
@@ -28,7 +35,7 @@ export const fetchTile = async (config: AppConfig, bbox: BoundingBox): Promise<O
     },
     timeout: { request: 120000 }
   });
-  logger.info({ bbox }, 'upstream fetch done');
+  logger.info({ bbox, amenity }, 'upstream fetch done');
   return JSON.parse(response.body) as OverpassResponse;
 };
 

@@ -21,11 +21,11 @@ const normaliseTuple = (tuple: string): BoundingBox | null => {
   return { south, west, north, east };
 };
 
+const stripComments = (query: string): string =>
+  query.replace(/\/[/*].*?\*\//gs, '').replace(/--.*$/gm, '').replace(/#/gm, '');
+
 export const extractBoundingBox = (query: string): BoundingBox | null => {
-  const cleaned = query
-    .replace(/\/[/*].*?\*\//gs, '')
-    .replace(/--.*$/gm, '')
-    .replace(/#/gm, '');
+  const cleaned = stripComments(query);
 
   const bboxDirective = cleaned.match(/\[\s*bbox\s*:\s*([^\]]+)\]/i);
   if (bboxDirective) {
@@ -50,4 +50,19 @@ export const extractBoundingBox = (query: string): BoundingBox | null => {
 
 export const hasJsonOutput = (query: string): boolean => /out\s*:\s*json/i.test(query);
 
-export const hasAmenityFilter = (query: string): boolean => /\[\s*(?:"amenity"|amenity)/i.test(query);
+export const hasAmenityFilter = (query: string): boolean => /\[\s*(?:"amenity"|'amenity'|amenity)/i.test(query);
+
+export const extractAmenityValue = (query: string): string | null => {
+  const cleaned = stripComments(query);
+  const match = cleaned.match(
+    /\[\s*(?:"amenity"|'amenity'|amenity)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]"';\s]+))\s*\]/i
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  const value = match[1] ?? match[2] ?? match[3] ?? '';
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};

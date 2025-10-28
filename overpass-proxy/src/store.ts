@@ -39,11 +39,14 @@ export interface TileStoreOptions {
   swrSeconds: number;
 }
 
+const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
+
 export class TileStore {
   constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {}
 
-  public async readTiles(tiles: TileInfo[]): Promise<Map<string, CachedTile>> {
-    const keys = tiles.map((tile) => tileKey(tile.hash));
+  public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {
+    const amenitySuffix = amenityKey(amenity);
+    const keys = tiles.map((tile) => tileKey(tile.hash, amenitySuffix));
     const values = await this.redis.mget(keys);
     const now = Date.now();
 
@@ -79,7 +82,8 @@ export class TileStore {
         tiles: tiles.map((t) => t.hash),
         hits,
         misses,
-        stale: staleCount
+        stale: staleCount,
+        amenity: amenitySuffix
       },
       'redis tile read'
     );
@@ -87,7 +91,7 @@ export class TileStore {
     return result;
   }
 
-  public async writeTile(tile: TileInfo, response: OverpassResponse): Promise<void> {
+  public async writeTile(tile: TileInfo, response: OverpassResponse, amenity: string): Promise<void> {
     const now = Date.now();
     const payload: OverpassTilePayload = {
       response,
@@ -95,21 +99,28 @@ export class TileStore {
       expiresAt: now + this.options.ttlSeconds * 1000
     };
 
-    await this.redis.set(tileKey(tile.hash), JSON.stringify(payload), 'PX', (this.options.ttlSeconds + this.options.swrSeconds) * 1000);
+    const amenitySuffix = amenityKey(amenity);
+    await this.redis.set(
+      tileKey(tile.hash, amenitySuffix),
+      JSON.stringify(payload),
+      'PX',
+      (this.options.ttlSeconds + this.options.swrSeconds) * 1000
+    );
 
     logger.info(
       {
         tile: tile.hash,
         expiresAt: payload.expiresAt,
         ttlSeconds: this.options.ttlSeconds,
-        swrSeconds: this.options.swrSeconds
+        swrSeconds: this.options.swrSeconds,
+        amenity: amenitySuffix
       },
       'redis tile write'
     );
   }
 
-  public async readTile(tile: TileInfo): Promise<CachedTile | undefined> {
-    const key = tileKey(tile.hash);
+  public async readTile(tile: TileInfo, amenity: string): Promise<CachedTile | undefined> {
+    const key = tileKey(tile.hash, amenityKey(amenity));
     const value = await this.redis.get(key);
     if (!value) {
       return undefined;
@@ -123,25 +134,32 @@ export class TileStore {
     }
   }
 
-  public async withRefreshLock(tile: TileInfo, handler: () => Promise<void>): Promise<void> {
-    const lockKey = `${tileKey(tile.hash)}:lock`;
+  public async withRefreshLock(tile: TileInfo, amenity: string, handler: () => Promise<void>): Promise<void> {
+    const keyAmenity = amenityKey(amenity);
+    const lockKey = `${tileKey(tile.hash, keyAmenity)}:lock`;
     const acquired = await this.redis.set(lockKey, '1', 'PX', this.options.swrSeconds * 1000, 'NX');
     if (!acquired) {
-      logger.debug({ tile: tile.hash }, 'redis refresh lock skipped');
+      logger.debug({ tile: tile.hash, amenity: keyAmenity }, 'redis refresh lock skipped');
       return;
     }
 
-    logger.debug({ tile: tile.hash }, 'redis refresh lock acquired');
+    logger.debug({ tile: tile.hash, amenity: keyAmenity }, 'redis refresh lock acquired');
     try {
       await handler();
     } finally {
       await this.redis.del(lockKey);
-      logger.debug({ tile: tile.hash }, 'redis refresh lock released');
+      logger.debug({ tile: tile.hash, amenity: keyAmenity }, 'redis refresh lock released');
     }
   }
 
-  public async withMissLock(tile: TileInfo, handler: () => Promise<void>, ttlMs = 10000): Promise<'fetched' | 'waited'> {
-    const inflightKey = `${tileKey(tile.hash)}:inflight`;
+  public async withMissLock(
+    tile: TileInfo,
+    amenity: string,
+    handler: () => Promise<void>,
+    ttlMs = 10000
+  ): Promise<'fetched' | 'waited'> {
+    const keyAmenity = amenityKey(amenity);
+    const inflightKey = `${tileKey(tile.hash, keyAmenity)}:inflight`;
     const acquired = await this.redis.set(inflightKey, '1', 'PX', ttlMs, 'NX');
     if (!acquired) {
       // Another request is fetching this tile. Wait briefly for the tile to appear.
@@ -149,7 +167,7 @@ export class TileStore {
       // simple poll loop with backoff
       let delay = 50;
       while (Date.now() < deadline) {
-        const existing = await this.readTile(tile);
+        const existing = await this.readTile(tile, amenity);
         if (existing) {
           return 'waited';
         }

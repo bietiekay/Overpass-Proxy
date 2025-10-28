@@ -16,15 +16,15 @@ const tile: TileInfo = {
 describe('TileStore', () => {
   it('writes and reads tiles', async () => {
     const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 60, swrSeconds: 30 });
-    await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 });
-    const values = await store.readTiles([tile]);
+    await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 }, 'toilets');
+    const values = await store.readTiles([tile], 'toilets');
     expect(values.get(tile.hash)?.payload.response.generator).toBe('test');
   });
 
   it('marks tiles as stale after ttl', async () => {
     const store = new TileStore(redis as unknown as Redis, { ttlSeconds: -1, swrSeconds: 30 });
-    await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 });
-    const values = await store.readTiles([tile]);
+    await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 }, 'toilets');
+    const values = await store.readTiles([tile], 'toilets');
     expect(values.get(tile.hash)?.stale).toBe(true);
   });
 });

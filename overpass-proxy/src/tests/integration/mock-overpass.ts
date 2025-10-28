@@ -2,9 +2,9 @@ import formbody from '@fastify/formbody';
 import Fastify, { type FastifyRequest } from 'fastify';
 
 import type { BoundingBox } from '../../bbox.js';
-import { extractBoundingBox, hasAmenityFilter, hasJsonOutput } from '../../bbox.js';
+import { extractAmenityValue, extractBoundingBox } from '../../bbox.js';
 
-const buildResponse = (bbox: BoundingBox) => ({
+const buildResponse = (bbox: BoundingBox, amenity: string) => ({
   version: 0.6,
   generator: 'mock-overpass',
   osm3s: {
@@ -16,14 +16,14 @@ const buildResponse = (bbox: BoundingBox) => ({
       id: 1,
       lat: bbox.south,
       lon: bbox.west,
-      tags: { amenity: 'toilets', mock: 'true' }
+      tags: { amenity, mock: 'true' }
     },
     {
       type: 'node',
       id: 2,
       lat: bbox.north,
       lon: bbox.east,
-      tags: { amenity: 'toilets', mock: 'true' }
+      tags: { amenity, mock: 'true' }
     }
   ]
 });
@@ -51,10 +51,16 @@ export const createMockOverpass = () => {
       return;
     }
 
-    hits.push(`${bbox.south},${bbox.west},${bbox.north},${bbox.east}`);
+    const amenity =
+      extractAmenityValue(query) ??
+      (typeof formBody?.amenity === 'string' && formBody.amenity.trim().length > 0
+        ? formBody.amenity.trim()
+        : 'toilets');
+
+    hits.push(`${bbox.south},${bbox.west},${bbox.north},${bbox.east}:${amenity}`);
     reply.type('application/json');
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    reply.send(buildResponse(bbox));
+    reply.send(buildResponse(bbox, amenity));
   });
 
   return {
