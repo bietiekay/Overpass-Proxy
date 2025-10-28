@@ -20,6 +20,7 @@ out skel qt;`;
 
 export const fetchTile = async (config: AppConfig, bbox: BoundingBox): Promise<OverpassResponse> => {
   const query = buildTileQuery(bbox);
+  logger.info({ bbox }, 'upstream fetch start');
   const response = await got.post(config.upstreamUrl, {
     body: new URLSearchParams({ data: query }).toString(),
     headers: {
@@ -27,7 +28,7 @@ export const fetchTile = async (config: AppConfig, bbox: BoundingBox): Promise<O
     },
     timeout: { request: 120000 }
   });
-
+  logger.info({ bbox }, 'upstream fetch done');
   return JSON.parse(response.body) as OverpassResponse;
 };
 

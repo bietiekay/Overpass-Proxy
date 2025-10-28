@@ -108,6 +108,21 @@ export class TileStore {
     );
   }
 
+  public async readTile(tile: TileInfo): Promise<CachedTile | undefined> {
+    const key = tileKey(tile.hash);
+    const value = await this.redis.get(key);
+    if (!value) {
+      return undefined;
+    }
+    try {
+      const payload = JSON.parse(value) as OverpassTilePayload;
+      const stale = payload.expiresAt < Date.now();
+      return { tile, payload, stale };
+    } catch {
+      return undefined;
+    }
+  }
+
   public async withRefreshLock(tile: TileInfo, handler: () => Promise<void>): Promise<void> {
     const lockKey = `${tileKey(tile.hash)}:lock`;
     const acquired = await this.redis.set(lockKey, '1', 'PX', this.options.swrSeconds * 1000, 'NX');
@@ -122,6 +137,33 @@ export class TileStore {
     } finally {
       await this.redis.del(lockKey);
       logger.debug({ tile: tile.hash }, 'redis refresh lock released');
+    }
+  }
+
+  public async withMissLock(tile: TileInfo, handler: () => Promise<void>, ttlMs = 10000): Promise<'fetched' | 'waited'> {
+    const inflightKey = `${tileKey(tile.hash)}:inflight`;
+    const acquired = await this.redis.set(inflightKey, '1', 'PX', ttlMs, 'NX');
+    if (!acquired) {
+      // Another request is fetching this tile. Wait briefly for the tile to appear.
+      const deadline = Date.now() + ttlMs;
+      // simple poll loop with backoff
+      let delay = 50;
+      while (Date.now() < deadline) {
+        const existing = await this.readTile(tile);
+        if (existing) {
+          return 'waited';
+        }
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(delay * 2, 400);
+      }
+      return 'waited';
+    }
+
+    try {
+      await handler();
+      return 'fetched';
+    } finally {
+      await this.redis.del(inflightKey);
     }
   }
 }

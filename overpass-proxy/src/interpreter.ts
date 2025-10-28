@@ -84,25 +84,53 @@ const handleCacheable = async (
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
 
   const responses = [];
+  // limit concurrent stale refreshes per request
+  const maxConcurrentRefreshes = 8;
+  let activeRefreshes = 0;
+  const refreshQueue: Array<() => void> = [];
+  const scheduleRefresh = async (fn: () => Promise<void>) => {
+    if (activeRefreshes >= maxConcurrentRefreshes) {
+      await new Promise<void>((resolve) => refreshQueue.push(resolve));
+    }
+    activeRefreshes += 1;
+    try {
+      await fn();
+    } finally {
+      activeRefreshes -= 1;
+      const next = refreshQueue.shift();
+      if (next) next();
+    }
+  };
 
   for (const tile of tiles) {
     const cachedTile = cached.get(tile.hash);
     if (cachedTile) {
       responses.push(cachedTile.payload.response);
       if (cachedTile.stale) {
-        void deps.store
-          .withRefreshLock(tile, async () => {
-            const response = await fetchTile(deps.config, tile.bounds);
-            await deps.store.writeTile(tile, response);
-          })
-          .catch((error) => logger.warn({ err: error }, 'failed to refresh tile'));
+        void scheduleRefresh(async () => {
+          await deps.store
+            .withRefreshLock(tile, async () => {
+              const response = await fetchTile(deps.config, tile.bounds);
+              await deps.store.writeTile(tile, response);
+            })
+            .catch((error) => logger.warn({ err: error }, 'failed to refresh tile'));
+        });
       }
       continue;
     }
 
-    const response = await fetchTile(deps.config, tile.bounds);
-    await deps.store.writeTile(tile, response);
-    responses.push(response);
+    // Miss: coalesce concurrent fetches using miss-lock; another request might be fetching it
+    const outcome = await deps.store.withMissLock(tile, async () => {
+      const response = await fetchTile(deps.config, tile.bounds);
+      await deps.store.writeTile(tile, response);
+    });
+    // After miss-lock, read from cache to use the payload (either just written or by other request)
+    const fresh = await deps.store.readTile(tile);
+    if (fresh) {
+      responses.push(fresh.payload.response);
+    } else {
+      logger.warn({ tile: tile.hash, outcome }, 'tile missing after miss-lock');
+    }
   }
 
   const assembled = combineResponses(responses, bbox);
