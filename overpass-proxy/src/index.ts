@@ -1,5 +1,5 @@
 import formbody from '@fastify/formbody';
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import { Redis } from 'ioredis';
 
 import { loadConfig, type AppConfig } from './config.js';
@@ -17,6 +17,45 @@ export const buildServer = (options: BuildServerOptions = {}) => {
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
   const app = Fastify({ logger: true });
   void app.register(formbody);
+
+  const summariseBody = (body: unknown): { kind: string; size: number; preview?: string } => {
+    if (typeof body === 'string') {
+      const size = Buffer.byteLength(body, 'utf8');
+      return { kind: 'string', size, preview: body.slice(0, 1000) };
+    }
+    if (Buffer.isBuffer(body)) {
+      return { kind: 'buffer', size: body.length, preview: body.toString('utf8', 0, 1000) };
+    }
+    if (typeof body === 'object' && body !== null) {
+      try {
+        const json = JSON.stringify(body);
+        const size = Buffer.byteLength(json, 'utf8');
+        return { kind: 'object', size, preview: json.slice(0, 1000) };
+      } catch {
+        return { kind: 'object', size: 0 };
+      }
+    }
+    return { kind: typeof body, size: 0 };
+  };
+
+  app.addHook('onRequest', async (request) => {
+    app.log.info(
+      {
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
+        remoteAddress: request.ip
+      },
+      'incoming request'
+    );
+  });
+
+  app.addHook('preValidation', async (request: FastifyRequest) => {
+    if (request.method === 'POST') {
+      const summary = summariseBody((request as FastifyRequest).body);
+      app.log.info({ body: summary }, 'incoming POST body');
+    }
+  });
 
   const redis = options.redisClient ??
     new Redis(config.redisUrl, {
