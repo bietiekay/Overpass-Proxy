@@ -8,7 +8,7 @@ export interface TileInfo {
 }
 
 const decode = (hash: string): BoundingBox => {
-  const [west, east, south, north] = ngeohash.decode_bbox(hash);
+  const [south, west, north, east] = ngeohash.decode_bbox(hash);
   return { south, west, north, east };
 };
 
