@@ -127,6 +127,7 @@ const handleCacheable = async (
   query: string,
   amenity: string
 ): Promise<void> => {
+  const normalisedAmenity = amenity.trim().toLowerCase();
   const bbox = extractBoundingBox(query);
   if (!bbox) {
     reply.code(400);
@@ -138,7 +139,8 @@ const handleCacheable = async (
   logger.info(
     {
       bbox: { west: bbox.west, south: bbox.south, east: bbox.east, north: bbox.north },
-      amenity
+      amenity: normalisedAmenity,
+      requestedAmenity: amenity
     },
     'cacheable request with bbox'
   );
@@ -148,7 +150,7 @@ const handleCacheable = async (
     throw new TooManyTilesError(`Request requires ${tiles.length} tiles`);
   }
 
-  const cached = await deps.store.readTiles(tiles, amenity);
+  const cached = await deps.store.readTiles(tiles, normalisedAmenity);
   const missing = tiles.filter((tile) => !cached.has(tile.hash));
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
 
@@ -191,7 +193,7 @@ const handleCacheable = async (
         ...response,
         elements: filterElementsByBbox(response.elements, fine.bounds)
       };
-      await deps.store.writeTile(fine, filtered, amenity);
+      await deps.store.writeTile(fine, filtered, normalisedAmenity);
     }
   };
 
@@ -206,8 +208,8 @@ const handleCacheable = async (
     if (!representative) continue;
     void scheduleRefresh(async () => {
       await deps.store
-        .withRefreshLock(representative, amenity, async () => {
-          const response = await fetchTile(deps.config, group.bounds, amenity);
+        .withRefreshLock(representative, normalisedAmenity, async () => {
+          const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
           await writeFineTilesFromGroup(group.bounds, response, group.tiles);
         })
         .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
@@ -218,13 +220,13 @@ const handleCacheable = async (
   for (const group of missingGroups) {
     const representative = group.tiles[0];
     if (!representative) continue;
-    const outcome = await deps.store.withMissLock(representative, amenity, async () => {
-      const response = await fetchTile(deps.config, group.bounds, amenity);
+    const outcome = await deps.store.withMissLock(representative, normalisedAmenity, async () => {
+      const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
       await writeFineTilesFromGroup(group.bounds, response, group.tiles);
     });
 
     for (const fine of group.tiles) {
-      const fresh = await deps.store.readTile(fine, amenity);
+      const fresh = await deps.store.readTile(fine, normalisedAmenity);
       if (fresh) {
         responses.push(fresh.payload.response);
       } else {

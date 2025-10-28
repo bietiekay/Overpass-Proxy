@@ -11,6 +11,7 @@ const jsonQuery = '[out:json];node["amenity"="toilets"](52.5,13.3,52.6,13.4);out
 const formBody = (query: string) => new URLSearchParams({ data: query }).toString();
 const drinkingWaterQuery =
   '[out:json];node["amenity"="drinking_water"](52.5,13.3,52.6,13.4);out;';
+const uppercaseAmenityQuery = '[out:json];node["amenity"="TOILETS"](52.5,13.3,52.6,13.4);out;';
 
 let stopEnv: (() => Promise<void>) | undefined;
 let baseUrl: string;
@@ -108,6 +109,20 @@ describe('integration', () => {
       .expect(200);
 
     expect(hits.length).toBe(initialHits);
+  });
+
+  it('normalises amenity before fetching tiles', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(uppercaseAmenityQuery))
+      .expect(200);
+
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits[0]).toMatch(/:toilets$/);
   });
 
   it('returns 304 when etag matches', async () => {
