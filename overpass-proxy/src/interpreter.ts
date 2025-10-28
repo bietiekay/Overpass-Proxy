@@ -10,6 +10,7 @@ import { applyConditionalHeaders } from './headers.js';
 import { logger } from './logger.js';
 import type { TileStore } from './store.js';
 import { tilesForBoundingBox } from './tiling.js';
+import { filterElementsByBbox } from './store.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
 
 interface InterpreterDeps {
@@ -84,7 +85,7 @@ const handleCacheable = async (
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
 
   const responses = [];
-  // limit concurrent stale refreshes per request
+  // limit concurrent stale refreshes per request (applied to coarse groups)
   const maxConcurrentRefreshes = 8;
   let activeRefreshes = 0;
   const refreshQueue: Array<() => void> = [];
@@ -102,34 +103,75 @@ const handleCacheable = async (
     }
   };
 
+  // push any cached responses immediately
   for (const tile of tiles) {
     const cachedTile = cached.get(tile.hash);
     if (cachedTile) {
       responses.push(cachedTile.payload.response);
-      if (cachedTile.stale) {
-        void scheduleRefresh(async () => {
-          await deps.store
-            .withRefreshLock(tile, async () => {
-              const response = await fetchTile(deps.config, tile.bounds);
-              await deps.store.writeTile(tile, response);
-            })
-            .catch((error) => logger.warn({ err: error }, 'failed to refresh tile'));
-        });
-      }
-      continue;
     }
+  }
 
-    // Miss: coalesce concurrent fetches using miss-lock; another request might be fetching it
-    const outcome = await deps.store.withMissLock(tile, async () => {
-      const response = await fetchTile(deps.config, tile.bounds);
-      await deps.store.writeTile(tile, response);
+  // Group missing and stale fine tiles by coarse tiles to reduce upstream requests
+  const fineMissingSet = new Set(missing.map((t) => t.hash));
+  const fineStaleSet = new Set(stale.map((t) => t.hash));
+  const coarseTiles = tilesForBoundingBox(bbox, deps.config.upstreamTilePrecision);
+
+  const fineTilesByHash = new Map(tiles.map((t) => [t.hash, t] as const));
+
+  const writeFineTilesFromCoarse = async (coarseBounds: { south: number; west: number; north: number; east: number }, response: any, fineHashes: string[]) => {
+    for (const hash of fineHashes) {
+      const fine = fineTilesByHash.get(hash);
+      if (!fine) continue;
+      const filtered = {
+        ...response,
+        elements: filterElementsByBbox(response.elements, fine.bounds)
+      };
+      await deps.store.writeTile(fine, filtered);
+    }
+  };
+
+  // Handle stale refreshes in background per coarse tile
+  for (const coarse of coarseTiles) {
+    const fineUnderCoarse = tilesForBoundingBox(coarse.bounds, deps.config.tilePrecision);
+    const fineHashes = fineUnderCoarse.map((t) => t.hash).filter((h) => fineStaleSet.has(h));
+    if (fineHashes.length === 0) continue;
+    void scheduleRefresh(async () => {
+      // Use one representative fine tile lock to avoid duplicate concurrent refreshes
+      const representative = fineTilesByHash.get(fineHashes[0]);
+      if (!representative) return;
+      await deps.store
+        .withRefreshLock(representative, async () => {
+          const response = await fetchTile(deps.config, coarse.bounds);
+          await writeFineTilesFromCoarse(coarse.bounds, response, fineHashes);
+        })
+        .catch((error) => logger.warn({ err: error }, 'failed to refresh coarse tile'));
     });
-    // After miss-lock, read from cache to use the payload (either just written or by other request)
-    const fresh = await deps.store.readTile(tile);
-    if (fresh) {
-      responses.push(fresh.payload.response);
-    } else {
-      logger.warn({ tile: tile.hash, outcome }, 'tile missing after miss-lock');
+  }
+
+  // Handle cache misses by fetching each coarse tile once
+  for (const coarse of coarseTiles) {
+    const fineUnderCoarse = tilesForBoundingBox(coarse.bounds, deps.config.tilePrecision);
+    const fineHashes = fineUnderCoarse.map((t) => t.hash).filter((h) => fineMissingSet.has(h));
+    if (fineHashes.length === 0) continue;
+
+    // Use miss-lock on one representative fine tile to coalesce concurrent requests
+    const representative = fineTilesByHash.get(fineHashes[0]);
+    if (!representative) continue;
+    const outcome = await deps.store.withMissLock(representative, async () => {
+      const response = await fetchTile(deps.config, coarse.bounds);
+      await writeFineTilesFromCoarse(coarse.bounds, response, fineHashes);
+    });
+
+    // After miss-lock, read each fine tile and add to responses
+    for (const hash of fineHashes) {
+      const fine = fineTilesByHash.get(hash);
+      if (!fine) continue;
+      const fresh = await deps.store.readTile(fine);
+      if (fresh) {
+        responses.push(fresh.payload.response);
+      } else {
+        logger.warn({ tile: fine.hash, outcome }, 'fine tile missing after coarse miss-lock');
+      }
     }
   }
 
