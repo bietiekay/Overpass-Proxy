@@ -25,7 +25,8 @@ export const loadConfig = (): AppConfig => {
   const cacheTtl = toNumber(env.CACHE_TTL_SECONDS, 24 * 60 * 60);
   const swr = Math.max(30, Math.floor(cacheTtl / 10));
   const tilePrecision = toNumber(env.TILE_PRECISION, 5);
-  const upstreamTilePrecision = toNumber(env.UPSTREAM_TILE_PRECISION, Math.max(2, tilePrecision - 1));
+  // target ~2 levels coarser to get ~32x coverage (to cover ~50 tiles minimum)
+  const upstreamTilePrecision = toNumber(env.UPSTREAM_TILE_PRECISION, Math.max(2, tilePrecision - 2));
 
   return {
     port: toNumber(env.PORT, 8080),
