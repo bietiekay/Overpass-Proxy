@@ -1,5 +1,5 @@
 import formbody from '@fastify/formbody';
-import Fastify, { type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import { Redis } from 'ioredis';
 
 import { loadConfig, type AppConfig } from './config.js';
@@ -17,6 +17,25 @@ export const buildServer = (options: BuildServerOptions = {}) => {
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
   const app = Fastify({ logger: true });
   void app.register(formbody);
+
+  // Simple CORS handling for browser clients
+  app.addHook('onSend', async (_request, reply, payload) => {
+    // Allow public access; adjust if you need to restrict origins
+    reply.header('Access-Control-Allow-Origin', '*');
+    reply.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    reply.header(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Accept, X-Requested-With, If-None-Match'
+    );
+    reply.header('Access-Control-Max-Age', '600');
+    return payload;
+  });
+
+  // Preflight requests
+  app.options('*', async (_request: FastifyRequest, reply: FastifyReply) => {
+    reply.code(204);
+    reply.send();
+  });
 
   const summariseBody = (body: unknown): { kind: string; size: number; preview?: string } => {
     if (typeof body === 'string') {

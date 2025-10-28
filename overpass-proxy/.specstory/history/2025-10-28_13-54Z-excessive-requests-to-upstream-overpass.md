@@ -486,7 +486,124 @@ Lint results
 
 ---
 
+Tool use: **apply_patch**
 
+<details>
+        <summary>Apply patch for /home/bietiekay/code/ToiletFinder/overpass-proxy/src/upstream.ts</summary>
+      
+
+```diff
+<<'PATCH'
+*** Begin Patch
+*** Update File: src/upstream.ts
+@@
+ export const fetchTile = async (config: AppConfig, bbox: BoundingBox): Promise<OverpassResponse> => {
+   const query = buildTileQuery(bbox);
++  logger.info({ bbox }, 'upstream fetch start');
+   const response = await got.post(config.upstreamUrl, {
+     body: new URLSearchParams({ data: query }).toString(),
+     headers: {
+       'Content-Type': 'application/x-www-form-urlencoded'
+     },
+     timeout: { request: 120000 }
+   });
+-
++  logger.info({ bbox }, 'upstream fetch done');
+   return JSON.parse(response.body) as OverpassResponse;
+ };
+*** End Patch
+PATCH
+```
+
+---
+
+Tool use: **read_lints**
+
+<details>
+          <summary>Read lints for 1 file</summary>
+      
+Lint paths:
+
+- `/home/bietiekay/code/ToiletFinder/overpass-proxy/src/upstream.ts`
+
+Lint results
+
+
+**No lint errors found**
+</details>
+
+---
+
+Tool use: **todo_write**
+
+## Todo List
+
+- [x] Add miss-lock and wait-on-cache to coalesce concurrent tile fetches
+- [x] Throttle per-request background stale refresh concurrency
+- [x] Add upstream fetch logging for visibility
+
+---
+
+I added miss-locking to coalesce concurrent tile fetches, capped per-request stale refresh concurrency, and emitted explicit logs around upstream fetches.
+
+- Miss coalescing: concurrent requests for the same missing tile now synchronize via a short-lived inflight lock and wait-on-cache. This should drastically reduce duplicate "redis tile write" bursts.
+- Refresh throttling: stale tiles still refresh, but only up to 8 at a time per request.
+- Logging: each upstream call now logs “upstream fetch start/done” with the tile bbox.
+
+You can redeploy and watch:
+- “upstream fetch …” lines (actual Overpass calls)
+- “redis tile write” frequency should drop when multiple clients overlap.
+
+- Implemented `withMissLock` and `readTile` in `src/store.ts`; wired miss-locking and per-request refresh limiter in `src/interpreter.ts`; added start/done logs in `src/upstream.ts`.
+
+---
+
+_**User (2025-10-28 08:42Z)**_
+
+describe and commit
+
+---
+
+_**Assistant (default)**_
+
+
+
+---
+
+I’m going to create a commit that includes the miss-lock coalescing, per-request refresh throttling, and upstream fetch logging changes.
+
+---
+
+Tool use: **run_terminal_cmd**
+
+```bash
+/usr/bin/bash -lc 'cd /home/bietiekay/code/ToiletFinder/overpass-proxy && git add -A && git commit -m "feat(cache): coalesce concurrent tile fetches with miss-lock; throttle stale refreshes; add upstream fetch logs
+
+- Add TileStore.withMissLock and readTile to dedupe concurrent misses
+- Limit per-request stale refresh concurrency to 8
+- Log upstream fetch start/done with bbox for visibility
+
+This reduces duplicate upstream calls and write bursts when multiple clients hit overlapping bboxes, while keeping SWR behavior."'
+```
+
+```
+[master 178346d] feat(cache): coalesce concurrent tile fetches with miss-lock; throttle stale refreshes; add upstream fetch logs
+ 5 files changed, 626 insertions(+), 10 deletions(-)
+ create mode 100644 overpass-proxy/.specstory/history/2025-10-28_13-54Z-excessive-requests-to-upstream-overpass.md
+
+```
+
+---
+
+Committed changes that reduce duplicate upstream calls and cache write bursts.
+
+- Miss-lock coalescing: added `withMissLock` and `readTile` in `src/store.ts`; integrated in `src/interpreter.ts` to avoid parallel fetches for the same tile.
+- Refresh throttling: capped per-request stale refreshes to 8 concurrent in `src/interpreter.ts`.
+- Visibility: added upstream fetch start/done logs in `src/upstream.ts`.
+
+Commit: feat(cache): coalesce concurrent tile fetches with miss-lock; throttle stale refreshes; add upstream fetch logs
+
+- This dedupes concurrent misses and limits refresh fan-out, keeping SWR while lowering “redis tile write” spikes.
 
 ---
 
