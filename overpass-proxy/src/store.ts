@@ -1,6 +1,7 @@
 import type { Redis } from 'ioredis';
 
 import type { BoundingBox } from './bbox.js';
+import { logger } from './logger.js';
 import type { TileInfo } from './tiling.js';
 import { tileKey } from './tiling.js';
 
@@ -48,9 +49,14 @@ export class TileStore {
 
     const result = new Map<string, CachedTile>();
 
+    let hits = 0;
+    let misses = 0;
+    let staleCount = 0;
+
     tiles.forEach((tile, index) => {
       const value = values[index];
       if (!value) {
+        misses += 1;
         return;
       }
 
@@ -58,10 +64,25 @@ export class TileStore {
         const payload = JSON.parse(value) as OverpassTilePayload;
         const stale = payload.expiresAt < now;
         result.set(tile.hash, { tile, payload, stale });
+        hits += 1;
+        if (stale) {
+          staleCount += 1;
+        }
       } catch {
         result.delete(tile.hash);
+        misses += 1;
       }
     });
+
+    logger.info(
+      {
+        tiles: tiles.map((t) => t.hash),
+        hits,
+        misses,
+        stale: staleCount
+      },
+      'redis tile read'
+    );
 
     return result;
   }
@@ -75,19 +96,32 @@ export class TileStore {
     };
 
     await this.redis.set(tileKey(tile.hash), JSON.stringify(payload), 'PX', (this.options.ttlSeconds + this.options.swrSeconds) * 1000);
+
+    logger.info(
+      {
+        tile: tile.hash,
+        expiresAt: payload.expiresAt,
+        ttlSeconds: this.options.ttlSeconds,
+        swrSeconds: this.options.swrSeconds
+      },
+      'redis tile write'
+    );
   }
 
   public async withRefreshLock(tile: TileInfo, handler: () => Promise<void>): Promise<void> {
     const lockKey = `${tileKey(tile.hash)}:lock`;
     const acquired = await this.redis.set(lockKey, '1', 'PX', this.options.swrSeconds * 1000, 'NX');
     if (!acquired) {
+      logger.debug({ tile: tile.hash }, 'redis refresh lock skipped');
       return;
     }
 
+    logger.debug({ tile: tile.hash }, 'redis refresh lock acquired');
     try {
       await handler();
     } finally {
       await this.redis.del(lockKey);
+      logger.debug({ tile: tile.hash }, 'redis refresh lock released');
     }
   }
 }

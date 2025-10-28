@@ -67,6 +67,13 @@ const handleCacheable = async (
     return;
   }
 
+  logger.info(
+    {
+      bbox: { west: bbox.west, south: bbox.south, east: bbox.east, north: bbox.north }
+    },
+    'cacheable request with bbox'
+  );
+
   const tiles = tilesForBoundingBox(bbox, deps.config.tilePrecision);
   if (tiles.length > deps.config.maxTilesPerRequest) {
     throw new TooManyTilesError(`Request requires ${tiles.length} tiles`);
