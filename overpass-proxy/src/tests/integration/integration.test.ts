@@ -2,7 +2,9 @@ import type Redis from 'ioredis';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { extractBoundingBox } from '../../bbox.js';
 import { buildServer } from '../../index.js';
+import { tileKey, tilesForBoundingBox } from '../../tiling.js';
 import { createTestEnvironment } from './testcontainers.js';
 
 const jsonQuery = '[out:json];node["amenity"="toilets"](52.5,13.3,52.6,13.4);out;';
@@ -155,6 +157,60 @@ describe('integration', () => {
 
     await app.close();
     await env.stop();
+  });
+
+  it('fills missing tiles with minimal upstream requests', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const bbox = extractBoundingBox(jsonQuery);
+    expect(bbox).toBeDefined();
+    const allTiles = tilesForBoundingBox(bbox!, 5);
+    expect(allTiles.length).toBeGreaterThanOrEqual(2);
+
+    const missingTiles = [allTiles[0], allTiles[1]].filter(Boolean);
+    expect(missingTiles).toHaveLength(2);
+
+    const amenityKey = 'toilets';
+    if (redisClient) {
+      await redisClient.del(...missingTiles.map((tile) => tileKey(tile.hash, amenityKey)));
+    }
+
+    const hitsBefore = hits.length;
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const newHits = hits.slice(hitsBefore);
+    expect(newHits.length).toBeGreaterThan(0);
+    expect(newHits.length).toBeLessThanOrEqual(missingTiles.length);
+
+    const parseHit = (hit: string) => {
+      const [bboxPart] = hit.split(':');
+      const [south, west, north, east] = bboxPart.split(',').map((value) => Number(value));
+      return { south, west, north, east };
+    };
+
+    for (const tile of missingTiles) {
+      const key = tileKey(tile.hash, amenityKey);
+      const value = redisClient ? await redisClient.get(key) : null;
+      expect(value).toBeTruthy();
+    }
+
+    const parsedHits = newHits.map(parseHit);
+    for (const hit of parsedHits) {
+      expect(hit.north - hit.south).toBeLessThanOrEqual(bbox!.north - bbox!.south);
+      expect(hit.east - hit.west).toBeLessThanOrEqual(bbox!.east - bbox!.west);
+    }
   });
 });
 

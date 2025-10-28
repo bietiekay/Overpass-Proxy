@@ -14,8 +14,9 @@ import { TooManyTilesError } from './errors.js';
 import { applyConditionalHeaders } from './headers.js';
 import { logger } from './logger.js';
 import type { TileStore } from './store.js';
-import { tilesForBoundingBox } from './tiling.js';
+import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox } from './store.js';
+import { planTileFetches } from './fetchPlan.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
 
 interface InterpreterDeps {
@@ -178,21 +179,14 @@ const handleCacheable = async (
     }
   }
 
-  // Group missing and stale fine tiles by coarse tiles to reduce upstream requests
-  const fineMissingSet = new Set(missing.map((t) => t.hash));
-  const fineStaleSet = new Set(stale.map((t) => t.hash));
-  const coarseTiles = tilesForBoundingBox(bbox, deps.config.upstreamTilePrecision);
-
   const fineTilesByHash = new Map(tiles.map((t) => [t.hash, t] as const));
 
-  const writeFineTilesFromCoarse = async (
-    coarseBounds: { south: number; west: number; north: number; east: number },
+  const writeFineTilesFromGroup = async (
+    groupBounds: { south: number; west: number; north: number; east: number },
     response: any,
-    fineHashes: string[]
+    fineTiles: TileInfo[]
   ) => {
-    for (const hash of fineHashes) {
-      const fine = fineTilesByHash.get(hash);
-      if (!fine) continue;
+    for (const fine of fineTiles) {
       const filtered = {
         ...response,
         elements: filterElementsByBbox(response.elements, fine.bounds)
@@ -201,103 +195,35 @@ const handleCacheable = async (
     }
   };
 
-  // Group fine tiles into chunks of at least 50 tiles per upstream fetch
-  const MIN_TILES_PER_FETCH = 50;
-
-  const groupFineTilesForFetch = (fineHashes: string[]): Array<{ bounds: { south: number; west: number; north: number; east: number }; fineHashes: string[] }> => {
-    if (fineHashes.length === 0) return [];
-    
-    if (fineHashes.length < MIN_TILES_PER_FETCH) {
-      // Group all into one super-tile covering entire region
-      const allFine = fineHashes.map((h) => fineTilesByHash.get(h)).filter((t): t is NonNullable<typeof t> => t !== undefined);
-      if (allFine.length === 0) return [];
-      
-      const south = Math.min(...allFine.map((t) => t.bounds.south));
-      const west = Math.min(...allFine.map((t) => t.bounds.west));
-      const north = Math.max(...allFine.map((t) => t.bounds.north));
-      const east = Math.max(...allFine.map((t) => t.bounds.east));
-      
-      return [{ bounds: { south, west, north, east }, fineHashes }];
-    }
-    
-    // Try to use existing coarse tiles to group
-    const result: Array<{ bounds: { south: number; west: number; north: number; east: number }; fineHashes: string[] }> = [];
-    for (const coarse of coarseTiles) {
-      const fineUnderCoarse = tilesForBoundingBox(coarse.bounds, deps.config.tilePrecision);
-      const matchingHashes = fineUnderCoarse.map((t) => t.hash).filter((h) => fineHashes.includes(h));
-      if (matchingHashes.length > 0) {
-        result.push({ bounds: coarse.bounds, fineHashes: matchingHashes });
-      }
-    }
-    
-    // If any groups would be too small, merge them intelligently
-    if (result.length > 1 && result.some((g) => g.fineHashes.length < MIN_TILES_PER_FETCH)) {
-      // Merge small groups until each has at least MIN_TILES_PER_FETCH
-      const merged: Array<{ bounds: { south: number; west: number; north: number; east: number }; fineHashes: string[] }> = [];
-      let current = [...result];
-      
-      while (current.length > 0) {
-        const first = current.shift()!;
-        let combined = { ...first };
-        
-        // Try to merge with adjacent small groups
-        current = current.filter((group) => {
-          if (group.fineHashes.length >= MIN_TILES_PER_FETCH) return true;
-          
-          // Merge into current group
-          combined.fineHashes.push(...group.fineHashes);
-          // Recompute combined bounds
-          const allFine = combined.fineHashes.map((h) => fineTilesByHash.get(h)).filter((t): t is NonNullable<typeof t> => t !== undefined);
-          if (allFine.length === 0) return false;
-          
-          combined.bounds.south = Math.min(...allFine.map((t) => t.bounds.south));
-          combined.bounds.west = Math.min(...allFine.map((t) => t.bounds.west));
-          combined.bounds.north = Math.max(...allFine.map((t) => t.bounds.north));
-          combined.bounds.east = Math.max(...allFine.map((t) => t.bounds.east));
-          
-          return false;
-        });
-        
-        merged.push(combined);
-      }
-      
-      return merged;
-    }
-    
-    return result;
+  const planOptions = {
+    coarsePrecision: deps.config.upstreamTilePrecision,
+    finePrecision: deps.config.tilePrecision
   };
-  
-  // Handle stale refreshes: group into fetches of at least MIN_TILES_PER_FETCH
-  const staleHashes = Array.from(fineStaleSet);
-  const staleGroups = groupFineTilesForFetch(staleHashes);
+
+  const staleGroups = planTileFetches(stale, planOptions);
   for (const group of staleGroups) {
+    const representative = group.tiles[0];
+    if (!representative) continue;
     void scheduleRefresh(async () => {
-      const representative = fineTilesByHash.get(group.fineHashes[0]);
-      if (!representative) return;
       await deps.store
         .withRefreshLock(representative, amenity, async () => {
           const response = await fetchTile(deps.config, group.bounds, amenity);
-          await writeFineTilesFromCoarse(group.bounds, response, group.fineHashes);
+          await writeFineTilesFromGroup(group.bounds, response, group.tiles);
         })
         .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
     });
   }
-  
-  // Handle cache misses: group into fetches of at least MIN_TILES_PER_FETCH
-  const missingHashes = Array.from(fineMissingSet);
-  const missingGroups = groupFineTilesForFetch(missingHashes);
+
+  const missingGroups = planTileFetches(missing, planOptions);
   for (const group of missingGroups) {
-    const representative = fineTilesByHash.get(group.fineHashes[0]);
+    const representative = group.tiles[0];
     if (!representative) continue;
     const outcome = await deps.store.withMissLock(representative, amenity, async () => {
       const response = await fetchTile(deps.config, group.bounds, amenity);
-      await writeFineTilesFromCoarse(group.bounds, response, group.fineHashes);
+      await writeFineTilesFromGroup(group.bounds, response, group.tiles);
     });
-    
-    // After miss-lock, read each fine tile and add to responses
-    for (const hash of group.fineHashes) {
-      const fine = fineTilesByHash.get(hash);
-      if (!fine) continue;
+
+    for (const fine of group.tiles) {
       const fresh = await deps.store.readTile(fine, amenity);
       if (fresh) {
         responses.push(fresh.payload.response);
