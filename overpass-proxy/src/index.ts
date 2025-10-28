@@ -1,6 +1,6 @@
 import formbody from '@fastify/formbody';
 import Fastify from 'fastify';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
@@ -15,7 +15,7 @@ export interface BuildServerOptions {
 export const buildServer = (options: BuildServerOptions = {}) => {
   const baseConfig = loadConfig();
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
-  const app = Fastify({ logger });
+  const app = Fastify({ logger: true });
   void app.register(formbody);
 
   const redis = options.redisClient ??

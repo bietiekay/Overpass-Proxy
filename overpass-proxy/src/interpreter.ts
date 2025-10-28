@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-floating-promises */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type Redis from 'ioredis';
+import type { Redis } from 'ioredis';
 
 import { combineResponses } from './assemble.js';
 import { extractBoundingBox, hasAmenityFilter, hasJsonOutput } from './bbox.js';
@@ -18,9 +18,7 @@ interface InterpreterDeps {
   store: TileStore;
 }
 
-interface InterpreterRequest extends FastifyRequest {
-  body?: string | Buffer | Record<string, unknown>;
-}
+type InterpreterRequest = FastifyRequest;
 
 const requestBodyToQuery = (request: InterpreterRequest): string | null => {
   if (request.method === 'GET') {
@@ -45,8 +43,11 @@ const requestBodyToQuery = (request: InterpreterRequest): string | null => {
     return request.body.toString('utf8');
   }
 
-  if ('data' in request.body && typeof request.body.data === 'string') {
-    return request.body.data;
+  if (typeof request.body === 'object' && request.body !== null && 'data' in request.body) {
+    const maybe = (request.body as Record<string, unknown>).data;
+    if (typeof maybe === 'string') {
+      return maybe;
+    }
   }
 
   return null;

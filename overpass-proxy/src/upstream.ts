@@ -1,5 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import got from 'got';
+import type { Method } from 'got';
 
 import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
@@ -61,7 +62,7 @@ export const proxyTransparent = async (
     }
 
     const response = await got(upstreamUrl.toString(), {
-      method: request.method,
+      method: request.method as Method,
       headers,
       body,
       throwHttpErrors: false,
