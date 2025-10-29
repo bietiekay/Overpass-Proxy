@@ -4,7 +4,7 @@ services:
     build: .
     environment:
       PORT: 8080
-      UPSTREAM_URL: https://overpass-api.de/api/interpreter
+      UPSTREAM_URLS: https://overpass-api.de/api/interpreter
       REDIS_URL: redis://redis:6379
     ports:
       - "127.0.0.1:5002:8080"
