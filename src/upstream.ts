@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import got from 'got';
+import got, { RequestError } from 'got';
 import type { Method } from 'got';
 
 import type { BoundingBox } from './bbox.js';
@@ -94,6 +94,18 @@ const getPool = (config: AppConfig): UpstreamPool => {
   return pool;
 };
 
+const shouldMarkFailure = (error: unknown): boolean => {
+  if (error instanceof RequestError) {
+    const statusCode = error.response?.statusCode;
+    if (statusCode !== undefined && statusCode < 500 && statusCode !== 429) {
+      return false;
+    }
+    return true;
+  }
+
+  return true;
+};
+
 const withUpstream = async <T>(config: AppConfig, fn: (baseUrl: string) => Promise<T>): Promise<T> => {
   const pool = getPool(config);
   if (pool.size === 0) {
@@ -114,8 +126,12 @@ const withUpstream = async <T>(config: AppConfig, fn: (baseUrl: string) => Promi
       pool.markSuccess(upstream);
       return result;
     } catch (error) {
-      lastError = error;
       attempted.add(upstream);
+      if (!shouldMarkFailure(error)) {
+        throw error;
+      }
+
+      lastError = error;
       pool.markFailure(upstream);
       logger.warn({ err: error, upstream, cooldownSeconds: config.upstreamFailureCooldownSeconds }, 'upstream request failed');
     }
