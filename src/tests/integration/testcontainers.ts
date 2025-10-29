@@ -8,7 +8,7 @@ import { createMockOverpass } from './mock-overpass.js';
 
 export interface TestEnvironment {
   redis: Redis;
-  upstreamUrl: string;
+  upstreamUrls: string[];
   stop: () => Promise<void>;
   hits: string[];
 }
@@ -39,7 +39,7 @@ export const createTestEnvironment = async (): Promise<TestEnvironment> => {
 
     return {
       redis,
-      upstreamUrl: `http://127.0.0.1:${port}/api/interpreter`,
+      upstreamUrls: [`http://127.0.0.1:${port}/api/interpreter`],
       hits: mockOverpass.hits,
       stop: async () => {
         await redis.quit();
@@ -57,7 +57,7 @@ export const createTestEnvironment = async (): Promise<TestEnvironment> => {
 
   return {
     redis: mockRedis as unknown as Redis,
-    upstreamUrl: `http://127.0.0.1:${port}/api/interpreter`,
+    upstreamUrls: [`http://127.0.0.1:${port}/api/interpreter`],
     hits: mockOverpass.hits,
     stop: async () => {
       await mockRedis.quit();

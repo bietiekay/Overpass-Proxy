@@ -42,7 +42,9 @@ Environment variables are read at startup. Defaults are shown below:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `UPSTREAM_URL` | `https://overpass-api.de/api/interpreter` | Overpass API endpoint |
+| `UPSTREAM_URLS` | *(unset)* | Comma or whitespace separated Overpass API endpoints used for load balancing |
+| `UPSTREAM_URL` | `https://overpass-api.de/api/interpreter` | Legacy single Overpass API endpoint (used when `UPSTREAM_URLS` is unset) |
+| `UPSTREAM_FAILURE_COOLDOWN_SECONDS` | `60` | Cooldown before retrying a failed upstream |
 | `REDIS_URL` | `redis://redis:6379` | Redis connection URL |
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
