@@ -4,3 +4,4 @@ dist/
 coverage/
 .DS_Store
 redis-data/
+docker-compose.yml
