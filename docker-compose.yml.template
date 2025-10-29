@@ -1,0 +1,18 @@
+version: '3.3'
+services:
+  proxy:
+    build: .
+    environment:
+      PORT: 8080
+      UPSTREAM_URLS: https://overpass-api.de/api/interpreter
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "127.0.0.1:5002:8080"
+    depends_on:
+      - redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - ./redis-data:/data
