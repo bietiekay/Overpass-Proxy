@@ -3,16 +3,27 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import type { AppConfig } from '../../config.js';
 import { fetchTile } from '../../upstream.js';
 
-const { postMock, gotMock } = vi.hoisted(() => {
+const { postMock, gotMock, RequestErrorMock } = vi.hoisted(() => {
   const post = vi.fn();
   const got = vi.fn();
   got.post = post;
-  return { postMock: post, gotMock: got };
+  class RequestErrorMock extends Error {
+    response?: { statusCode: number };
+
+    constructor(statusCode: number) {
+      super(`Response code ${statusCode}`);
+      this.name = 'RequestError';
+      this.response = { statusCode };
+    }
+  }
+
+  return { postMock: post, gotMock: got, RequestErrorMock };
 });
 
 vi.mock('got', () => ({
   __esModule: true,
-  default: gotMock
+  default: gotMock,
+  RequestError: RequestErrorMock
 }));
 
 describe('upstream failover', () => {
@@ -39,6 +50,30 @@ describe('upstream failover', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('propagates client errors without marking upstream as failed', async () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const config: AppConfig = { ...baseConfig, upstreamUrls: [...baseConfig.upstreamUrls] };
+      const error = new RequestErrorMock(400);
+      postMock.mockRejectedValueOnce(error);
+
+      await expect(fetchTile(config, bbox, 'toilets')).rejects.toBe(error);
+
+      postMock.mockClear();
+      postMock.mockResolvedValueOnce({ body: JSON.stringify({ elements: ['ok'] }) });
+
+      const result = await fetchTile(config, bbox, 'toilets');
+      expect(result).toEqual({ elements: ['ok'] });
+      expect(postMock).toHaveBeenCalledTimes(1);
+      expect(postMock).toHaveBeenCalledWith(
+        'http://one.example/api/interpreter',
+        expect.any(Object)
+      );
+    } finally {
+      randomSpy.mockRestore();
+    }
   });
 
   it('parses responses from the first upstream', async () => {
