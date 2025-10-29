@@ -29,7 +29,7 @@ beforeAll(async () => {
 
   const { app } = buildServer({
     configOverrides: {
-      upstreamUrl: env.upstreamUrl,
+      upstreamUrls: env.upstreamUrls,
       cacheTtlSeconds: 1,
       swrSeconds: 1,
       tilePrecision: 5
@@ -151,7 +151,7 @@ describe('integration', () => {
 
     const { app } = buildServer({
       configOverrides: {
-        upstreamUrl: env.upstreamUrl,
+        upstreamUrls: env.upstreamUrls,
         maxTilesPerRequest: 4,
         tilePrecision: 5
       },

@@ -2,7 +2,7 @@ import { env } from 'node:process';
 
 export interface AppConfig {
   port: number;
-  upstreamUrl: string;
+  upstreamUrls: string[];
   redisUrl: string;
   cacheTtlSeconds: number;
   swrSeconds: number;
@@ -10,6 +10,7 @@ export interface AppConfig {
   upstreamTilePrecision: number;
   maxTilesPerRequest: number;
   nodeEnv: string;
+  upstreamFailureCooldownSeconds: number;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -28,15 +29,32 @@ export const loadConfig = (): AppConfig => {
   // target ~2 levels coarser to get ~32x coverage (to cover ~50 tiles minimum)
   const upstreamTilePrecision = toNumber(env.UPSTREAM_TILE_PRECISION, Math.max(2, tilePrecision - 2));
 
+  const parseUpstreamUrls = (raw: string | undefined): string[] => {
+    if (!raw) {
+      return [];
+    }
+
+    return raw
+      .split(/[,\s]+/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+  };
+
+  const upstreamUrls = parseUpstreamUrls(env.UPSTREAM_URLS);
+  if (upstreamUrls.length === 0) {
+    upstreamUrls.push(env.UPSTREAM_URL ?? 'https://overpass-api.de/api/interpreter');
+  }
+
   return {
     port: toNumber(env.PORT, 8080),
-    upstreamUrl: env.UPSTREAM_URL ?? 'https://overpass-api.de/api/interpreter',
+    upstreamUrls,
     redisUrl: env.REDIS_URL ?? 'redis://redis:6379',
     cacheTtlSeconds: cacheTtl,
     swrSeconds: toNumber(env.SWR_SECONDS, swr),
     tilePrecision,
     upstreamTilePrecision,
     maxTilesPerRequest: toNumber(env.MAX_TILES_PER_REQUEST, 1024),
-    nodeEnv: env.NODE_ENV ?? 'production'
+    nodeEnv: env.NODE_ENV ?? 'production',
+    upstreamFailureCooldownSeconds: toNumber(env.UPSTREAM_FAILURE_COOLDOWN_SECONDS, 60)
   };
 };

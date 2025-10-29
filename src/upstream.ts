@@ -21,22 +21,127 @@ out body meta;
 out skel qt;`;
 };
 
+interface UpstreamState {
+  failedUntil: number;
+}
+
+class UpstreamPool {
+  private readonly states = new Map<string, UpstreamState>();
+
+  constructor(urls: string[], private readonly cooldownMs: number) {
+    for (const url of urls) {
+      this.states.set(url, { failedUntil: 0 });
+    }
+  }
+
+  get size(): number {
+    return this.states.size;
+  }
+
+  next(excluded: Set<string>): string | null {
+    const now = Date.now();
+    const available: string[] = [];
+
+    for (const [url, state] of this.states) {
+      if (excluded.has(url)) {
+        continue;
+      }
+      if (state.failedUntil <= now) {
+        available.push(url);
+      }
+    }
+
+    if (available.length === 0) {
+      return null;
+    }
+
+    if (available.length === 1) {
+      return available[0];
+    }
+
+    const index = Math.floor(Math.random() * available.length);
+    return available[index];
+  }
+
+  markFailure(url: string): void {
+    const state = this.states.get(url);
+    if (!state) {
+      return;
+    }
+
+    const cooldownMs = Math.max(0, this.cooldownMs);
+    state.failedUntil = cooldownMs === 0 ? 0 : Date.now() + cooldownMs;
+  }
+
+  markSuccess(url: string): void {
+    const state = this.states.get(url);
+    if (!state) {
+      return;
+    }
+
+    state.failedUntil = 0;
+  }
+}
+
+const poolCache = new WeakMap<AppConfig, UpstreamPool>();
+
+const getPool = (config: AppConfig): UpstreamPool => {
+  let pool = poolCache.get(config);
+  if (!pool) {
+    pool = new UpstreamPool(config.upstreamUrls, config.upstreamFailureCooldownSeconds * 1000);
+    poolCache.set(config, pool);
+  }
+  return pool;
+};
+
+const withUpstream = async <T>(config: AppConfig, fn: (baseUrl: string) => Promise<T>): Promise<T> => {
+  const pool = getPool(config);
+  if (pool.size === 0) {
+    throw new Error('No upstream URLs configured');
+  }
+
+  const attempted = new Set<string>();
+  let lastError: unknown;
+
+  while (attempted.size < pool.size) {
+    const upstream = pool.next(attempted);
+    if (!upstream) {
+      break;
+    }
+
+    try {
+      const result = await fn(upstream);
+      pool.markSuccess(upstream);
+      return result;
+    } catch (error) {
+      lastError = error;
+      attempted.add(upstream);
+      pool.markFailure(upstream);
+      logger.warn({ err: error, upstream, cooldownSeconds: config.upstreamFailureCooldownSeconds }, 'upstream request failed');
+    }
+  }
+
+  throw lastError ?? new Error('No upstream URLs available');
+};
+
 export const fetchTile = async (
   config: AppConfig,
   bbox: BoundingBox,
   amenity: string
 ): Promise<OverpassResponse> => {
   const query = buildTileQuery(bbox, amenity);
-  logger.info({ bbox, amenity }, 'upstream fetch start');
-  const response = await got.post(config.upstreamUrl, {
-    body: new URLSearchParams({ data: query }).toString(),
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    timeout: { request: 120000 }
+  return await withUpstream(config, async (upstreamUrl) => {
+    logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch start');
+    const response = await got.post(upstreamUrl, {
+      body: new URLSearchParams({ data: query }).toString(),
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      timeout: { request: 120000 }
+    });
+    logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');
+    return JSON.parse(response.body) as OverpassResponse;
   });
-  logger.info({ bbox, amenity }, 'upstream fetch done');
-  return JSON.parse(response.body) as OverpassResponse;
 };
 
 export const proxyTransparent = async (
@@ -45,53 +150,58 @@ export const proxyTransparent = async (
   config: AppConfig
 ): Promise<void> => {
   try {
-    const upstreamUrl = new URL(request.url, config.upstreamUrl);
-    let body: string | Buffer | undefined;
-    let bodyReencoded = false;
+    await withUpstream(config, async (baseUrl) => {
+      const upstreamUrl = new URL(request.url, baseUrl);
+      let body: string | Buffer | undefined;
+      let bodyReencoded = false;
 
-    if (request.method === 'GET' || request.method === 'HEAD') {
-      body = undefined;
-    } else if (typeof request.body === 'string') {
-      body = request.body;
-    } else if (Buffer.isBuffer(request.body)) {
-      body = request.body;
-    } else if (request.body && typeof request.body === 'object') {
-      body = new URLSearchParams(request.body as Record<string, string>).toString();
-      bodyReencoded = true;
-    }
-
-    const headers = {
-      ...request.headers,
-      host: undefined
-    } as Record<string, string | string[] | undefined>;
-    if (bodyReencoded) {
-      delete headers['content-length'];
-      delete headers['Content-Length'];
-    }
-
-    const response = await got(upstreamUrl.toString(), {
-      method: request.method as Method,
-      headers,
-      body,
-      throwHttpErrors: false,
-      responseType: 'buffer',
-      timeout: { request: 120000 }
-    });
-
-    reply.status(response.statusCode);
-    for (const [key, value] of Object.entries(response.headers)) {
-      if (typeof value === 'string') {
-        reply.header(key, value);
+      if (request.method === 'GET' || request.method === 'HEAD') {
+        body = undefined;
+      } else if (typeof request.body === 'string') {
+        body = request.body;
+      } else if (Buffer.isBuffer(request.body)) {
+        body = request.body;
+      } else if (request.body && typeof request.body === 'object') {
+        body = new URLSearchParams(request.body as Record<string, string>).toString();
+        bodyReencoded = true;
       }
-    }
 
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    reply.send(response.rawBody);
-    return;
+      const headers = {
+        ...request.headers,
+        host: undefined
+      } as Record<string, string | string[] | undefined>;
+      if (bodyReencoded) {
+        delete headers['content-length'];
+        delete headers['Content-Length'];
+      }
+
+      const response = await got(upstreamUrl.toString(), {
+        method: request.method as Method,
+        headers,
+        body,
+        throwHttpErrors: false,
+        responseType: 'buffer',
+        timeout: { request: 120000 }
+      });
+
+      if (response.statusCode >= 500 || response.statusCode === 429) {
+        throw new Error(`Upstream responded with status ${response.statusCode}`);
+      }
+
+      reply.status(response.statusCode);
+      for (const [key, value] of Object.entries(response.headers)) {
+        if (typeof value === 'string') {
+          reply.header(key, value);
+        }
+      }
+
+      reply.send(response.rawBody);
+    });
   } catch (error) {
     logger.error({ err: error }, 'transparent proxy upstream error');
-    reply.code(502);
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
-    reply.send({ error: 'Upstream error' });
+    if (!reply.sent) {
+      reply.code(502);
+      reply.send({ error: 'Upstream error' });
+    }
   }
 };
