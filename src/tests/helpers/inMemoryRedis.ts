@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 
 export class InMemoryRedis extends EventEmitter {
   private store = new Map<string, string>();
-  private timeouts = new Map<string, NodeJS.Timeout>();
+  private timeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
   async set(key: string, value: string, mode?: string, duration?: number, condition?: string): Promise<'OK' | null> {
     if (condition === 'NX' && this.store.has(key)) {

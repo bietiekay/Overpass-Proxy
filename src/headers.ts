@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-floating-promises */
 import { createHash } from 'node:crypto';
 
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -17,15 +16,13 @@ export const applyConditionalHeaders = (
   const etag = generateEtag(payload);
   const incoming = request.headers['if-none-match'];
 
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
   reply.header('ETag', etag);
 
-    if (incoming && incoming.split(',').map((value) => value.trim()).includes(etag)) {
-      reply.code(304);
-      // eslint-disable-next-line @typescript-eslint/no-floating-promises
-      reply.send();
-      return true;
-    }
+  if (incoming && incoming.split(',').map((value) => value.trim()).includes(etag)) {
+    reply.code(304);
+    reply.send();
+    return true;
+  }
 
   return false;
 };

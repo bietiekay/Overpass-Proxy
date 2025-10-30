@@ -5,23 +5,25 @@ import { applyConditionalHeaders, generateEtag } from '../../headers.js';
 
 const mockReply = (): Partial<FastifyReply> & { headers: Record<string, string>; sent: boolean } => {
   const headers: Record<string, string> = {};
-  return {
+  const reply: Partial<FastifyReply> & { headers: Record<string, string>; sent: boolean } = {
     statusCode: 200,
     sent: false,
-    code: vi.fn(function (this: FastifyReply, status: number) {
-      this.statusCode = status;
-      return this;
+    headers,
+    code: vi.fn((status: number) => {
+      reply.statusCode = status;
+      return reply as unknown as FastifyReply;
     }),
-    header: vi.fn(function (this: FastifyReply, key: string, value: string) {
+    header: vi.fn((key: string, value: string) => {
       headers[key] = value;
-      return this;
+      return reply as unknown as FastifyReply;
     }),
-    send: vi.fn(function (this: FastifyReply) {
-      (this as { sent: boolean }).sent = true;
-      return this;
-    }),
-    headers
-  } as Partial<FastifyReply> & { headers: Record<string, string>; sent: boolean };
+    send: vi.fn(() => {
+      reply.sent = true;
+      return reply as unknown as FastifyReply;
+    })
+  };
+
+  return reply;
 };
 
 describe('generateEtag', () => {
