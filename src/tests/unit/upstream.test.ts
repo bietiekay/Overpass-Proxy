@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 import type { AppConfig } from '../../config.js';
-import { fetchTile } from '../../upstream.js';
+import { buildTileQuery, fetchTile } from '../../upstream.js';
 
 const { postMock, gotMock, RequestErrorMock } = vi.hoisted(() => {
   const post = vi.fn();
@@ -154,5 +154,28 @@ describe('upstream failover', () => {
     } finally {
       randomSpy.mockRestore();
     }
+  });
+});
+
+describe('buildTileQuery', () => {
+  const bbox = { south: 1, west: 2, north: 3, east: 4 };
+
+  it('produces a valid Overpass QL snippet without leading newline', () => {
+    const query = buildTileQuery(bbox, 'toilets');
+    expect(query.startsWith('[out:json][timeout:120];')).toBe(true);
+    expect(query).toContain('node["amenity"="toilets"](1,2,3,4);');
+    expect(query.split('\n')).toMatchInlineSnapshot(`
+      [
+        "[out:json][timeout:120];",
+        "(",
+        "  node[\"amenity\"=\"toilets\"](1,2,3,4);",
+        "  way[\"amenity\"=\"toilets\"](1,2,3,4);",
+        "  relation[\"amenity\"=\"toilets\"](1,2,3,4);",
+        ");",
+        "out body meta;",
+        ">;",
+        "out skel qt;",
+      ]
+    `);
   });
 });

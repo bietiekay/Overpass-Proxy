@@ -9,16 +9,17 @@ import type { OverpassResponse } from './store.js';
 
 export const buildTileQuery = (bbox: BoundingBox, amenity: string): string => {
   const escapedAmenity = amenity.replace(/"/g, '\\"');
-  return `[
-  out:json][timeout:120];
-(
-  node["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
-  way["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
-  relation["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
-);
-out body meta;
->;
-out skel qt;`;
+  return [
+    '[out:json][timeout:120];',
+    '(',
+    `  node["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});`,
+    `  way["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});`,
+    `  relation["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});`,
+    ');',
+    'out body meta;',
+    '>;',
+    'out skel qt;'
+  ].join('\n');
 };
 
 interface UpstreamState {
