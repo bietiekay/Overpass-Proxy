@@ -170,6 +170,7 @@ export const proxyTransparent = async (
       const upstreamUrl = new URL(request.url, baseUrl);
       let body: string | Buffer | undefined;
       let bodyReencoded = false;
+      const start = Date.now();
 
       if (request.method === 'GET' || request.method === 'HEAD') {
         body = undefined;
@@ -191,6 +192,47 @@ export const proxyTransparent = async (
         delete headers['Content-Length'];
       }
 
+      const summarisePayload = (payload: string | Buffer | undefined) => {
+        if (payload === undefined) {
+          return { kind: 'empty' };
+        }
+
+        if (typeof payload === 'string') {
+          return {
+            kind: 'string',
+            size: Buffer.byteLength(payload, 'utf8'),
+            preview: payload.slice(0, 512)
+          };
+        }
+
+        return {
+          kind: 'buffer',
+          size: payload.length,
+          preview: payload.toString('utf8', 0, 512)
+        };
+      };
+
+      const requestMeta = {
+        method: request.method,
+        url: request.url,
+        upstreamUrl: upstreamUrl.toString(),
+        remoteAddress: request.ip,
+        bodyReencoded
+      };
+
+      logger.info(requestMeta, 'transparent proxy forwarding request');
+
+      if (logger.levelVal <= logger.levels.values.debug) {
+        logger.debug(
+          {
+            ...requestMeta,
+            headers: request.headers,
+            body: summarisePayload(body)
+          },
+          'transparent proxy request details'
+        );
+      }
+
       const response = await got(upstreamUrl.toString(), {
         method: request.method as Method,
         headers,
@@ -201,8 +243,38 @@ export const proxyTransparent = async (
       });
 
       if (response.statusCode >= 500 || response.statusCode === 429) {
+        logger.warn(
+          {
+            ...requestMeta,
+            statusCode: response.statusCode
+          },
+          'transparent proxy upstream failure'
+        );
         throw new Error(`Upstream responded with status ${response.statusCode}`);
       }
+
+      const durationMs = Date.now() - start;
+
+      if (logger.levelVal <= logger.levels.values.debug) {
+        logger.debug(
+          {
+            ...requestMeta,
+            statusCode: response.statusCode,
+            headers: response.headers,
+            responseSize: response.rawBody.length
+          },
+          'transparent proxy response details'
+        );
+      }
+
+      logger.info(
+        {
+          ...requestMeta,
+          statusCode: response.statusCode,
+          durationMs
+        },
+        'transparent proxy request completed'
+      );
 
       reply.status(response.statusCode);
       for (const [key, value] of Object.entries(response.headers)) {

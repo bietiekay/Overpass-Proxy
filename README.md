@@ -51,6 +51,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `PORT` | `8080` | Listen port |
+| `LOG_VERBOSITY` | `info` | Logging verbosity: `errors`, `info`, or `debug` for full request/response details |
 | `NODE_ENV` | `production` | Runtime environment |
 
 The defaults for `TILE_PRECISION` and `MAX_TILES_PER_REQUEST` are tuned for the ToiletFinder iOS client: a precision of 5 keeps

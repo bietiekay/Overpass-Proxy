@@ -98,6 +98,7 @@ Environment-driven configuration is loaded at startup with sensible defaults:
 - `CACHE_TTL_SECONDS` and derived `SWR_SECONDS` (min 30s)
 - `TILE_PRECISION`
 - `MAX_TILES_PER_REQUEST`
+- `LOG_VERBOSITY` (errors/info/debug)
 - `NODE_ENV`
 The `buildServer` helper allows tests to override any configuration or inject custom Redis clients.
 
