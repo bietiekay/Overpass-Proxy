@@ -1,5 +1,5 @@
 import type { BoundingBox } from './bbox.js';
-import type { OverpassElement, OverpassResponse } from './store.js';
+import { filterElementsByBbox, type OverpassElement, type OverpassResponse } from './store.js';
 
 const cloneElement = (element: OverpassElement): OverpassElement => {
   const cloned: OverpassElement = { ...element };
@@ -15,7 +15,7 @@ const cloneElement = (element: OverpassElement): OverpassElement => {
   return cloned;
 };
 
-export const combineResponses = (responses: OverpassResponse[], _bbox: BoundingBox): OverpassResponse => {
+export const combineResponses = (responses: OverpassResponse[], bbox: BoundingBox): OverpassResponse => {
   const metadata = responses.map((response) => ({
     version: response.version,
     generator: response.generator,
@@ -25,7 +25,9 @@ export const combineResponses = (responses: OverpassResponse[], _bbox: BoundingB
   const elements = new Map<string, OverpassElement>();
 
   for (const response of responses) {
-    for (const element of response.elements) {
+    const filteredElements = filterElementsByBbox(response.elements, bbox);
+
+    for (const element of filteredElements) {
       const key = `${element.type}:${element.id}`;
       elements.set(key, cloneElement(element));
     }
