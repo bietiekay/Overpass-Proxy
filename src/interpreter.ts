@@ -181,9 +181,11 @@ const handleCacheable = async (
     }
   }
 
-  const fineTilesByHash = new Map(tiles.map((t) => [t.hash, t] as const));
-
-  const writeFineTilesFromGroup = async (response: OverpassResponse, fineTiles: TileInfo[]) => {
+  const writeFineTilesFromGroup = async (
+    _groupBounds: { south: number; west: number; north: number; east: number },
+    response: OverpassResponse,
+    fineTiles: TileInfo[]
+  ) => {
     const entries = fineTiles.map((fine) => ({
       tile: fine,
       response: {
@@ -208,7 +210,7 @@ const handleCacheable = async (
       await deps.store
         .withRefreshLock(representative, normalisedAmenity, async () => {
           const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
-          await writeFineTilesFromGroup(response, group.tiles);
+          await writeFineTilesFromGroup(group.bounds, response, group.tiles);
         })
         .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
     });
@@ -220,7 +222,7 @@ const handleCacheable = async (
     if (!representative) continue;
     const outcome = await deps.store.withMissLock(representative, normalisedAmenity, async () => {
       const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
-      await writeFineTilesFromGroup(response, group.tiles);
+      await writeFineTilesFromGroup(group.bounds, response, group.tiles);
     });
 
     for (const fine of group.tiles) {
