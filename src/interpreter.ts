@@ -182,15 +182,16 @@ const handleCacheable = async (
   }
 
   const writeFineTilesFromGroup = async (
-    _groupBounds: { south: number; west: number; north: number; east: number },
+    groupBounds: { south: number; west: number; north: number; east: number },
     response: OverpassResponse,
     fineTiles: TileInfo[]
   ) => {
+    const groupElements = filterElementsByBbox(response.elements, groupBounds);
     const entries = fineTiles.map((fine) => ({
       tile: fine,
       response: {
         ...response,
-        elements: filterElementsByBbox(response.elements, fine.bounds)
+        elements: filterElementsByBbox(groupElements, fine.bounds)
       }
     }));
 
