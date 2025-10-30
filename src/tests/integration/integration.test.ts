@@ -18,12 +18,14 @@ let baseUrl: string;
 let hits: string[];
 let closeMain: (() => Promise<void>) | undefined;
 let redisClient: Redis | undefined;
+let upstreamUrls: string[] = [];
 
 beforeAll(async () => {
   const env = await createTestEnvironment();
   stopEnv = env.stop;
   hits = env.hits;
   redisClient = env.redis;
+  upstreamUrls = env.upstreamUrls;
 
   await redisClient.flushall();
 
@@ -172,6 +174,48 @@ describe('integration', () => {
 
     await app.close();
     await env.stop();
+  });
+
+  it('bypasses caching when transparentOnly is enabled', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const { app } = buildServer({
+      configOverrides: {
+        upstreamUrls,
+        transparentOnly: true,
+        tilePrecision: 5
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    const url = `http://127.0.0.1:${port}`;
+
+    try {
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const afterFirst = hits.length;
+      expect(afterFirst).toBeGreaterThan(0);
+
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      expect(hits.length).toBeGreaterThan(afterFirst);
+    } finally {
+      await app.close();
+      hits.splice(0, hits.length);
+    }
   });
 
   it('fills missing tiles with minimal upstream requests', async () => {

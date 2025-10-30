@@ -255,6 +255,11 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
     method: ['GET', 'POST'],
     url: '/api/interpreter',
     handler: async (request, reply) => {
+      if (deps.config.transparentOnly) {
+        await proxyTransparent(request, reply, deps.config);
+        return;
+      }
+
       const query = requestBodyToQuery(request as InterpreterRequest);
       if (!query) {
         reply.code(400);
