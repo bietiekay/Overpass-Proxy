@@ -259,6 +259,7 @@ export class TileStore {
     const amenitySuffix = amenityKey(amenity);
     const pipeline = this.redis.pipeline();
     const tileHashes: string[] = [];
+    const entriesWithPayload: Array<{ tile: TileInfo; payload: OverpassTilePayload }> = [];
 
     for (const { tile, response } of entries) {
       const payload: OverpassTilePayload = {
@@ -268,6 +269,7 @@ export class TileStore {
       };
       tileHashes.push(tile.hash);
       pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload), 'PX', expiryMs);
+      entriesWithPayload.push({ tile, payload });
     }
 
     const results = await pipeline.exec();
@@ -290,18 +292,11 @@ export class TileStore {
       logContext.tile = tileHashes[0];
     }
 
-    this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt);
+    for (const { tile, payload } of entriesWithPayload) {
+      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt);
+    }
 
-    logger.info(
-      {
-        tile: tile.hash,
-        expiresAt: payload.expiresAt,
-        ttlSeconds: this.options.ttlSeconds,
-        swrSeconds: this.options.swrSeconds,
-        amenity: amenitySuffix
-      },
-      'redis tile write'
-    );
+    logger.info(logContext, 'redis tile write');
   }
 
   public async readTile(tile: TileInfo, amenity: string): Promise<CachedTile | undefined> {
