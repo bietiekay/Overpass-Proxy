@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-floating-promises */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
 
@@ -15,7 +14,7 @@ import { applyConditionalHeaders } from './headers.js';
 import { logger } from './logger.js';
 import type { TileStore } from './store.js';
 import { tilesForBoundingBox, type TileInfo } from './tiling.js';
-import { filterElementsByBbox } from './store.js';
+import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
 
@@ -131,7 +130,6 @@ const handleCacheable = async (
   const bbox = extractBoundingBox(query);
   if (!bbox) {
     reply.code(400);
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
     reply.send({ error: 'Bounding box required' });
     return;
   }
@@ -154,7 +152,7 @@ const handleCacheable = async (
   const missing = tiles.filter((tile) => !cached.has(tile.hash));
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
 
-  const responses = [];
+  const responses: OverpassResponse[] = [];
   // limit concurrent stale refreshes per request (applied to coarse groups)
   const maxConcurrentRefreshes = 8;
   let activeRefreshes = 0;
@@ -181,15 +179,13 @@ const handleCacheable = async (
     }
   }
 
-  const fineTilesByHash = new Map(tiles.map((t) => [t.hash, t] as const));
-
   const writeFineTilesFromGroup = async (
     groupBounds: { south: number; west: number; north: number; east: number },
-    response: any,
+    response: OverpassResponse,
     fineTiles: TileInfo[]
   ) => {
     for (const fine of fineTiles) {
-      const filtered = {
+      const filtered: OverpassResponse = {
         ...response,
         elements: filterElementsByBbox(response.elements, fine.bounds)
       };
@@ -241,12 +237,9 @@ const handleCacheable = async (
     return;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
   reply.header('Content-Type', 'application/json');
   const cacheHeader = missing.length === 0 && stale.length === 0 ? 'HIT' : missing.length === 0 ? 'STALE' : 'MISS';
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
   reply.header('X-Cache', cacheHeader);
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
   reply.send(assembled);
 };
 

@@ -46,7 +46,6 @@ export const createMockOverpass = () => {
     const bbox = extractBoundingBox(query);
     if (!bbox) {
       reply.type('application/json');
-      // eslint-disable-next-line @typescript-eslint/no-floating-promises
       reply.send({});
       return;
     }
@@ -59,7 +58,6 @@ export const createMockOverpass = () => {
 
     hits.push(`${bbox.south},${bbox.west},${bbox.north},${bbox.east}:${amenity}`);
     reply.type('application/json');
-    // eslint-disable-next-line @typescript-eslint/no-floating-promises
     reply.send(buildResponse(bbox, amenity));
   });
 
