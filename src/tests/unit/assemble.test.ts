@@ -18,8 +18,10 @@ describe('combineResponses', () => {
     expect(result.elements).toHaveLength(2);
   });
 
-  it('filters nodes outside bbox', () => {
+  it('returns cloned elements without additional filtering', () => {
     const result = combineResponses([sample], { south: 1.5, west: 1.5, north: 3, east: 3 });
-    expect(result.elements.find((element) => element.type === 'node')).toBeUndefined();
+    const node = result.elements.find((element) => element.type === 'node');
+    expect(node).toEqual(sample.elements[0]);
+    expect(node).not.toBe(sample.elements[0]);
   });
 });
