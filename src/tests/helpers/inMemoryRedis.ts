@@ -60,4 +60,33 @@ export class InMemoryRedis extends EventEmitter {
     this.store.clear();
     return 'OK';
   }
+
+  pipeline(): InMemoryPipeline {
+    return new InMemoryPipeline(this);
+  }
+}
+
+class InMemoryPipeline {
+  private commands: Array<() => Promise<'OK' | null>> = [];
+
+  constructor(private readonly redis: InMemoryRedis) {}
+
+  set(key: string, value: string, mode?: string, duration?: number, condition?: string): this {
+    this.commands.push(() => this.redis.set(key, value, mode, duration, condition));
+    return this;
+  }
+
+  async exec(): Promise<Array<[Error | null, 'OK' | null]>> {
+    const results: Array<[Error | null, 'OK' | null]> = [];
+    for (const command of this.commands) {
+      try {
+        const result = await command();
+        results.push([null, result]);
+      } catch (error) {
+        results.push([error as Error, null]);
+      }
+    }
+    this.commands = [];
+    return results;
+  }
 }

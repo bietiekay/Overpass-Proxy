@@ -13,7 +13,7 @@ import type { AppConfig } from './config.js';
 import { TooManyTilesError } from './errors.js';
 import { applyConditionalHeaders } from './headers.js';
 import { logger } from './logger.js';
-import type { TileStore } from './store.js';
+import type { OverpassResponse, TileStore } from './store.js';
 import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
@@ -183,18 +183,16 @@ const handleCacheable = async (
 
   const fineTilesByHash = new Map(tiles.map((t) => [t.hash, t] as const));
 
-  const writeFineTilesFromGroup = async (
-    groupBounds: { south: number; west: number; north: number; east: number },
-    response: any,
-    fineTiles: TileInfo[]
-  ) => {
-    for (const fine of fineTiles) {
-      const filtered = {
+  const writeFineTilesFromGroup = async (response: OverpassResponse, fineTiles: TileInfo[]) => {
+    const entries = fineTiles.map((fine) => ({
+      tile: fine,
+      response: {
         ...response,
         elements: filterElementsByBbox(response.elements, fine.bounds)
-      };
-      await deps.store.writeTile(fine, filtered, normalisedAmenity);
-    }
+      }
+    }));
+
+    await deps.store.writeTiles(entries, normalisedAmenity);
   };
 
   const planOptions = {
@@ -210,7 +208,7 @@ const handleCacheable = async (
       await deps.store
         .withRefreshLock(representative, normalisedAmenity, async () => {
           const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
-          await writeFineTilesFromGroup(group.bounds, response, group.tiles);
+          await writeFineTilesFromGroup(response, group.tiles);
         })
         .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
     });
@@ -222,7 +220,7 @@ const handleCacheable = async (
     if (!representative) continue;
     const outcome = await deps.store.withMissLock(representative, normalisedAmenity, async () => {
       const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
-      await writeFineTilesFromGroup(group.bounds, response, group.tiles);
+      await writeFineTilesFromGroup(response, group.tiles);
     });
 
     for (const fine of group.tiles) {

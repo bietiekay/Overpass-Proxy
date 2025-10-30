@@ -44,6 +44,28 @@ const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
 export class TileStore {
   constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {}
 
+  private buildPayload(response: OverpassResponse): OverpassTilePayload {
+    const now = Date.now();
+    return {
+      response,
+      fetchedAt: now,
+      expiresAt: now + this.options.ttlSeconds * 1000
+    };
+  }
+
+  private logWrite(tile: TileInfo, payload: OverpassTilePayload, amenitySuffix: string): void {
+    logger.info(
+      {
+        tile: tile.hash,
+        expiresAt: payload.expiresAt,
+        ttlSeconds: this.options.ttlSeconds,
+        swrSeconds: this.options.swrSeconds,
+        amenity: amenitySuffix
+      },
+      'redis tile write'
+    );
+  }
+
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {
     const amenitySuffix = amenityKey(amenity);
     const keys = tiles.map((tile) => tileKey(tile.hash, amenitySuffix));
@@ -92,14 +114,8 @@ export class TileStore {
   }
 
   public async writeTile(tile: TileInfo, response: OverpassResponse, amenity: string): Promise<void> {
-    const now = Date.now();
-    const payload: OverpassTilePayload = {
-      response,
-      fetchedAt: now,
-      expiresAt: now + this.options.ttlSeconds * 1000
-    };
-
     const amenitySuffix = amenityKey(amenity);
+    const payload = this.buildPayload(response);
     await this.redis.set(
       tileKey(tile.hash, amenitySuffix),
       JSON.stringify(payload),
@@ -107,16 +123,40 @@ export class TileStore {
       (this.options.ttlSeconds + this.options.swrSeconds) * 1000
     );
 
-    logger.info(
-      {
-        tile: tile.hash,
-        expiresAt: payload.expiresAt,
-        ttlSeconds: this.options.ttlSeconds,
-        swrSeconds: this.options.swrSeconds,
-        amenity: amenitySuffix
-      },
-      'redis tile write'
-    );
+    this.logWrite(tile, payload, amenitySuffix);
+  }
+
+  public async writeTiles(
+    entries: Array<{ tile: TileInfo; response: OverpassResponse }>,
+    amenity: string
+  ): Promise<void> {
+    if (entries.length === 0) {
+      return;
+    }
+
+    const amenitySuffix = amenityKey(amenity);
+    const px = (this.options.ttlSeconds + this.options.swrSeconds) * 1000;
+    const pipeline = this.redis.pipeline();
+
+    for (const { tile, response } of entries) {
+      const payload = this.buildPayload(response);
+      pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload), 'PX', px);
+      this.logWrite(tile, payload, amenitySuffix);
+    }
+
+    const results = await pipeline.exec();
+    if (!results) {
+      return;
+    }
+
+    results.forEach(([error], index) => {
+      if (error) {
+        const { tile } = entries[index];
+        throw Object.assign(error, {
+          message: `failed to write tile ${tile.hash}: ${error.message}`
+        });
+      }
+    });
   }
 
   public async readTile(tile: TileInfo, amenity: string): Promise<CachedTile | undefined> {
