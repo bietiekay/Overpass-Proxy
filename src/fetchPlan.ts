@@ -6,94 +6,74 @@ export interface TileFetchGroup {
   tiles: TileInfo[];
 }
 
-const unionBounds = (tiles: TileInfo[]): BoundingBox => {
-  const first = tiles[0];
-  if (!first) {
-    throw new Error('Cannot compute bounds for empty tile set');
-  }
-
-  let { south, west, north, east } = first.bounds;
-
-  for (let index = 1; index < tiles.length; index += 1) {
-    const bounds = tiles[index]?.bounds;
-    if (!bounds) {
-      continue;
-    }
-
-    if (bounds.south < south) south = bounds.south;
-    if (bounds.west < west) west = bounds.west;
-    if (bounds.north > north) north = bounds.north;
-    if (bounds.east > east) east = bounds.east;
-  }
-
-  return { south, west, north, east };
-};
-
 const area = (bounds: BoundingBox): number => {
   const width = Math.max(0, bounds.east - bounds.west);
   const height = Math.max(0, bounds.north - bounds.south);
   return width * height;
 };
 
-const mergeGroups = (groups: TileFetchGroup[], targetCount: number): TileFetchGroup[] => {
-  if (groups.length <= targetCount) {
-    return groups;
+const expandBounds = (current: BoundingBox, addition: BoundingBox): BoundingBox => {
+  return {
+    south: Math.min(current.south, addition.south),
+    west: Math.min(current.west, addition.west),
+    north: Math.max(current.north, addition.north),
+    east: Math.max(current.east, addition.east)
+  };
+};
+
+const groupCoarseTiles = (tiles: TileInfo[], targetSize: number): TileFetchGroup[] => {
+  if (tiles.length === 0) {
+    return [];
   }
 
-  const working = [...groups];
+  const sorted = [...tiles].sort((a, b) => a.hash.localeCompare(b.hash));
+  const groups: TileFetchGroup[] = [];
 
-  while (working.length > targetCount) {
-    let bestPair: [number, number] | null = null;
-    let bestScore = Number.POSITIVE_INFINITY;
+  let currentTiles: TileInfo[] = [];
+  let currentBounds: BoundingBox | null = null;
+  let referenceArea = 0;
 
-    for (let i = 0; i < working.length; i += 1) {
-      for (let j = i + 1; j < working.length; j += 1) {
-        const groupA = working[i];
-        const groupB = working[j];
-        if (!groupA || !groupB) {
-          continue;
-        }
+  for (const tile of sorted) {
+    const tileArea = area(tile.bounds);
 
-        const combinedTiles = [...groupA.tiles, ...groupB.tiles];
-        const combinedBounds = unionBounds(combinedTiles);
-        const areaIncrease = area(combinedBounds) - area(groupA.bounds) - area(groupB.bounds);
-        const totalTiles = combinedTiles.length;
-        const score = areaIncrease / Math.max(1, totalTiles);
-
-        if (score < bestScore) {
-          bestScore = score;
-          bestPair = [i, j];
-        }
-      }
+    if (!currentBounds) {
+      currentBounds = { ...tile.bounds };
+      currentTiles = [tile];
+      referenceArea = tileArea;
+      continue;
     }
 
-    if (!bestPair) {
-      break;
+    if (currentTiles.length >= targetSize) {
+      groups.push({ bounds: currentBounds, tiles: [...currentTiles] });
+      currentBounds = { ...tile.bounds };
+      currentTiles = [tile];
+      referenceArea = tileArea;
+      continue;
     }
 
-    const [indexA, indexB] = bestPair;
-    const groupA = working[indexA];
-    const groupB = working[indexB];
-    if (!groupA || !groupB) {
-      break;
+    const nextBounds = expandBounds(currentBounds, tile.bounds);
+    const nextArea = area(nextBounds);
+    const nextReferenceArea = Math.max(referenceArea, tileArea);
+    const areaLimit = nextReferenceArea * targetSize;
+
+    if (areaLimit > 0 && nextArea > areaLimit) {
+      groups.push({ bounds: currentBounds, tiles: [...currentTiles] });
+      currentBounds = { ...tile.bounds };
+      currentTiles = [tile];
+      referenceArea = tileArea;
+      continue;
     }
 
-    const mergedTiles = [...groupA.tiles, ...groupB.tiles];
-    const mergedBounds = unionBounds(mergedTiles);
-    const merged: TileFetchGroup = { bounds: mergedBounds, tiles: mergedTiles };
-
-    if (indexA > indexB) {
-      working.splice(indexA, 1);
-      working.splice(indexB, 1);
-    } else {
-      working.splice(indexB, 1);
-      working.splice(indexA, 1);
-    }
-
-    working.push(merged);
+    currentBounds = nextBounds;
+    currentTiles.push(tile);
+    referenceArea = nextReferenceArea;
   }
 
-  return working;
+  if (currentBounds && currentTiles.length > 0) {
+    groups.push({ bounds: currentBounds, tiles: [...currentTiles] });
+  }
+
+  return groups;
 };
 
 const sortGroups = (groups: TileFetchGroup[]): TileFetchGroup[] => {
@@ -155,14 +135,8 @@ export const planTileFetches = (tiles: TileInfo[], options: PlanOptions): TileFe
       continue;
     }
 
-    const initialGroups: TileFetchGroup[] = coarseTiles.map((tile) => ({
-      bounds: tile.bounds,
-      tiles: [tile]
-    }));
-
-    const targetCount = Math.max(1, Math.ceil(coarseTiles.length / desiredTilesPerRequest));
-    const merged = mergeGroups(initialGroups, targetCount);
-    groups.push(...merged);
+    const grouped = groupCoarseTiles(coarseTiles, desiredTilesPerRequest);
+    groups.push(...grouped);
   }
 
   return sortGroups(groups);
