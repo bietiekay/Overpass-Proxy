@@ -2,6 +2,7 @@ version: '3.3'
 services:
   proxy:
     build: .
+    restart: unless-stopped
     environment:
       PORT: 8080
       UPSTREAM_URLS: https://overpass-api.de/api/interpreter
@@ -13,6 +14,7 @@ services:
       - redis
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "127.0.0.1:6380:6379"
     volumes:
