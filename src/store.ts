@@ -44,8 +44,7 @@ const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
 export class TileStore {
   constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {}
 
-  private buildPayload(response: OverpassResponse): OverpassTilePayload {
-    const now = Date.now();
+  private buildPayload(response: OverpassResponse, now = Date.now()): OverpassTilePayload {
     return {
       response,
       fetchedAt: now,
@@ -137,9 +136,10 @@ export class TileStore {
     const amenitySuffix = amenityKey(amenity);
     const px = (this.options.ttlSeconds + this.options.swrSeconds) * 1000;
     const pipeline = this.redis.pipeline();
+    const now = Date.now();
 
     for (const { tile, response } of entries) {
-      const payload = this.buildPayload(response);
+      const payload = this.buildPayload(response, now);
       pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload), 'PX', px);
       this.logWrite(tile, payload, amenitySuffix);
     }
