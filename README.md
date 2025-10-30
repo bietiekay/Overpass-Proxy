@@ -17,7 +17,7 @@ adding Redis-backed geohash tile caching for amenity-focused JSON bounding-box q
 
 - Fastify-based HTTP server exposing the `/api/*` Overpass endpoints
 - Strict amenity-only handling for `/api/interpreter`; non-JSON or non-amenity queries are rejected with helpful errors, and recognised amenity filters are preserved end-to-end
-- Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh, segmented by requested amenity type
+- Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh, segmented by requested amenity type and persisted via pipelined Redis bulk writes
 - Structured logging via Pino
 - Comprehensive Vitest unit and integration test suites
 - GitHub Actions CI workflow running linting and tests with coverage

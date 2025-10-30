@@ -92,31 +92,54 @@ export class TileStore {
   }
 
   public async writeTile(tile: TileInfo, response: OverpassResponse, amenity: string): Promise<void> {
+    await this.writeTiles([{ tile, response }], amenity);
+  }
+
+  public async writeTiles(
+    entries: Array<{ tile: TileInfo; response: OverpassResponse }>,
+    amenity: string
+  ): Promise<void> {
+    if (entries.length === 0) {
+      return;
+    }
+
     const now = Date.now();
-    const payload: OverpassTilePayload = {
-      response,
-      fetchedAt: now,
-      expiresAt: now + this.options.ttlSeconds * 1000
+    const expiryMs = (this.options.ttlSeconds + this.options.swrSeconds) * 1000;
+    const amenitySuffix = amenityKey(amenity);
+    const pipeline = this.redis.pipeline();
+    const tileHashes: string[] = [];
+
+    for (const { tile, response } of entries) {
+      const payload: OverpassTilePayload = {
+        response,
+        fetchedAt: now,
+        expiresAt: now + this.options.ttlSeconds * 1000
+      };
+      tileHashes.push(tile.hash);
+      pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload), 'PX', expiryMs);
+    }
+
+    const results = await pipeline.exec();
+    for (const [error] of results ?? []) {
+      if (error) {
+        throw error;
+      }
+    }
+
+    const logContext: Record<string, unknown> = {
+      tiles: tileHashes,
+      count: tileHashes.length,
+      expiresAt: now + this.options.ttlSeconds * 1000,
+      ttlSeconds: this.options.ttlSeconds,
+      swrSeconds: this.options.swrSeconds,
+      amenity: amenitySuffix
     };
 
-    const amenitySuffix = amenityKey(amenity);
-    await this.redis.set(
-      tileKey(tile.hash, amenitySuffix),
-      JSON.stringify(payload),
-      'PX',
-      (this.options.ttlSeconds + this.options.swrSeconds) * 1000
-    );
+    if (tileHashes.length === 1) {
+      logContext.tile = tileHashes[0];
+    }
 
-    logger.info(
-      {
-        tile: tile.hash,
-        expiresAt: payload.expiresAt,
-        ttlSeconds: this.options.ttlSeconds,
-        swrSeconds: this.options.swrSeconds,
-        amenity: amenitySuffix
-      },
-      'redis tile write'
-    );
+    logger.info(logContext, 'redis tile write');
   }
 
   public async readTile(tile: TileInfo, amenity: string): Promise<CachedTile | undefined> {
