@@ -6,7 +6,7 @@ The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public
 ## 2. Architectural Overview
 - **Entry point:** `src/index.ts` builds and starts a Fastify server, wiring configuration, Redis connections, and route registration. Redis connectivity can be injected for testing.
 - **Routing:** `src/interpreter.ts` declares the `/api/*` routes, validating amenity-focused `/api/interpreter` queries before executing the caching pipeline. It extracts the requested amenity type from the Overpass query, enforces tile limits, applies conditional headers, and stamps cache metadata headers.
-- **Caching layer:** `src/store.ts` encapsulates Redis read/write access, including TTL and stale-while-revalidate (SWR) handling via refresh locks.
+- **Caching layer:** `src/store.ts` encapsulates Redis read/write access, including TTL and stale-while-revalidate (SWR) handling via refresh locks and pipelined bulk writes for tile fan-out.
 - **Query analysis:** `src/bbox.ts` extracts bbox tuples and detects JSON outputs, while `src/tiling.ts` converts bbox envelopes into geohash tiles.
 - **Upstream communication:** `src/upstream.ts` provides helpers to proxy non-interpreter endpoints and to materialise amenity-scoped per-tile JSON queries from bbox coordinates.
 - **Response assembly:** `src/assemble.ts` deduplicates and merges cached tile payloads, retaining metadata and filtering by bbox.
@@ -76,7 +76,7 @@ flowchart TD
 3. **Cache lookup:** For each tile, Redis is queried in bulk. Stored payloads include `response`, `fetchedAt`, and `expiresAt` timestamps.
 4. **Stale tracking:** Tiles past their TTL are marked `stale` but still served immediately while triggering asynchronous refreshes guarded by a per-tile lock (SWR window `SWR_SECONDS`).
 5. **Upstream fetch:** Missing tiles are fetched individually by issuing the canonical Overpass multi-entity bbox query (`node`, `way`, `relation`) via POST `application/x-www-form-urlencoded`, scoped to the specific amenity type supplied by the client.
-6. **Persistence:** Fresh tile responses are persisted with a TTL covering both the primary cache duration and SWR window, namespaced by amenity.
+6. **Persistence:** Fresh tile responses are persisted with a TTL covering both the primary cache duration and SWR window, namespaced by amenity. Tile writes are batched per upstream response and flushed to Redis via `MULTI/EXEC` pipelines to avoid per-tile round trips.
 7. **Assembly:** All tile responses (cached or freshly fetched) are merged, deduplicated by `(type,id)`, filtered against the original bbox, and returned with `Content-Type: application/json`. The proxy also emits `X-Cache` headers (`HIT`, `STALE`, or `MISS`).
 8. **Conditional delivery:** ETags are generated from the assembled JSON payload. Matching `If-None-Match` headers yield a 304 response with no body.
 

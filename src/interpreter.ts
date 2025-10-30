@@ -180,17 +180,19 @@ const handleCacheable = async (
   }
 
   const writeFineTilesFromGroup = async (
-    groupBounds: { south: number; west: number; north: number; east: number },
     response: OverpassResponse,
     fineTiles: TileInfo[]
   ) => {
-    for (const fine of fineTiles) {
+    const entries = fineTiles.map((fine) => {
       const filtered: OverpassResponse = {
         ...response,
         elements: filterElementsByBbox(response.elements, fine.bounds)
       };
-      await deps.store.writeTile(fine, filtered, normalisedAmenity);
-    }
+
+      return { tile: fine, response: filtered };
+    });
+
+    await deps.store.writeTiles(entries, normalisedAmenity);
   };
 
   const planOptions = {
@@ -206,7 +208,7 @@ const handleCacheable = async (
       await deps.store
         .withRefreshLock(representative, normalisedAmenity, async () => {
           const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
-          await writeFineTilesFromGroup(group.bounds, response, group.tiles);
+          await writeFineTilesFromGroup(response, group.tiles);
         })
         .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
     });
@@ -218,7 +220,7 @@ const handleCacheable = async (
     if (!representative) continue;
     const outcome = await deps.store.withMissLock(representative, normalisedAmenity, async () => {
       const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
-      await writeFineTilesFromGroup(group.bounds, response, group.tiles);
+      await writeFineTilesFromGroup(response, group.tiles);
     });
 
     for (const fine of group.tiles) {
