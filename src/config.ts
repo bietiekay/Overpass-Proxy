@@ -11,6 +11,7 @@ export interface AppConfig {
   maxTilesPerRequest: number;
   nodeEnv: string;
   upstreamFailureCooldownSeconds: number;
+  transparentOnly: boolean;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -20,6 +21,22 @@ const toNumber = (value: string | undefined, fallback: number): number => {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const toBoolean = (value: string | undefined, fallback: boolean): boolean => {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const normalised = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalised)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalised)) {
+    return false;
+  }
+
+  return fallback;
 };
 
 export const loadConfig = (): AppConfig => {
@@ -55,6 +72,7 @@ export const loadConfig = (): AppConfig => {
     upstreamTilePrecision,
     maxTilesPerRequest: toNumber(env.MAX_TILES_PER_REQUEST, 1024),
     nodeEnv: env.NODE_ENV ?? 'production',
-    upstreamFailureCooldownSeconds: toNumber(env.UPSTREAM_FAILURE_COOLDOWN_SECONDS, 60)
+    upstreamFailureCooldownSeconds: toNumber(env.UPSTREAM_FAILURE_COOLDOWN_SECONDS, 60),
+    transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false)
   };
 };
