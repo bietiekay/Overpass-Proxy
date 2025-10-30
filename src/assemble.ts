@@ -1,8 +1,19 @@
-import mergeDeep from 'merge-deep';
-
 import type { BoundingBox } from './bbox.js';
-import type { OverpassElement, OverpassResponse } from './store.js';
-import { filterElementsByBbox } from './store.js';
+import { filterElementsByBbox, type OverpassElement, type OverpassResponse } from './store.js';
+
+const cloneElement = (element: OverpassElement): OverpassElement => {
+  const cloned: OverpassElement = { ...element };
+  if (element.tags) {
+    cloned.tags = { ...element.tags };
+  }
+  if (element.nodes) {
+    cloned.nodes = [...element.nodes];
+  }
+  if (element.members) {
+    cloned.members = element.members.map((member) => ({ ...member }));
+  }
+  return cloned;
+};
 
 export const combineResponses = (responses: OverpassResponse[], bbox: BoundingBox): OverpassResponse => {
   const metadata = responses.map((response) => ({
@@ -14,9 +25,11 @@ export const combineResponses = (responses: OverpassResponse[], bbox: BoundingBo
   const elements = new Map<string, OverpassElement>();
 
   for (const response of responses) {
-    for (const element of filterElementsByBbox(response.elements, bbox)) {
+    const filteredElements = filterElementsByBbox(response.elements, bbox);
+
+    for (const element of filteredElements) {
       const key = `${element.type}:${element.id}`;
-      elements.set(key, mergeDeep({}, element));
+      elements.set(key, cloneElement(element));
     }
   }
 

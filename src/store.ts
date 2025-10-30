@@ -5,6 +5,149 @@ import { logger } from './logger.js';
 import type { TileInfo } from './tiling.js';
 import { tileKey } from './tiling.js';
 
+type PresenceState = 'present' | 'missing';
+
+interface PresenceEntry {
+  state: PresenceState;
+  expiresAt: number;
+}
+
+type PresenceListener = () => void;
+
+class TilePresenceCache {
+  private readonly entries = new Map<string, Map<string, PresenceEntry>>();
+
+  private readonly listeners = new Map<string, Set<PresenceListener>>();
+
+  constructor(private readonly defaultMissingTtlMs: number) {}
+
+  private getAmenityEntries(amenity: string): Map<string, PresenceEntry> {
+    let amenityEntries = this.entries.get(amenity);
+    if (!amenityEntries) {
+      amenityEntries = new Map();
+      this.entries.set(amenity, amenityEntries);
+    }
+    return amenityEntries;
+  }
+
+  private fullKey(amenity: string, tileHash: string): string {
+    return `${amenity}:${tileHash}`;
+  }
+
+  private clearIfExpired(amenity: string, tileHash: string, entry: PresenceEntry | undefined): PresenceEntry | undefined {
+    if (!entry) {
+      return undefined;
+    }
+    if (entry.expiresAt > Date.now()) {
+      return entry;
+    }
+    const amenityEntries = this.entries.get(amenity);
+    amenityEntries?.delete(tileHash);
+    if (amenityEntries && amenityEntries.size === 0) {
+      this.entries.delete(amenity);
+    }
+    return undefined;
+  }
+
+  public markPresent(amenity: string, tileHash: string, expiresAt: number): void {
+    const entry: PresenceEntry = { state: 'present', expiresAt };
+    this.getAmenityEntries(amenity).set(tileHash, entry);
+    this.notify(amenity, tileHash);
+  }
+
+  public markMissing(amenity: string, tileHash: string, ttlMs?: number): void {
+    const duration = Math.max(1, Math.floor(ttlMs ?? this.defaultMissingTtlMs));
+    const entry: PresenceEntry = { state: 'missing', expiresAt: Date.now() + duration };
+    this.getAmenityEntries(amenity).set(tileHash, entry);
+  }
+
+  public get(amenity: string, tileHash: string): PresenceEntry | undefined {
+    const amenityEntries = this.entries.get(amenity);
+    if (!amenityEntries) {
+      return undefined;
+    }
+    const entry = amenityEntries.get(tileHash);
+    return this.clearIfExpired(amenity, tileHash, entry);
+  }
+
+  private addListener(key: string, listener: PresenceListener): void {
+    const existing = this.listeners.get(key);
+    if (existing) {
+      existing.add(listener);
+    } else {
+      this.listeners.set(key, new Set([listener]));
+    }
+  }
+
+  private removeListener(key: string, listener: PresenceListener): void {
+    const existing = this.listeners.get(key);
+    if (!existing) {
+      return;
+    }
+    existing.delete(listener);
+    if (existing.size === 0) {
+      this.listeners.delete(key);
+    }
+  }
+
+  private notify(amenity: string, tileHash: string): void {
+    const key = this.fullKey(amenity, tileHash);
+    const listeners = this.listeners.get(key);
+    if (!listeners) {
+      return;
+    }
+    this.listeners.delete(key);
+    for (const listener of listeners) {
+      try {
+        listener();
+      } catch {
+        // ignore listener errors
+      }
+    }
+  }
+
+  public waitForPresent(amenity: string, tileHash: string, timeoutMs: number): Promise<void> {
+    const existing = this.get(amenity, tileHash);
+    if (existing?.state === 'present') {
+      return Promise.resolve();
+    }
+
+    const waitDuration = Math.max(0, Math.floor(timeoutMs));
+    const key = this.fullKey(amenity, tileHash);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeout: NodeJS.Timeout | undefined;
+
+      const complete = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        this.removeListener(key, complete);
+        resolve();
+      };
+
+      if (waitDuration > 0) {
+        timeout = setTimeout(complete, waitDuration);
+      }
+
+      this.addListener(key, complete);
+      const current = this.get(amenity, tileHash);
+      if (current?.state === 'present') {
+        complete();
+      }
+    });
+  }
+
+  public getDefaultMissingTtl(): number {
+    return this.defaultMissingTtlMs;
+  }
+}
+
 export interface CachedTile {
   tile: TileInfo;
   payload: OverpassTilePayload;
@@ -42,7 +185,12 @@ export interface TileStoreOptions {
 const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
 
 export class TileStore {
-  constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {}
+  private readonly presence: TilePresenceCache;
+
+  constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {
+    const missingTtl = Math.max(250, Math.min(2000, options.swrSeconds * 1000));
+    this.presence = new TilePresenceCache(missingTtl);
+  }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {
     const amenitySuffix = amenityKey(amenity);
@@ -60,6 +208,7 @@ export class TileStore {
       const value = values[index];
       if (!value) {
         misses += 1;
+        this.presence.markMissing(amenitySuffix, tile.hash);
         return;
       }
 
@@ -67,6 +216,7 @@ export class TileStore {
         const payload = JSON.parse(value) as OverpassTilePayload;
         const stale = payload.expiresAt < now;
         result.set(tile.hash, { tile, payload, stale });
+        this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt);
         hits += 1;
         if (stale) {
           staleCount += 1;
@@ -74,6 +224,7 @@ export class TileStore {
       } catch {
         result.delete(tile.hash);
         misses += 1;
+        this.presence.markMissing(amenitySuffix, tile.hash);
       }
     });
 
@@ -139,20 +290,40 @@ export class TileStore {
       logContext.tile = tileHashes[0];
     }
 
-    logger.info(logContext, 'redis tile write');
+    this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt);
+
+    logger.info(
+      {
+        tile: tile.hash,
+        expiresAt: payload.expiresAt,
+        ttlSeconds: this.options.ttlSeconds,
+        swrSeconds: this.options.swrSeconds,
+        amenity: amenitySuffix
+      },
+      'redis tile write'
+    );
   }
 
   public async readTile(tile: TileInfo, amenity: string): Promise<CachedTile | undefined> {
-    const key = tileKey(tile.hash, amenityKey(amenity));
+    const amenitySuffix = amenityKey(amenity);
+    const known = this.presence.get(amenitySuffix, tile.hash);
+    if (known?.state === 'missing') {
+      return undefined;
+    }
+
+    const key = tileKey(tile.hash, amenitySuffix);
     const value = await this.redis.get(key);
     if (!value) {
+      this.presence.markMissing(amenitySuffix, tile.hash);
       return undefined;
     }
     try {
       const payload = JSON.parse(value) as OverpassTilePayload;
       const stale = payload.expiresAt < Date.now();
+      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt);
       return { tile, payload, stale };
     } catch {
+      this.presence.markMissing(amenitySuffix, tile.hash);
       return undefined;
     }
   }
@@ -185,18 +356,14 @@ export class TileStore {
     const inflightKey = `${tileKey(tile.hash, keyAmenity)}:inflight`;
     const acquired = await this.redis.set(inflightKey, '1', 'PX', ttlMs, 'NX');
     if (!acquired) {
-      // Another request is fetching this tile. Wait briefly for the tile to appear.
-      const deadline = Date.now() + ttlMs;
-      // simple poll loop with backoff
-      let delay = 50;
-      while (Date.now() < deadline) {
-        const existing = await this.readTile(tile, amenity);
-        if (existing) {
-          return 'waited';
-        }
-        await new Promise((r) => setTimeout(r, delay));
-        delay = Math.min(delay * 2, 400);
+      const existing = await this.readTile(tile, amenity);
+      if (existing) {
+        return 'waited';
       }
+
+      const ttl = await this.redis.pttl(inflightKey);
+      const waitDuration = ttl > 0 ? Math.max(ttl, 1) : Math.min(ttlMs, this.presence.getDefaultMissingTtl());
+      await this.presence.waitForPresent(keyAmenity, tile.hash, waitDuration);
       return 'waited';
     }
 
