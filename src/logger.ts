@@ -1,6 +1,52 @@
-import { pino } from 'pino';
+import { pino, type LoggerOptions, type LevelWithSilent } from 'pino';
 
-export const logger = pino({
-  level: process.env.LOG_LEVEL ?? (process.env.NODE_ENV === 'test' ? 'silent' : 'info'),
-  transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined
-});
+const mapVerbosity = (value: string): LevelWithSilent | null => {
+  switch (value) {
+    case 'errors':
+    case 'error':
+      return 'error';
+    case 'info':
+      return 'info';
+    case 'full':
+    case 'debug':
+    case 'verbose':
+      return 'debug';
+    default:
+      return null;
+  }
+};
+
+export const resolveLogLevel = (env: NodeJS.ProcessEnv = process.env): LevelWithSilent => {
+  const verbosity = env.LOG_VERBOSITY?.toLowerCase().trim();
+  const mapped = verbosity ? mapVerbosity(verbosity) : null;
+  if (mapped) {
+    return mapped;
+  }
+
+  const explicitLevel = env.LOG_LEVEL?.toLowerCase().trim();
+  if (explicitLevel) {
+    return explicitLevel as LevelWithSilent;
+  }
+
+  if (env.NODE_ENV === 'test') {
+    return 'silent';
+  }
+
+  return 'info';
+};
+
+export const createLoggerOptions = (
+  env: NodeJS.ProcessEnv = process.env
+): LoggerOptions => {
+  const options: LoggerOptions = {
+    level: resolveLogLevel(env)
+  };
+
+  if (env.NODE_ENV === 'development') {
+    options.transport = { target: 'pino-pretty' } as LoggerOptions['transport'];
+  }
+
+  return options;
+};
+
+export const logger = pino(createLoggerOptions());

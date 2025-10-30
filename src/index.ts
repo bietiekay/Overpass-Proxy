@@ -4,7 +4,7 @@ import { Redis } from 'ioredis';
 
 import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
-import { logger } from './logger.js';
+import { createLoggerOptions, logger } from './logger.js';
 import { TileStore } from './store.js';
 
 export interface BuildServerOptions {
@@ -15,7 +15,7 @@ export interface BuildServerOptions {
 export const buildServer = (options: BuildServerOptions = {}) => {
   const baseConfig = loadConfig();
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
-  const app = Fastify({ logger: true });
+  const app = Fastify({ logger: createLoggerOptions() });
   void app.register(formbody);
 
   // Simple CORS handling for browser clients

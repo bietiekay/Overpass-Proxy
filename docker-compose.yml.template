@@ -6,6 +6,7 @@ services:
       PORT: 8080
       UPSTREAM_URLS: https://overpass-api.de/api/interpreter
       REDIS_URL: redis://redis:6379
+      LOG_VERBOSITY: info # errors | info | debug
     ports:
       - "127.0.0.1:5002:8080"
     depends_on:
