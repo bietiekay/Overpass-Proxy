@@ -17,11 +17,13 @@ import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
+import { RequestStatistics, type CacheStatus } from './stats.js';
 
 interface InterpreterDeps {
   config: AppConfig;
   redis: Redis;
   store: TileStore;
+  stats: RequestStatistics;
 }
 
 type InterpreterRequest = FastifyRequest;
@@ -235,12 +237,22 @@ const handleCacheable = async (
 
   const assembled = combineResponses(responses, bbox);
 
+  const cacheHeader: CacheStatus =
+    missing.length === 0 && stale.length === 0 ? 'HIT' : missing.length === 0 ? 'STALE' : 'MISS';
+
+  await deps.stats.recordRequest({
+    amenity: normalisedAmenity,
+    clientIp: request.ip,
+    bbox,
+    cacheStatus: cacheHeader,
+    tileCount: tiles.length
+  });
+
   if (applyConditionalHeaders(request, reply, assembled)) {
     return;
   }
 
   reply.header('Content-Type', 'application/json');
-  const cacheHeader = missing.length === 0 && stale.length === 0 ? 'HIT' : missing.length === 0 ? 'STALE' : 'MISS';
   reply.header('X-Cache', cacheHeader);
   reply.send(assembled);
 };
@@ -283,6 +295,12 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
         reply.send({ error: 'Internal server error' });
       }
     }
+  });
+
+  app.get('/api/statistics', async (_request, reply) => {
+    const snapshot = await deps.stats.getSnapshot();
+    reply.header('Content-Type', 'application/json');
+    reply.send(snapshot);
   });
 
   const transparentEndpoints = ['/api/status', '/api/timestamp', '/api/timestamp/*', '/api/kill_my_queries'];

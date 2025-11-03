@@ -6,6 +6,7 @@ services:
     environment:
       PORT: 8080
       UPSTREAM_URLS: https://overpass-api.de/api/interpreter
+      UPSTREAM_DAILY_LIMIT: -1 # -1 keeps upstream requests unlimited
       REDIS_URL: redis://redis:6379
       LOG_VERBOSITY: info # errors | info | debug
     ports:

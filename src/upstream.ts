@@ -6,6 +6,7 @@ import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
 import type { OverpassResponse } from './store.js';
+import { startOfDayMs } from './time.js';
 
 export const buildTileQuery = (bbox: BoundingBox, amenity: string): string => {
   const escapedAmenity = amenity.replace(/"/g, '\\"');
@@ -23,14 +24,29 @@ out skel qt;`;
 
 interface UpstreamState {
   failedUntil: number;
+  blockedUntil: number;
+  requestsToday: number;
+  dayStart: number;
 }
 
 class UpstreamPool {
   private readonly states = new Map<string, UpstreamState>();
 
-  constructor(urls: string[], private readonly cooldownMs: number) {
+  private readonly blockDurationMs = 24 * 60 * 60 * 1000;
+
+  constructor(
+    urls: string[],
+    private readonly cooldownMs: number,
+    private readonly dailyLimit: number
+  ) {
+    const start = startOfDayMs();
     for (const url of urls) {
-      this.states.set(url, { failedUntil: 0 });
+      this.states.set(url, {
+        failedUntil: 0,
+        blockedUntil: 0,
+        requestsToday: 0,
+        dayStart: start
+      });
     }
   }
 
@@ -38,17 +54,102 @@ class UpstreamPool {
     return this.states.size;
   }
 
+  private refreshState(state: UpstreamState, now: number): void {
+    const currentStart = startOfDayMs(now);
+    if (state.dayStart !== currentStart) {
+      state.dayStart = currentStart;
+      state.requestsToday = 0;
+    }
+
+    if (state.blockedUntil > 0 && state.blockedUntil <= now) {
+      state.blockedUntil = 0;
+    }
+  }
+
+  private markLimitReached(url: string, state: UpstreamState, now: number): void {
+    if (state.blockedUntil > now) {
+      return;
+    }
+
+    state.blockedUntil = now + this.blockDurationMs;
+    logger.warn(
+      {
+        upstream: url,
+        blockedUntil: new Date(state.blockedUntil).toISOString(),
+        requestsToday: state.requestsToday,
+        dailyLimit: this.dailyLimit
+      },
+      'upstream daily request limit reached'
+    );
+  }
+
+  public tryAcquire(url: string): 'acquired' | 'limit' | 'cooldown' | 'blocked' {
+    const state = this.states.get(url);
+    if (!state) {
+      return 'blocked';
+    }
+
+    const now = Date.now();
+    this.refreshState(state, now);
+
+    if (state.failedUntil > now) {
+      return 'cooldown';
+    }
+
+    if (state.blockedUntil > now) {
+      return 'limit';
+    }
+
+    if (this.dailyLimit >= 0 && state.requestsToday >= this.dailyLimit) {
+      this.markLimitReached(url, state, now);
+      return 'limit';
+    }
+
+    state.requestsToday += 1;
+
+    if (this.dailyLimit >= 0 && state.requestsToday >= this.dailyLimit) {
+      this.markLimitReached(url, state, now);
+    }
+
+    return 'acquired';
+  }
+
+  public isExhaustedByLimit(now = Date.now()): boolean {
+    if (this.dailyLimit < 0 || this.states.size === 0) {
+      return false;
+    }
+
+    for (const state of this.states.values()) {
+      this.refreshState(state, now);
+      if (state.blockedUntil <= now && state.requestsToday < this.dailyLimit) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   next(excluded: Set<string>): string | null {
     const now = Date.now();
     const available: string[] = [];
 
     for (const [url, state] of this.states) {
+      this.refreshState(state, now);
       if (excluded.has(url)) {
         continue;
       }
-      if (state.failedUntil <= now) {
-        available.push(url);
+      if (state.failedUntil > now) {
+        continue;
       }
+      if (state.blockedUntil > now) {
+        continue;
+      }
+      if (this.dailyLimit >= 0 && state.requestsToday >= this.dailyLimit) {
+        this.markLimitReached(url, state, now);
+        continue;
+      }
+
+      available.push(url);
     }
 
     if (available.length === 0) {
@@ -88,7 +189,11 @@ const poolCache = new WeakMap<AppConfig, UpstreamPool>();
 const getPool = (config: AppConfig): UpstreamPool => {
   let pool = poolCache.get(config);
   if (!pool) {
-    pool = new UpstreamPool(config.upstreamUrls, config.upstreamFailureCooldownSeconds * 1000);
+    pool = new UpstreamPool(
+      config.upstreamUrls,
+      config.upstreamFailureCooldownSeconds * 1000,
+      config.upstreamDailyLimit
+    );
     poolCache.set(config, pool);
   }
   return pool;
@@ -121,6 +226,15 @@ const withUpstream = async <T>(config: AppConfig, fn: (baseUrl: string) => Promi
       break;
     }
 
+    const acquireResult = pool.tryAcquire(upstream);
+    if (acquireResult !== 'acquired') {
+      attempted.add(upstream);
+      if (acquireResult === 'limit') {
+        lastError = new Error(`Upstream daily request limit reached for ${upstream}`);
+      }
+      continue;
+    }
+
     try {
       const result = await fn(upstream);
       pool.markSuccess(upstream);
@@ -135,6 +249,10 @@ const withUpstream = async <T>(config: AppConfig, fn: (baseUrl: string) => Promi
       pool.markFailure(upstream);
       logger.warn({ err: error, upstream, cooldownSeconds: config.upstreamFailureCooldownSeconds }, 'upstream request failed');
     }
+  }
+
+  if (pool.isExhaustedByLimit()) {
+    throw new Error('Upstream daily request limit reached for all configured upstreams');
   }
 
   throw lastError ?? new Error('No upstream URLs available');

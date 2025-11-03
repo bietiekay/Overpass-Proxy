@@ -51,4 +51,23 @@ describe('TileStore', () => {
     expect(values.get(tile.hash)?.payload.response.generator).toBe('bulk-one');
     expect(values.get(secondTile.hash)?.payload.response.generator).toBe('bulk-two');
   });
+
+  it('counts cached tiles for an amenity', async () => {
+    const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 60, swrSeconds: 30 });
+    const secondTile: TileInfo = {
+      hash: 'u33dc0q',
+      bounds: { south: 1, west: 1, north: 2, east: 2 }
+    };
+
+    await store.writeTiles(
+      [
+        { tile, response: { elements: [], generator: 'first', osm3s: {}, version: 0.6 } },
+        { tile: secondTile, response: { elements: [], generator: 'second', osm3s: {}, version: 0.6 } }
+      ],
+      'toilets'
+    );
+
+    expect(store.countCachedTiles('toilets')).toBe(2);
+    expect(store.countCachedTiles('drinking_water')).toBe(0);
+  });
 });

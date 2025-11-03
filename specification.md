@@ -11,6 +11,7 @@ The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public
 - **Upstream communication:** `src/upstream.ts` provides helpers to proxy non-interpreter endpoints and to materialise amenity-scoped per-tile JSON queries from bbox coordinates.
 - **Response assembly:** `src/assemble.ts` deduplicates and merges cached tile payloads, retaining metadata and filtering by bbox.
 - **Supporting utilities:** `src/headers.ts` implements deterministic weak ETags and If-None-Match handling, `src/rateLimit.ts` offers a token-bucket primitive (currently unused but available for future upstream throttling), and `src/errors.ts` defines typed errors (e.g., `TooManyTilesError`).
+- **Statistics + time helpers:** `src/stats.ts` tracks per-amenity demand, cache status, and geohash coverage for the `/api/statistics` endpoint, while `src/time.ts` exposes day-boundary helpers shared by statistics and upstream quota logic.
 - **Logging:** `src/logger.ts` exposes the shared Pino logger instance configured for structured output.
 
 ## 3. Request Classification Flow
@@ -81,7 +82,8 @@ flowchart TD
 8. **Conditional delivery:** ETags are generated from the assembled JSON payload. Matching `If-None-Match` headers yield a 304 response with no body.
 
 ## 5. Transparent Proxy Behaviour
-- Non-interpreter `/api/*` endpoints (`/api/status`, `/api/timestamp`, `/api/timestamp/*`, `/api/kill_my_queries`, and arbitrary paths) are proxied verbatim.
+- Non-interpreter `/api/*` endpoints (`/api/status`, `/api/timestamp`, `/api/timestamp/*`, `/api/kill_my_queries`, `/api/statistics`, and arbitrary paths) are proxied verbatim when caching is disabled or the request falls outside amenity JSON bbox handling.
+- `/api/statistics` is served locally, returning aggregated JSON metrics derived from the Redis-backed `RequestStatistics` service so data survives restarts.
 - The proxy streams binary bodies without transformation, preserves upstream headers (excluding `host`), and relays upstream status codes. Errors contacting the upstream translate to HTTP 502 with a JSON error object.
 
 ## 6. Redis Data Model and SWR Locks
@@ -100,7 +102,8 @@ Environment-driven configuration is loaded at startup with sensible defaults:
 - `MAX_TILES_PER_REQUEST`
 - `LOG_VERBOSITY` (errors/info/debug)
 - `NODE_ENV`
-The `buildServer` helper allows tests to override any configuration or inject custom Redis clients.
+- `UPSTREAM_DAILY_LIMIT` (-1 leaves requests unlimited, non-negative values enforce per-upstream daily quotas with 24h blocks)
+The async `buildServer` helper allows tests to override any configuration or inject custom Redis clients.
 
 ## 8. Testing Strategy
 - **Unit tests (`src/tests/unit`)** cover bbox parsing, geohash tiling, cache store semantics (including TTL/SWR handling), header utilities, response assembly, and rate limiting.
@@ -112,9 +115,19 @@ The `buildServer` helper allows tests to override any configuration or inject cu
 - **Runtime:** `npm start` executes the compiled server; Fastify listens on `0.0.0.0:PORT`.
 - **Docker:** `Dockerfile` (Node 20 Alpine) and `docker-compose.yml` orchestrate the proxy alongside Redis (and mock Overpass in development scenarios).
 - **CI:** `.github/workflows/ci.yml` installs dependencies, runs linting, executes tests with coverage, and uploads reports.
-- **Observability:** Structured logs include contextual metadata (request IDs, error stacks) through Pino, aiding debugging across deployment targets.
+- **Observability:** Structured logs include contextual metadata (request IDs, error stacks) through Pino, aiding debugging across deployment targets. The Redis-persisted `/api/statistics` endpoint surfaces aggregated request metrics (total demand, amenity breakdowns, cache status, and hotspot geohashes) since the start of the current UTC day, even after restarts.
 
 ## 10. Future Extensions
 - **Rate limiting:** `TokenBucket` utility enables cost-based upstream throttling if Overpass rate limits become a concern.
 - **Additional caching heuristics:** Parsing refinements could support more Overpass query variants or integrate element change tracking.
 - **Metrics and tracing:** Exporting Prometheus or OpenTelemetry metrics would complement logs for production observability.
+
+## 11. Request Statistics
+- **Recording:** `RequestStatistics.recordRequest` captures amenity, client IP (normalised), bounding box, cache disposition (HIT/STALE/MISS), and tile count for every cacheable interpreter request. Entries roll over automatically at the start of each UTC day using helpers from `src/time.ts` and persist snapshots to Redis on every update.
+- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts, and per-amenity breakdowns including cache inventory, geohash coverage (precision 3), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and ensures the reset boundary is written back to Redis.
+- **Endpoint:** `/api/statistics` returns the current snapshot as JSON, enabling external systems to monitor demand and tune cache pre-warming or upstream routing strategies with data that survives process restarts.
+
+## 12. Upstream Daily Request Limits
+- **Configuration:** `UPSTREAM_DAILY_LIMIT` controls the number of interpreter requests each upstream base URL can serve within a UTC day (`-1` keeps the quota unlimited). Once exhausted, the upstream is blocked for 24 hours.
+- **Enforcement:** `UpstreamPool` in `src/upstream.ts` tracks per-upstream request counts, failure cooldowns, and block expirations. `withUpstream` consults the pool to skip exhausted or cooling-off instances while attempting alternative URLs.
+- **Operator feedback:** When a quota is hit, the proxy logs a structured warning including the upstream URL, request count, configured limit, and unblock timestamp so operators can add capacity or adjust the limit.

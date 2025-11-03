@@ -18,7 +18,9 @@ adding Redis-backed geohash tile caching for amenity-focused JSON bounding-box q
 - Fastify-based HTTP server exposing the `/api/*` Overpass endpoints
 - Strict amenity-only handling for `/api/interpreter`; non-JSON or non-amenity queries are rejected with helpful errors, and recognised amenity filters are preserved end-to-end
 - Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh, segmented by requested amenity type and persisted via pipelined Redis bulk writes
+- Request statistics collected per amenity and exposed via a JSON endpoint for observing hotspots and cache coverage
 - Structured logging via Pino
+- Configurable per-upstream daily request limits with automatic 24-hour lockouts once a quota is reached
 - Comprehensive Vitest unit and integration test suites
 - GitHub Actions CI workflow running linting and tests with coverage
 - Docker & docker-compose setup for development and deployment
@@ -32,6 +34,7 @@ The proxy implements the core Overpass API endpoints:
 - `GET /api/status`
 - `GET /api/timestamp` and `GET /api/timestamp/*`
 - `POST /api/kill_my_queries`
+- `GET /api/statistics`
 - Any other `/api/*` path is transparently proxied upstream
 
 Requests preserve HTTP methods, headers, payloads, and status codes. `/api/interpreter` requires JSON amenity queries with a bounding box; the proxy satisfies the response locally when tiles are cached and fetches amenity tiles upstream on cache misses.
@@ -51,6 +54,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
+| `UPSTREAM_DAILY_LIMIT` | `-1` | Per-upstream daily request quota (`-1` keeps requests unlimited) |
 | `PORT` | `8080` | Listen port |
 | `LOG_VERBOSITY` | `info` | Logging verbosity: `errors`, `info`, or `debug` for full request/response details |
 | `NODE_ENV` | `production` | Runtime environment |
@@ -83,6 +87,8 @@ docker-compose up --build
 ```
 
 This starts the proxy along with Redis and a mock Overpass service used for integration tests.
+
+The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
 ## Testing
 
