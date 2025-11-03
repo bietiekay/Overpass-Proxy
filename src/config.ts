@@ -12,6 +12,7 @@ export interface AppConfig {
   nodeEnv: string;
   upstreamFailureCooldownSeconds: number;
   transparentOnly: boolean;
+  upstreamDailyLimit: number;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -73,6 +74,7 @@ export const loadConfig = (): AppConfig => {
     maxTilesPerRequest: toNumber(env.MAX_TILES_PER_REQUEST, 1024),
     nodeEnv: env.NODE_ENV ?? 'production',
     upstreamFailureCooldownSeconds: toNumber(env.UPSTREAM_FAILURE_COOLDOWN_SECONDS, 60),
-    transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false)
+    transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false),
+    upstreamDailyLimit: toNumber(env.UPSTREAM_DAILY_LIMIT, -1)
   };
 };
