@@ -70,6 +70,27 @@ class TilePresenceCache {
     return this.clearIfExpired(amenity, tileHash, entry);
   }
 
+  public countPresent(amenity: string): number {
+    const amenityEntries = this.entries.get(amenity);
+    if (!amenityEntries) {
+      return 0;
+    }
+
+    let count = 0;
+    for (const [tileHash, entry] of amenityEntries) {
+      const current = this.clearIfExpired(amenity, tileHash, entry);
+      if (current?.state === 'present') {
+        count += 1;
+      }
+    }
+
+    if (count === 0 && amenityEntries.size === 0) {
+      this.entries.delete(amenity);
+    }
+
+    return count;
+  }
+
   private addListener(key: string, listener: PresenceListener): void {
     const existing = this.listeners.get(key);
     if (existing) {
@@ -190,6 +211,11 @@ export class TileStore {
   constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {
     const missingTtl = Math.max(250, Math.min(2000, options.swrSeconds * 1000));
     this.presence = new TilePresenceCache(missingTtl);
+  }
+
+  public countCachedTiles(amenity: string): number {
+    const amenitySuffix = amenityKey(amenity);
+    return this.presence.countPresent(amenitySuffix);
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {

@@ -37,7 +37,8 @@ describe('upstream failover', () => {
     upstreamTilePrecision: 3,
     maxTilesPerRequest: 100,
     nodeEnv: 'test',
-    upstreamFailureCooldownSeconds: 60
+    upstreamFailureCooldownSeconds: 60,
+    upstreamDailyLimit: -1
   };
 
   const bbox = { south: 0, west: 0, north: 1, east: 1 };
@@ -153,6 +154,40 @@ describe('upstream failover', () => {
       expect(postMock).toHaveBeenCalledTimes(config.upstreamUrls.length);
     } finally {
       randomSpy.mockRestore();
+    }
+  });
+
+  it('enforces daily request limits per upstream', async () => {
+    vi.useFakeTimers();
+
+    try {
+      vi.setSystemTime(new Date('2024-01-01T10:00:00Z'));
+      const config: AppConfig = {
+        ...baseConfig,
+        upstreamUrls: ['http://limit.example/api/interpreter'],
+        upstreamDailyLimit: 2
+      };
+
+      postMock.mockResolvedValue({ body: JSON.stringify({ elements: [] }) });
+
+      await fetchTile(config, bbox, 'toilets');
+      await fetchTile(config, bbox, 'toilets');
+
+      await expect(fetchTile(config, bbox, 'toilets')).rejects.toThrow(/daily request limit/i);
+      expect(postMock).toHaveBeenCalledTimes(2);
+
+      postMock.mockClear();
+
+      vi.advanceTimersByTime(23 * 60 * 60 * 1000);
+      await expect(fetchTile(config, bbox, 'toilets')).rejects.toThrow(/daily request limit/i);
+      expect(postMock).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(60 * 60 * 1000 + 1000);
+      postMock.mockResolvedValue({ body: JSON.stringify({ elements: ['after'] }) });
+      const result = await fetchTile(config, bbox, 'toilets');
+      expect(result).toEqual({ elements: ['after'] });
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

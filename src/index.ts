@@ -6,13 +6,14 @@ import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
 import { createLoggerOptions, logger } from './logger.js';
 import { TileStore } from './store.js';
+import { RedisStatisticsStorage, RequestStatistics } from './stats.js';
 
 export interface BuildServerOptions {
   configOverrides?: Partial<AppConfig>;
   redisClient?: Redis;
 }
 
-export const buildServer = (options: BuildServerOptions = {}) => {
+export const buildServer = async (options: BuildServerOptions = {}) => {
   const baseConfig = loadConfig();
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
   const app = Fastify({ logger: createLoggerOptions() });
@@ -87,7 +88,10 @@ export const buildServer = (options: BuildServerOptions = {}) => {
     swrSeconds: config.swrSeconds
   });
 
-  registerInterpreterRoutes(app, { config, redis, store });
+  const statisticsStorage = new RedisStatisticsStorage(redis);
+  const statistics = await RequestStatistics.create(store, statisticsStorage);
+
+  registerInterpreterRoutes(app, { config, redis, store, stats: statistics });
 
   app.addHook('onClose', async () => {
     if (!options.redisClient) {
@@ -99,7 +103,7 @@ export const buildServer = (options: BuildServerOptions = {}) => {
 };
 
 export const start = async () => {
-  const { app, config } = buildServer();
+  const { app, config } = await buildServer();
 
   await app.listen({ port: config.port, host: '0.0.0.0' });
   logger.info({ port: config.port }, 'overpass proxy listening');

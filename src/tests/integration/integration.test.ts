@@ -29,7 +29,7 @@ beforeAll(async () => {
 
   await redisClient.flushall();
 
-  const { app } = buildServer({
+  const { app } = await buildServer({
     configOverrides: {
       upstreamUrls: env.upstreamUrls,
       cacheTtlSeconds: 1,
@@ -127,6 +127,32 @@ describe('integration', () => {
     expect(hits[0]).toMatch(/:toilets$/);
   });
 
+  it('exposes aggregated statistics', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const response = await request(baseUrl).get('/api/statistics').expect(200);
+    expect(response.headers['content-type']).toContain('application/json');
+    const snapshot = response.body;
+    expect(snapshot.totalRequests).toBeGreaterThanOrEqual(2);
+    const amenityStats = snapshot.amenities.find((entry: any) => entry.amenity === 'toilets');
+    expect(amenityStats).toBeDefined();
+    expect(amenityStats.requests).toBeGreaterThanOrEqual(2);
+    expect(Array.isArray(amenityStats.geohashCoverage)).toBe(true);
+  });
+
   it('returns 304 when etag matches', async () => {
     await redisClient?.flushall();
     const first = await request(baseUrl)
@@ -151,7 +177,7 @@ describe('integration', () => {
     const env = await createTestEnvironment();
     await env.redis.flushall();
 
-    const { app } = buildServer({
+    const { app } = await buildServer({
       configOverrides: {
         upstreamUrls: env.upstreamUrls,
         maxTilesPerRequest: 4,
@@ -180,7 +206,7 @@ describe('integration', () => {
     await redisClient?.flushall();
     hits.splice(0, hits.length);
 
-    const { app } = buildServer({
+    const { app } = await buildServer({
       configOverrides: {
         upstreamUrls,
         transparentOnly: true,
