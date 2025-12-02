@@ -78,8 +78,6 @@ location / {
 }
 ```
 
-When running via docker-compose, add `TRUST_PROXY: "true"` under the `environment` section for the `proxy` service (as shown in `docker-compose.yml.template`).
-
 ## Running locally
 
 Install dependencies and build the project:
