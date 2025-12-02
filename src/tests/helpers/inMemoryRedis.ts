@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 export class InMemoryRedis extends EventEmitter {
   private store = new Map<string, string>();
   private timeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  private expiry = new Map<string, number>();
 
   async set(key: string, value: string, mode?: string, duration?: number, condition?: string): Promise<'OK' | null> {
     if (condition === 'NX' && this.store.has(key)) {
@@ -15,11 +16,16 @@ export class InMemoryRedis extends EventEmitter {
       if (existing) {
         clearTimeout(existing);
       }
+      const expiresAt = Date.now() + duration;
       const timeout = setTimeout(() => {
         this.store.delete(key);
         this.timeouts.delete(key);
+        this.expiry.delete(key);
       }, duration).unref();
       this.timeouts.set(key, timeout);
+      this.expiry.set(key, expiresAt);
+    } else {
+      this.expiry.delete(key);
     }
 
     return 'OK';
@@ -40,7 +46,21 @@ export class InMemoryRedis extends EventEmitter {
       clearTimeout(timeout);
       this.timeouts.delete(key);
     }
+    this.expiry.delete(key);
     return existed ? 1 : 0;
+  }
+
+  async pttl(key: string): Promise<number> {
+    if (!this.store.has(key)) {
+      return -2;
+    }
+
+    const expiresAt = this.expiry.get(key);
+    if (!expiresAt) {
+      return -1;
+    }
+
+    return Math.max(0, expiresAt - Date.now());
   }
 
   async quit(): Promise<'OK'> {
@@ -48,6 +68,7 @@ export class InMemoryRedis extends EventEmitter {
       clearTimeout(timeout);
     }
     this.timeouts.clear();
+    this.expiry.clear();
     this.store.clear();
     return 'OK';
   }
@@ -57,8 +78,33 @@ export class InMemoryRedis extends EventEmitter {
       clearTimeout(timeout);
     }
     this.timeouts.clear();
+    this.expiry.clear();
     this.store.clear();
     return 'OK';
+  }
+
+  async scan(cursor: string | number, ...args: Array<string | number>): Promise<[string, string[]]> {
+    const startIndex = Number(cursor ?? 0);
+    let matchPattern = '*';
+    let count = Infinity;
+
+    for (let i = 0; i < args.length; i += 1) {
+      const arg = args[i];
+      if (arg === 'MATCH' && typeof args[i + 1] === 'string') {
+        matchPattern = args[i + 1] as string;
+        i += 1;
+      } else if (arg === 'COUNT' && typeof args[i + 1] === 'number') {
+        count = args[i + 1] as number;
+        i += 1;
+      }
+    }
+
+    const regex = new RegExp('^' + matchPattern.replace(/\*/g, '.*') + '$');
+    const allKeys = Array.from(this.store.keys()).filter((key) => regex.test(key));
+
+    const slice = allKeys.slice(startIndex, startIndex + count);
+    const nextCursor = startIndex + count >= allKeys.length ? '0' : String(startIndex + count);
+    return [nextCursor, slice];
   }
 
   pipeline(): {
