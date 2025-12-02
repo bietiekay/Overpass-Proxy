@@ -68,6 +68,7 @@ describe('RequestStatistics', () => {
     expect(toilets?.cacheStatus.HIT).toBe(1);
     expect(toilets?.cacheStatus.MISS).toBe(1);
     expect(toilets?.averageTilesPerRequest).toBe(10);
+    expect(toilets?.geohashCoverage[0]?.geohash.length).toBe(4);
     const coverageSum = toilets?.geohashCoverage.reduce((sum, entry) => sum + entry.percentage, 0) ?? 0;
     expect(Math.round(coverageSum)).toBe(100);
   });
