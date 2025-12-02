@@ -24,10 +24,12 @@ describe('RequestStatistics', () => {
 
   it('aggregates request metrics', async () => {
     const cacheCounts = new Map<string, number>([['toilets', 5]]);
+    const cachedAmenities = new Map<string, number>([['toilets', 5]]);
     const storage = new InMemoryStatisticsStorage();
     const stats = await RequestStatistics.create({
       countCachedTiles: (amenity) => cacheCounts.get(amenity) ?? 0,
-      countCachedAmenities: () => cacheCounts.size,
+      countCachedAmenities: () => [...cachedAmenities.values()].reduce((sum, value) => sum + value, 0),
+      countCachedAmenityTypes: () => cachedAmenities.size,
       countTotalCachedTiles: () => [...cacheCounts.values()].reduce((sum, value) => sum + value, 0)
     }, storage);
 
@@ -61,7 +63,8 @@ describe('RequestStatistics', () => {
     expect(snapshot.totalUniqueClients).toBe(2);
     expect(snapshot.totalTilesRequested).toBe(26);
     expect(snapshot.totalCachedTiles).toBe(5);
-    expect(snapshot.cachedAmenities).toBe(1);
+    expect(snapshot.cachedAmenities).toBe(5);
+    expect(snapshot.cachedAmenityTypes).toBe(1);
     expect(snapshot.cacheHitRate).toBeCloseTo(33.33, 2);
     expect(snapshot.amenities).toHaveLength(2);
     expect(snapshot.hotspots.length).toBeGreaterThanOrEqual(1);
@@ -85,6 +88,7 @@ describe('RequestStatistics', () => {
       {
         countCachedTiles: () => 0,
         countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
         countTotalCachedTiles: () => 0
       },
       storage
@@ -112,6 +116,7 @@ describe('RequestStatistics', () => {
       {
         countCachedTiles: () => 0,
         countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
         countTotalCachedTiles: () => 0
       },
       storage
@@ -130,6 +135,7 @@ describe('RequestStatistics', () => {
       {
         countCachedTiles: () => 0,
         countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
         countTotalCachedTiles: () => 0
       },
       storage

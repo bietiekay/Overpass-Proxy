@@ -10,6 +10,7 @@ type PresenceState = 'present' | 'missing';
 interface PresenceEntry {
   state: PresenceState;
   expiresAt: number;
+  amenityCount: number;
 }
 
 type PresenceListener = () => void;
@@ -34,7 +35,11 @@ class TilePresenceCache {
     return `${amenity}:${tileHash}`;
   }
 
-  private clearIfExpired(amenity: string, tileHash: string, entry: PresenceEntry | undefined): PresenceEntry | undefined {
+  private clearIfExpired(
+    amenity: string,
+    tileHash: string,
+    entry: PresenceEntry | undefined
+  ): PresenceEntry | undefined {
     if (!entry) {
       return undefined;
     }
@@ -49,15 +54,20 @@ class TilePresenceCache {
     return undefined;
   }
 
-  public markPresent(amenity: string, tileHash: string, expiresAt: number): void {
-    const entry: PresenceEntry = { state: 'present', expiresAt };
+  public markPresent(
+    amenity: string,
+    tileHash: string,
+    expiresAt: number,
+    amenityCount: number
+  ): void {
+    const entry: PresenceEntry = { state: 'present', expiresAt, amenityCount };
     this.getAmenityEntries(amenity).set(tileHash, entry);
     this.notify(amenity, tileHash);
   }
 
   public markMissing(amenity: string, tileHash: string, ttlMs?: number): void {
     const duration = Math.max(1, Math.floor(ttlMs ?? this.defaultMissingTtlMs));
-    const entry: PresenceEntry = { state: 'missing', expiresAt: Date.now() + duration };
+    const entry: PresenceEntry = { state: 'missing', expiresAt: Date.now() + duration, amenityCount: 0 };
     this.getAmenityEntries(amenity).set(tileHash, entry);
   }
 
@@ -125,6 +135,25 @@ class TilePresenceCache {
         const current = this.clearIfExpired(amenity, tileHash, entry);
         if (current?.state === 'present') {
           total += 1;
+        }
+      }
+
+      if (entries.size === 0) {
+        this.entries.delete(amenity);
+      }
+    }
+
+    return total;
+  }
+
+  public countAmenityItems(): number {
+    let total = 0;
+
+    for (const [amenity, entries] of this.entries) {
+      for (const [tileHash, entry] of entries) {
+        const current = this.clearIfExpired(amenity, tileHash, entry);
+        if (current?.state === 'present') {
+          total += current.amenityCount;
         }
       }
 
@@ -237,6 +266,9 @@ export interface OverpassResponse {
   elements: OverpassElement[];
 }
 
+const countAmenitiesInResponse = (response: OverpassResponse): number =>
+  response.elements.filter((element) => Boolean(element.tags?.amenity)).length;
+
 export interface OverpassTilePayload {
   response: OverpassResponse;
   fetchedAt: number;
@@ -264,6 +296,10 @@ export class TileStore {
   }
 
   public countCachedAmenities(): number {
+    return this.presence.countAmenityItems();
+  }
+
+  public countCachedAmenityTypes(): number {
     return this.presence.countPresentAmenities();
   }
 
@@ -294,8 +330,9 @@ export class TileStore {
       try {
         const payload = JSON.parse(value) as OverpassTilePayload;
         const stale = payload.expiresAt < now;
+        const amenityCount = countAmenitiesInResponse(payload.response);
         result.set(tile.hash, { tile, payload, stale });
-        this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt);
+        this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount);
         hits += 1;
         if (stale) {
           staleCount += 1;
@@ -338,7 +375,7 @@ export class TileStore {
     const amenitySuffix = amenityKey(amenity);
     const pipeline = this.redis.pipeline();
     const tileHashes: string[] = [];
-    const entriesWithPayload: Array<{ tile: TileInfo; payload: OverpassTilePayload }> = [];
+    const entriesWithPayload: Array<{ tile: TileInfo; payload: OverpassTilePayload; amenityCount: number }> = [];
 
     for (const { tile, response } of entries) {
       const payload: OverpassTilePayload = {
@@ -346,9 +383,10 @@ export class TileStore {
         fetchedAt: now,
         expiresAt: now + this.options.ttlSeconds * 1000
       };
+      const amenityCount = countAmenitiesInResponse(response);
       tileHashes.push(tile.hash);
       pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload), 'PX', expiryMs);
-      entriesWithPayload.push({ tile, payload });
+      entriesWithPayload.push({ tile, payload, amenityCount });
     }
 
     const results = await pipeline.exec();
@@ -371,8 +409,8 @@ export class TileStore {
       logContext.tile = tileHashes[0];
     }
 
-    for (const { tile, payload } of entriesWithPayload) {
-      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt);
+    for (const { tile, payload, amenityCount } of entriesWithPayload) {
+      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount);
     }
 
     logger.info(logContext, 'redis tile write');
@@ -393,8 +431,9 @@ export class TileStore {
     }
     try {
       const payload = JSON.parse(value) as OverpassTilePayload;
+      const amenityCount = countAmenitiesInResponse(payload.response);
       const stale = payload.expiresAt < Date.now();
-      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt);
+      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount);
       return { tile, payload, stale };
     } catch {
       this.presence.markMissing(amenitySuffix, tile.hash);
