@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Overpass Proxy Statistics Map</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    :root {
+      color-scheme: light dark;
+      --panel-bg: rgba(0, 0, 0, 0.65);
+      --panel-text: #fff;
+      --accent: #ff6b35;
+      --muted: #9ca3af;
+      font-family: "Inter", system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      height: 100vh;
+      background: #0f172a;
+      color: var(--panel-text);
+    }
+
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1rem;
+      background: #0b1220;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.1rem;
+      letter-spacing: 0.02em;
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    select, button {
+      background: #111827;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--panel-text);
+      padding: 0.4rem 0.65rem;
+      border-radius: 0.4rem;
+      font-size: 0.95rem;
+    }
+
+    button {
+      cursor: pointer;
+      transition: background 150ms ease, transform 150ms ease;
+    }
+
+    button:hover {
+      background: #1f2937;
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      isolation: isolate;
+    }
+
+    .stats {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .stat {
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+      min-width: 8rem;
+      background: rgba(255, 255, 255, 0.04);
+      padding: 0.35rem 0.75rem;
+      border-radius: 0.35rem;
+    }
+
+    .stat strong {
+      color: var(--panel-text);
+      font-size: 1.05rem;
+    }
+
+    .legend {
+      position: absolute;
+      z-index: 900;
+      bottom: 1rem;
+      left: 1rem;
+      background: var(--panel-bg);
+      color: var(--panel-text);
+      padding: 0.65rem 0.8rem;
+      border-radius: 0.4rem;
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 0.9rem;
+    }
+
+    .legend .scale {
+      height: 0.75rem;
+      width: 9rem;
+      background: linear-gradient(90deg, #2dd36f 0%, #fbbf24 50%, #ef4444 100%);
+      border-radius: 0.5rem;
+      margin-top: 0.35rem;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Overpass Proxy Coverage</h1>
+    <div class="controls">
+      <label>
+        View:
+        <select id="mode">
+          <option value="requests">Request hotspots</option>
+          <option value="coverage">Cache coverage</option>
+        </select>
+      </label>
+      <button id="refresh">Refresh data</button>
+      <span id="status" class="status">Loading statistics…</span>
+    </div>
+    <div class="stats" id="summary"></div>
+  </header>
+  <div id="map"></div>
+  <div class="legend">
+    <div>Intensity</div>
+    <div class="scale"></div>
+    <div style="display:flex;justify-content:space-between;gap:0.5rem;margin-top:0.2rem;">
+      <span>low</span><span>high</span>
+    </div>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="https://cdn.jsdelivr.net/npm/ngeohash@0.6.0/build/ngeohash.min.js"></script>
+  <script>
+    const map = L.map('map', {
+      worldCopyJump: true,
+      minZoom: 2
+    }).setView([20, 0], 2);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const overlayGroup = L.layerGroup().addTo(map);
+    const modeSelect = document.getElementById('mode');
+    const refreshButton = document.getElementById('refresh');
+    const statusEl = document.getElementById('status');
+    const summaryEl = document.getElementById('summary');
+    let latestSnapshot = null;
+
+    const demoSnapshot = {
+      generatedAt: new Date().toISOString(),
+      totalRequests: 12,
+      totalCachedTiles: 480,
+      cachedAmenities: 1200,
+      cacheHitRate: 52.4,
+      averageTilesPerRequest: 40,
+      cacheStatus: { HIT: 9, MISS: 3, STALE: 0 },
+      hotspots: [
+        { geohash: 'u33d', requests: 4 },
+        { geohash: 'u0qj', requests: 3 },
+        { geohash: 'dr5r', requests: 5 }
+      ],
+      amenities: [
+        {
+          amenity: 'demo',
+          geohashCoverage: [
+            { geohash: 'u33d', percentage: 30, requests: 4 },
+            { geohash: 'u0qj', percentage: 20, requests: 3 },
+            { geohash: 'dr5r', percentage: 50, requests: 5 }
+          ]
+        }
+      ]
+    };
+
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+    const toColor = (ratio) => {
+      const hue = (1 - ratio) * 110; // 110 = green, 0 = red
+      return `hsl(${hue}, 85%, 55%)`;
+    };
+
+    const decodeBbox = (geohash) => {
+      const [minLat, minLon, maxLat, maxLon] = ngeohash.decode_bbox(geohash);
+      return [
+        [minLat, minLon],
+        [maxLat, minLon],
+        [maxLat, maxLon],
+        [minLat, maxLon]
+      ];
+    };
+
+    const clearOverlay = () => {
+      overlayGroup.clearLayers();
+    };
+
+    const normaliseEntries = (entries) => {
+      if (!entries.length) return [];
+      const max = Math.max(...entries.map((entry) => entry.value));
+      if (max === 0) return [];
+      return entries.map((entry) => ({ ...entry, intensity: entry.value / max }));
+    };
+
+    const renderOverlay = (entries, description) => {
+      clearOverlay();
+      const normalised = normaliseEntries(entries);
+      for (const entry of normalised) {
+        const polygon = L.polygon(decodeBbox(entry.geohash), {
+          color: 'transparent',
+          weight: 0.3,
+          fillColor: toColor(clamp(entry.intensity, 0, 1)),
+          fillOpacity: 0.55
+        });
+        polygon.bindTooltip(
+          `${entry.geohash}<br>${description}: ${entry.value.toLocaleString(undefined, {
+            maximumFractionDigits: 2
+          })}`
+        );
+        polygon.addTo(overlayGroup);
+      }
+      statusEl.textContent = `${description} visualised for ${normalised.length} tiles.`;
+    };
+
+    const buildRequestEntries = (snapshot) => {
+      const counts = new Map();
+      for (const hotspot of snapshot.hotspots ?? []) {
+        counts.set(hotspot.geohash, (counts.get(hotspot.geohash) ?? 0) + (hotspot.requests ?? 0));
+      }
+      for (const amenity of snapshot.amenities ?? []) {
+        for (const coverage of amenity.geohashCoverage ?? []) {
+          counts.set(coverage.geohash, (counts.get(coverage.geohash) ?? 0) + (coverage.requests ?? 0));
+        }
+      }
+      return Array.from(counts.entries()).map(([geohash, value]) => ({ geohash, value }));
+    };
+
+    const buildCoverageEntries = (snapshot) => {
+      const totals = new Map();
+      for (const amenity of snapshot.amenities ?? []) {
+        for (const coverage of amenity.geohashCoverage ?? []) {
+          totals.set(coverage.geohash, (totals.get(coverage.geohash) ?? 0) + (coverage.percentage ?? 0));
+        }
+      }
+      return Array.from(totals.entries()).map(([geohash, value]) => ({ geohash, value }));
+    };
+
+    const updateSummary = (snapshot) => {
+      summaryEl.innerHTML = '';
+      const parts = [
+        { label: 'Total requests', value: snapshot.totalRequests },
+        { label: 'Unique clients', value: snapshot.totalUniqueClients },
+        { label: 'Cached tiles', value: snapshot.totalCachedTiles },
+        { label: 'Cache hit rate', value: `${snapshot.cacheHitRate ?? 0}%` },
+        { label: 'Avg tiles/request', value: snapshot.averageTilesPerRequest }
+      ];
+
+      for (const part of parts) {
+        if (part.value === undefined || part.value === null) continue;
+        const stat = document.createElement('div');
+        stat.className = 'stat';
+        stat.innerHTML = `<span>${part.label}</span><strong>${part.value}</strong>`;
+        summaryEl.appendChild(stat);
+      }
+    };
+
+    const applyMode = () => {
+      if (!latestSnapshot) return;
+      const mode = modeSelect.value;
+      if (mode === 'coverage') {
+        renderOverlay(buildCoverageEntries(latestSnapshot), 'Cache coverage (%)');
+      } else {
+        renderOverlay(buildRequestEntries(latestSnapshot), 'Requests');
+      }
+    };
+
+    const fetchStatistics = async () => {
+      statusEl.textContent = 'Loading statistics…';
+      try {
+        const response = await fetch('/api/statistics', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Request failed');
+        const snapshot = await response.json();
+        latestSnapshot = snapshot;
+        statusEl.textContent = `Updated at ${new Date(snapshot.generatedAt ?? Date.now()).toLocaleString()}`;
+      } catch (error) {
+        console.error('Failed to load live statistics, falling back to demo data.', error);
+        latestSnapshot = demoSnapshot;
+        statusEl.textContent = 'Using demo data (live fetch failed).';
+      }
+      updateSummary(latestSnapshot);
+      applyMode();
+    };
+
+    modeSelect.addEventListener('change', applyMode);
+    refreshButton.addEventListener('click', fetchStatistics);
+
+    fetchStatistics();
+  </script>
+</body>
+</html>

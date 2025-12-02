@@ -1,6 +1,8 @@
 import formbody from '@fastify/formbody';
 import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import { Redis } from 'ioredis';
+import { readFile } from 'node:fs/promises';
+import { URL } from 'node:url';
 
 import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
@@ -19,6 +21,8 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   const app = Fastify({ logger: createLoggerOptions(), trustProxy: config.trustProxy });
   void app.register(formbody);
 
+  const statisticsMapPath = new URL('../public/statistics-map.html', import.meta.url);
+
   // Simple CORS handling for browser clients
   app.addHook('onSend', async (_request, reply, payload) => {
     // Allow public access; adjust if you need to restrict origins
@@ -30,6 +34,12 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     );
     reply.header('Access-Control-Max-Age', '600');
     return payload;
+  });
+
+  app.get('/statistics-map', async (_request, reply) => {
+    const html = await readFile(statisticsMapPath, 'utf8');
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    reply.send(html);
   });
 
   // Preflight requests
