@@ -100,6 +100,12 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
   - Spot cache effectiveness regressions (hit/miss ratios) and adjust eviction or TTL policies.
   - Monitor demand diversity (unique clients) and adjust upstream daily limits before outages occur.
 
+#### Retrieving statistics at runtime
+
+- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. This is safe to poll from dashboards or alerting systems because the data comes from Redis-backed counters, so restarts do not clear it.
+- **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()` to retrieve the structured data (`StatisticsSnapshot`) inside the process without another HTTP request.
+- **Time window:** counters always reflect the current UTC day; the service automatically resets the totals when a new day begins.
+
 ## Testing
 
 The test suite is designed to work both with and without Docker:
