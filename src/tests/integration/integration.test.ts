@@ -153,6 +153,48 @@ describe('integration', () => {
     expect(Array.isArray(amenityStats.geohashCoverage)).toBe(true);
   });
 
+  it('tracks unique clients using forwarded headers when proxy trust is enabled', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5,
+        trustProxy: true
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .set('X-Forwarded-For', '203.0.113.1')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .set('X-Forwarded-For', '203.0.113.2')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const response = await request(url).get('/api/statistics').expect(200);
+      expect(response.body.totalUniqueClients).toBeGreaterThanOrEqual(2);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('returns 304 when etag matches', async () => {
     await redisClient?.flushall();
     const first = await request(baseUrl)

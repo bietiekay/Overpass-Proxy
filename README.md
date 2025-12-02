@@ -54,6 +54,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-For`/`X-Real-IP` headers from a reverse proxy when determining client IPs |
 | `UPSTREAM_DAILY_LIMIT` | `-1` | Per-upstream daily request quota (`-1` keeps requests unlimited) |
 | `PORT` | `8080` | Listen port |
 | `LOG_VERBOSITY` | `info` | Logging verbosity: `errors`, `info`, or `debug` for full request/response details |
@@ -62,6 +63,20 @@ Environment variables are read at startup. Defaults are shown below:
 The defaults for `TILE_PRECISION` and `MAX_TILES_PER_REQUEST` are tuned for the ToiletFinder iOS client: a precision of 5 keeps
 tile counts below the 1 024-tile ceiling even for the app’s widest live-map fetches (~70 km across) and cache-preload passes
 (~100 km combined width/height) while still yielding reusable tiles for the 2 km spatial grid used during normal browsing.
+
+### Running behind a reverse proxy
+
+Set `TRUST_PROXY=true` so Fastify respects the original client IP from `X-Forwarded-For`/`X-Real-IP` headers. Example Nginx stanza:
+
+```
+location / {
+  proxy_pass http://overpass-proxy;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
 
 ## Running locally
 
