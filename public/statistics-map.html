@@ -162,8 +162,24 @@
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
     crossorigin=""
   ></script>
-  <script src="https://cdn.jsdelivr.net/npm/ngeohash@0.6.0/build/ngeohash.min.js"></script>
   <script>
+    const loadGeohash = async () => {
+      if (window.ngeohash?.decode_bbox) return window.ngeohash;
+      try {
+        const module = await import('https://cdn.jsdelivr.net/npm/ngeohash@0.6.0/build/ngeohash.min.js');
+        const geohash = module?.default ?? module;
+        if (geohash?.decode_bbox) {
+          window.ngeohash = geohash;
+          return geohash;
+        }
+      } catch (error) {
+        console.error('Failed to load ngeohash library from CDN', error);
+      }
+      return null;
+    };
+
+    const geohashReady = loadGeohash();
+
     const map = L.map('map', {
       worldCopyJump: true,
       minZoom: 2
@@ -212,8 +228,12 @@
       return `hsl(${hue}, 85%, 55%)`;
     };
 
-    const decodeBbox = (geohash) => {
-      const [minLat, minLon, maxLat, maxLon] = ngeohash.decode_bbox(geohash);
+    const decodeBbox = async (geohash) => {
+      const geohashLib = await geohashReady;
+      if (!geohashLib?.decode_bbox) {
+        throw new Error('Geohash library not available');
+      }
+      const [minLat, minLon, maxLat, maxLon] = geohashLib.decode_bbox(geohash);
       return [
         [minLat, minLon],
         [maxLat, minLon],
@@ -233,11 +253,20 @@
       return entries.map((entry) => ({ ...entry, intensity: entry.value / max }));
     };
 
-    const renderOverlay = (entries, description) => {
+    const renderOverlay = async (entries, description) => {
       clearOverlay();
       const normalised = normaliseEntries(entries);
+      let geohashUnavailable = false;
       for (const entry of normalised) {
-        const polygon = L.polygon(decodeBbox(entry.geohash), {
+        let bbox;
+        try {
+          bbox = await decodeBbox(entry.geohash);
+        } catch (error) {
+          console.error(`Failed to decode geohash ${entry.geohash}`, error);
+          geohashUnavailable = true;
+          continue;
+        }
+        const polygon = L.polygon(bbox, {
           color: 'transparent',
           weight: 0.3,
           fillColor: toColor(clamp(entry.intensity, 0, 1)),
@@ -250,7 +279,9 @@
         );
         polygon.addTo(overlayGroup);
       }
-      statusEl.textContent = `${description} visualised for ${normalised.length} tiles.`;
+      statusEl.textContent = geohashUnavailable
+        ? `${description} visualised for ${overlayGroup.getLayers().length} tiles (geohash decoding unavailable for some entries).`
+        : `${description} visualised for ${normalised.length} tiles.`;
     };
 
     const buildRequestEntries = (snapshot) => {
@@ -295,13 +326,13 @@
       }
     };
 
-    const applyMode = () => {
+    const applyMode = async () => {
       if (!latestSnapshot) return;
       const mode = modeSelect.value;
       if (mode === 'coverage') {
-        renderOverlay(buildCoverageEntries(latestSnapshot), 'Cache coverage (%)');
+        await renderOverlay(buildCoverageEntries(latestSnapshot), 'Cache coverage (%)');
       } else {
-        renderOverlay(buildRequestEntries(latestSnapshot), 'Requests');
+        await renderOverlay(buildRequestEntries(latestSnapshot), 'Requests');
       }
     };
 
@@ -319,11 +350,15 @@
         statusEl.textContent = 'Using demo data (live fetch failed).';
       }
       updateSummary(latestSnapshot);
-      applyMode();
+      await applyMode();
     };
 
-    modeSelect.addEventListener('change', applyMode);
-    refreshButton.addEventListener('click', fetchStatistics);
+    modeSelect.addEventListener('change', () => {
+      void applyMode();
+    });
+    refreshButton.addEventListener('click', () => {
+      void fetchStatistics();
+    });
 
     fetchStatistics();
   </script>
