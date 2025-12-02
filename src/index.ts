@@ -16,7 +16,7 @@ export interface BuildServerOptions {
 export const buildServer = async (options: BuildServerOptions = {}) => {
   const baseConfig = loadConfig();
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
-  const app = Fastify({ logger: createLoggerOptions() });
+  const app = Fastify({ logger: createLoggerOptions(), trustProxy: config.trustProxy });
   void app.register(formbody);
 
   // Simple CORS handling for browser clients

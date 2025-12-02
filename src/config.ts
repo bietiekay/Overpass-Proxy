@@ -13,6 +13,7 @@ export interface AppConfig {
   upstreamFailureCooldownSeconds: number;
   transparentOnly: boolean;
   upstreamDailyLimit: number;
+  trustProxy: boolean;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -75,6 +76,7 @@ export const loadConfig = (): AppConfig => {
     nodeEnv: env.NODE_ENV ?? 'production',
     upstreamFailureCooldownSeconds: toNumber(env.UPSTREAM_FAILURE_COOLDOWN_SECONDS, 60),
     transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false),
-    upstreamDailyLimit: toNumber(env.UPSTREAM_DAILY_LIMIT, -1)
+    upstreamDailyLimit: toNumber(env.UPSTREAM_DAILY_LIMIT, -1),
+    trustProxy: toBoolean(env.TRUST_PROXY, false)
   };
 };
