@@ -115,7 +115,7 @@ The async `buildServer` helper allows tests to override any configuration or inj
 - **Runtime:** `npm start` executes the compiled server; Fastify listens on `0.0.0.0:PORT`.
 - **Docker:** `Dockerfile` (Node 20 Alpine) and `docker-compose.yml` orchestrate the proxy alongside Redis (and mock Overpass in development scenarios).
 - **CI:** `.github/workflows/ci.yml` installs dependencies, runs linting, executes tests with coverage, and uploads reports.
-- **Observability:** Structured logs include contextual metadata (request IDs, error stacks) through Pino, aiding debugging across deployment targets. The Redis-persisted `/api/statistics` endpoint surfaces aggregated request metrics (total demand, amenity breakdowns, cache status, and hotspot geohashes) since the start of the current UTC day, even after restarts.
+- **Observability:** Structured logs include contextual metadata (request IDs, error stacks) through Pino, aiding debugging across deployment targets. The Redis-persisted `/api/statistics` endpoint surfaces aggregated request metrics (total demand, amenity breakdowns, cache status, cache inventory counts, and hotspot geohashes) since the start of the current UTC day, even after restarts.
 
 ## 10. Future Extensions
 - **Rate limiting:** `TokenBucket` utility enables cost-based upstream throttling if Overpass rate limits become a concern.
@@ -124,7 +124,7 @@ The async `buildServer` helper allows tests to override any configuration or inj
 
 ## 11. Request Statistics
 - **Recording:** `RequestStatistics.recordRequest` captures amenity, client IP (normalised), bounding box, cache disposition (HIT/STALE/MISS), and tile count for every cacheable interpreter request. Entries roll over automatically at the start of each UTC day using helpers from `src/time.ts` and persist snapshots to Redis on every update.
-- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts, and per-amenity breakdowns including cache inventory, geohash coverage (precision 4), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and ensures the reset boundary is written back to Redis.
+- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts with a hit rate, cache inventory (total cached tiles and amenities), and per-amenity breakdowns including cache inventory, cache hit rates, geohash coverage (precision 4), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and ensures the reset boundary is written back to Redis.
 - **Endpoint:** `/api/statistics` returns the current snapshot as JSON, enabling external systems to monitor demand and tune cache pre-warming or upstream routing strategies with data that survives process restarts.
 
 ## 12. Upstream Daily Request Limits
