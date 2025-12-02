@@ -90,6 +90,16 @@ This starts the proxy along with Redis and a mock Overpass service used for inte
 
 The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
+#### What the statistics include and how to use them
+
+- **Global totals (since 00:00 UTC):** total requests, total requested tiles, unique client IPs, cache hits/misses/stales, and the top ten geohash hotspots with their request share.
+- **Per-amenity breakdown:** requests and average tile counts, unique client IPs, cached tile inventory, cache hit/miss/stale counts, 3-character geohash coverage percentages, and the timestamp of the last request.
+- **Persistence:** the snapshot is stored in Redis on every update so dashboards and alerts can rely on continuity through restarts.
+- **Operational uses:**
+  - Identify "hot" geohashes and amenity types to pre-warm or pin in the cache.
+  - Spot cache effectiveness regressions (hit/miss ratios) and adjust eviction or TTL policies.
+  - Monitor demand diversity (unique clients) and adjust upstream daily limits before outages occur.
+
 ## Testing
 
 The test suite is designed to work both with and without Docker:
