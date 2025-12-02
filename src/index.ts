@@ -2,7 +2,7 @@ import formbody from '@fastify/formbody';
 import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import { Redis } from 'ioredis';
 import { readFile } from 'node:fs/promises';
-import { URL } from 'node:url';
+import { resolve } from 'node:path';
 
 import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
@@ -21,7 +21,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   const app = Fastify({ logger: createLoggerOptions(), trustProxy: config.trustProxy });
   void app.register(formbody);
 
-  const statisticsMapPath = new URL('../public/statistics-map.html', import.meta.url);
+  const statisticsMapPath = resolve(process.cwd(), 'public', 'statistics-map.html');
 
   // Simple CORS handling for browser clients
   app.addHook('onSend', async (_request, reply, payload) => {
