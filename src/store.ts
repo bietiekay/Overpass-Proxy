@@ -91,6 +91,51 @@ class TilePresenceCache {
     return count;
   }
 
+  public countPresentAmenities(): number {
+    let amenitiesWithCache = 0;
+
+    for (const [amenity, entries] of this.entries) {
+      let hasPresent = false;
+
+      for (const [tileHash, entry] of entries) {
+        const current = this.clearIfExpired(amenity, tileHash, entry);
+        if (current?.state === 'present') {
+          hasPresent = true;
+          break;
+        }
+      }
+
+      if (entries.size === 0) {
+        this.entries.delete(amenity);
+      }
+
+      if (hasPresent) {
+        amenitiesWithCache += 1;
+      }
+    }
+
+    return amenitiesWithCache;
+  }
+
+  public countAllPresent(): number {
+    let total = 0;
+
+    for (const [amenity, entries] of this.entries) {
+      for (const [tileHash, entry] of entries) {
+        const current = this.clearIfExpired(amenity, tileHash, entry);
+        if (current?.state === 'present') {
+          total += 1;
+        }
+      }
+
+      if (entries.size === 0) {
+        this.entries.delete(amenity);
+      }
+    }
+
+    return total;
+  }
+
   private addListener(key: string, listener: PresenceListener): void {
     const existing = this.listeners.get(key);
     if (existing) {
@@ -216,6 +261,14 @@ export class TileStore {
   public countCachedTiles(amenity: string): number {
     const amenitySuffix = amenityKey(amenity);
     return this.presence.countPresent(amenitySuffix);
+  }
+
+  public countCachedAmenities(): number {
+    return this.presence.countPresentAmenities();
+  }
+
+  public countTotalCachedTiles(): number {
+    return this.presence.countAllPresent();
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {

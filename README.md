@@ -107,8 +107,8 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
 
 #### What the statistics include and how to use them
 
-- **Global totals (since 00:00 UTC):** total requests, total requested tiles, unique client IPs, cache hits/misses/stales, and the top ten geohash hotspots with their request share.
-- **Per-amenity breakdown:** requests and average tile counts, unique client IPs, cached tile inventory, cache hit/miss/stale counts, 4-character geohash coverage percentages, and the timestamp of the last request.
+- **Global totals (since 00:00 UTC):** total requests, total requested tiles, unique client IPs, cache hits/misses/stales and hit rate, current cached tile count and number of cached amenities, and the top ten geohash hotspots with their request share.
+- **Per-amenity breakdown:** requests and average tile counts, unique client IPs, cached tile inventory, cache hit/miss/stale counts with hit rate, 4-character geohash coverage percentages, and the timestamp of the last request.
 - **Persistence:** the snapshot is stored in Redis on every update so dashboards and alerts can rely on continuity through restarts.
 - **Operational uses:**
   - Identify "hot" geohashes and amenity types to pre-warm or pin in the cache.

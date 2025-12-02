@@ -9,6 +9,8 @@ export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
 
 export interface CacheMetricsProvider {
   countCachedTiles(amenity: string): number;
+  countCachedAmenities(): number;
+  countTotalCachedTiles(): number;
 }
 
 interface AmenityStatsInternal {
@@ -32,6 +34,7 @@ export interface AmenityStatistics {
   requests: number;
   uniqueClients: number;
   cacheItems: number;
+  cacheHitRate: number;
   averageTilesPerRequest: number;
   cacheStatus: Record<CacheStatus, number>;
   geohashCoverage: GeohashCoverageEntry[];
@@ -44,6 +47,9 @@ export interface StatisticsSnapshot {
   totalRequests: number;
   totalUniqueClients: number;
   totalTilesRequested: number;
+  totalCachedTiles: number;
+  cachedAmenities: number;
+  cacheHitRate: number;
   averageTilesPerRequest: number;
   cacheStatus: Record<CacheStatus, number>;
   hotspots: Array<{ geohash: string; requests: number; share: number }>;
@@ -80,6 +86,17 @@ const geohashForBoundingBox = (bbox: BoundingBox): string | null => {
 };
 
 const zeroCacheStatus = (): Record<CacheStatus, number> => ({ HIT: 0, MISS: 0, STALE: 0 });
+
+const calculateHitRate = (
+  cacheStatus: Record<CacheStatus, number>,
+  totalRequests: number
+): number => {
+  if (totalRequests <= 0) {
+    return 0;
+  }
+  const hitRate = (cacheStatus.HIT / totalRequests) * 100;
+  return Number(hitRate.toFixed(2));
+};
 
 interface PersistedAmenityStats {
   amenity: string;
@@ -300,11 +317,14 @@ export class RequestStatistics {
         const averageTilesPerRequest =
           stats.requests > 0 ? Number((stats.totalTiles / stats.requests).toFixed(2)) : 0;
 
+        const cacheHitRate = calculateHitRate(stats.cacheStatusCounts, stats.requests);
+
         amenities.push({
           amenity: stats.amenity,
           requests: stats.requests,
           uniqueClients: stats.clients.size,
           cacheItems,
+          cacheHitRate,
           averageTilesPerRequest,
           cacheStatus: { ...stats.cacheStatusCounts },
           geohashCoverage,
@@ -330,12 +350,17 @@ export class RequestStatistics {
       const averageTilesPerRequest =
         this.totalRequests > 0 ? Number((this.totalTiles / this.totalRequests).toFixed(2)) : 0;
 
+      const cacheHitRate = calculateHitRate(this.cacheStatusCounts, this.totalRequests);
+
       return {
         generatedAt,
         dayStart: dayStartIso,
         totalRequests: this.totalRequests,
         totalUniqueClients: this.uniqueClients.size,
         totalTilesRequested: this.totalTiles,
+        totalCachedTiles: this.cacheMetrics.countTotalCachedTiles(),
+        cachedAmenities: this.cacheMetrics.countCachedAmenities(),
+        cacheHitRate,
         averageTilesPerRequest,
         cacheStatus: { ...this.cacheStatusCounts },
         hotspots,

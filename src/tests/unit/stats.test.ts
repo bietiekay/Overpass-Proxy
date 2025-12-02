@@ -26,7 +26,9 @@ describe('RequestStatistics', () => {
     const cacheCounts = new Map<string, number>([['toilets', 5]]);
     const storage = new InMemoryStatisticsStorage();
     const stats = await RequestStatistics.create({
-      countCachedTiles: (amenity) => cacheCounts.get(amenity) ?? 0
+      countCachedTiles: (amenity) => cacheCounts.get(amenity) ?? 0,
+      countCachedAmenities: () => cacheCounts.size,
+      countTotalCachedTiles: () => [...cacheCounts.values()].reduce((sum, value) => sum + value, 0)
     }, storage);
 
     await stats.recordRequest({
@@ -58,6 +60,9 @@ describe('RequestStatistics', () => {
     expect(snapshot.totalRequests).toBe(3);
     expect(snapshot.totalUniqueClients).toBe(2);
     expect(snapshot.totalTilesRequested).toBe(26);
+    expect(snapshot.totalCachedTiles).toBe(5);
+    expect(snapshot.cachedAmenities).toBe(1);
+    expect(snapshot.cacheHitRate).toBeCloseTo(33.33, 2);
     expect(snapshot.amenities).toHaveLength(2);
     expect(snapshot.hotspots.length).toBeGreaterThanOrEqual(1);
 
@@ -65,6 +70,7 @@ describe('RequestStatistics', () => {
     expect(toilets?.requests).toBe(2);
     expect(toilets?.uniqueClients).toBe(2);
     expect(toilets?.cacheItems).toBe(5);
+    expect(toilets?.cacheHitRate).toBe(50);
     expect(toilets?.cacheStatus.HIT).toBe(1);
     expect(toilets?.cacheStatus.MISS).toBe(1);
     expect(toilets?.averageTilesPerRequest).toBe(10);
@@ -77,7 +83,9 @@ describe('RequestStatistics', () => {
     const storage = new InMemoryStatisticsStorage();
     const stats = await RequestStatistics.create(
       {
-        countCachedTiles: () => 0
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countTotalCachedTiles: () => 0
       },
       storage
     );
@@ -102,7 +110,9 @@ describe('RequestStatistics', () => {
     const storage = new InMemoryStatisticsStorage();
     const firstInstance = await RequestStatistics.create(
       {
-        countCachedTiles: () => 0
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countTotalCachedTiles: () => 0
       },
       storage
     );
@@ -118,7 +128,9 @@ describe('RequestStatistics', () => {
 
     const secondInstance = await RequestStatistics.create(
       {
-        countCachedTiles: () => 0
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countTotalCachedTiles: () => 0
       },
       storage
     );
