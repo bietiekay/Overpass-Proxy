@@ -66,7 +66,7 @@ tile counts below the 1 024-tile ceiling even for the app’s widest live-map 
 
 ### Running behind a reverse proxy
 
-Set `TRUST_PROXY=true` so Fastify respects the original client IP from `X-Forwarded-For`/`X-Real-IP` headers. Example Nginx stanza:
+Set `TRUST_PROXY=true` so Fastify respects the original client IP from `X-Forwarded-For`/`X-Real-IP` headers. Example Nginx location block:
 
 ```
 location / {
