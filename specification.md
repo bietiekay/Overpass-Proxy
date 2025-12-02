@@ -124,7 +124,7 @@ The async `buildServer` helper allows tests to override any configuration or inj
 
 ## 11. Request Statistics
 - **Recording:** `RequestStatistics.recordRequest` captures amenity, client IP (normalised), bounding box, cache disposition (HIT/STALE/MISS), and tile count for every cacheable interpreter request. Entries roll over automatically at the start of each UTC day using helpers from `src/time.ts` and persist snapshots to Redis on every update.
-- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts, and per-amenity breakdowns including cache inventory, geohash coverage (precision 3), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and ensures the reset boundary is written back to Redis.
+- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts, and per-amenity breakdowns including cache inventory, geohash coverage (precision 4), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and ensures the reset boundary is written back to Redis.
 - **Endpoint:** `/api/statistics` returns the current snapshot as JSON, enabling external systems to monitor demand and tune cache pre-warming or upstream routing strategies with data that survives process restarts.
 
 ## 12. Upstream Daily Request Limits

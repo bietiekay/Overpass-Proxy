@@ -73,7 +73,7 @@ const geohashForBoundingBox = (bbox: BoundingBox): string | null => {
     return null;
   }
   try {
-    return ngeohash.encode(lat, lon, 3);
+    return ngeohash.encode(lat, lon, 4);
   } catch {
     return null;
   }
