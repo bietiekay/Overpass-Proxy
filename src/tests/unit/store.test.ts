@@ -70,4 +70,61 @@ describe('TileStore', () => {
     expect(store.countCachedTiles('toilets')).toBe(2);
     expect(store.countCachedTiles('drinking_water')).toBe(0);
   });
+
+  it('restores presence information from redis', async () => {
+    const firstStore = new TileStore(redis as unknown as Redis, {
+      ttlSeconds: 60,
+      swrSeconds: 30
+    });
+
+    await firstStore.writeTile(
+      tile,
+      {
+        elements: [
+          {
+            type: 'node',
+            id: 1,
+            lat: 0.5,
+            lon: 0.5,
+            tags: { amenity: 'toilets' }
+          }
+        ],
+        generator: 'first',
+        osm3s: {},
+        version: 0.6
+      },
+      'toilets'
+    );
+
+    await firstStore.writeTile(
+      { hash: 'u33dc0q', bounds: { south: 1, west: 1, north: 2, east: 2 } },
+      {
+        elements: [
+          {
+            type: 'node',
+            id: 2,
+            lat: 1.5,
+            lon: 1.5,
+            tags: { amenity: 'drinking_water' }
+          }
+        ],
+        generator: 'second',
+        osm3s: {},
+        version: 0.6
+      },
+      'drinking_water'
+    );
+
+    const restoredStore = new TileStore(redis as unknown as Redis, {
+      ttlSeconds: 60,
+      swrSeconds: 30
+    });
+
+    await restoredStore.restorePresence();
+
+    expect(restoredStore.countCachedTiles('toilets')).toBe(1);
+    expect(restoredStore.countCachedTiles('drinking_water')).toBe(1);
+    expect(restoredStore.countCachedAmenityTypes()).toBe(2);
+    expect(restoredStore.countCachedAmenities()).toBe(2);
+  });
 });

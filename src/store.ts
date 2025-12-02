@@ -290,6 +290,54 @@ export class TileStore {
     this.presence = new TilePresenceCache(missingTtl);
   }
 
+  public async restorePresence(): Promise<void> {
+    let cursor = '0';
+
+    do {
+      const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', 'tile:*', 'COUNT', 100);
+      await this.restoreTileKeys(keys);
+      cursor = nextCursor;
+    } while (cursor !== '0');
+  }
+
+  private async restoreTileKeys(keys: string[]): Promise<void> {
+    if (keys.length === 0) {
+      return;
+    }
+
+    const values = await this.redis.mget(keys);
+
+    keys.forEach((key, index) => {
+      const parsed = this.parseTileKey(key);
+      const raw = values[index];
+
+      if (!parsed || !raw) {
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(raw) as OverpassTilePayload;
+        const amenityCount = countAmenitiesInResponse(payload.response);
+        this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, amenityCount);
+      } catch (error) {
+        logger.warn({ err: error, key }, 'failed to restore tile presence from redis');
+      }
+    });
+  }
+
+  private parseTileKey(key: string): { amenity: string; hash: string } | null {
+    if (!key.startsWith('tile:')) {
+      return null;
+    }
+
+    const [, amenity, ...hashParts] = key.split(':');
+    if (!amenity || hashParts.length === 0) {
+      return null;
+    }
+
+    return { amenity, hash: hashParts.join(':') };
+  }
+
   public countCachedTiles(amenity: string): number {
     const amenitySuffix = amenityKey(amenity);
     return this.presence.countPresent(amenitySuffix);

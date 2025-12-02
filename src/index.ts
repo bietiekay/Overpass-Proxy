@@ -88,6 +88,8 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     swrSeconds: config.swrSeconds
   });
 
+  await store.restorePresence();
+
   const statisticsStorage = new RedisStatisticsStorage(redis);
   const statistics = await RequestStatistics.create(store, statisticsStorage);
 
