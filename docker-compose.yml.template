@@ -9,6 +9,7 @@ services:
       UPSTREAM_DAILY_LIMIT: -1 # -1 keeps upstream requests unlimited
       REDIS_URL: redis://redis:6379
       LOG_VERBOSITY: info # errors | info | debug
+      TRUST_PROXY: 'true' # set to true when running behind nginx or another reverse proxy
     ports:
       - "127.0.0.1:5002:8080"
     depends_on:
