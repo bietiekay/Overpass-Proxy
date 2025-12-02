@@ -10,6 +10,7 @@ export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
 export interface CacheMetricsProvider {
   countCachedTiles(amenity: string): number;
   countCachedAmenities(): number;
+  countCachedAmenityTypes(): number;
   countTotalCachedTiles(): number;
 }
 
@@ -49,6 +50,7 @@ export interface StatisticsSnapshot {
   totalTilesRequested: number;
   totalCachedTiles: number;
   cachedAmenities: number;
+  cachedAmenityTypes: number;
   cacheHitRate: number;
   averageTilesPerRequest: number;
   cacheStatus: Record<CacheStatus, number>;
@@ -360,6 +362,7 @@ export class RequestStatistics {
         totalTilesRequested: this.totalTiles,
         totalCachedTiles: this.cacheMetrics.countTotalCachedTiles(),
         cachedAmenities: this.cacheMetrics.countCachedAmenities(),
+        cachedAmenityTypes: this.cacheMetrics.countCachedAmenityTypes(),
         cacheHitRate,
         averageTilesPerRequest,
         cacheStatus: { ...this.cacheStatusCounts },
