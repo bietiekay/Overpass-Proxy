@@ -165,16 +165,26 @@
   <script>
     const loadGeohash = async () => {
       if (window.ngeohash?.decode_bbox) return window.ngeohash;
-      try {
-        const module = await import('https://cdn.jsdelivr.net/npm/ngeohash@0.6.0/build/ngeohash.min.js');
-        const geohash = module?.default ?? module;
-        if (geohash?.decode_bbox) {
-          window.ngeohash = geohash;
-          return geohash;
+
+      const cdnSources = [
+        'https://cdn.jsdelivr.net/npm/ngeohash@0.6.0/+esm',
+        'https://esm.sh/ngeohash@0.6.0'
+      ];
+
+      for (const url of cdnSources) {
+        try {
+          const module = await import(url);
+          const geohash = module?.default ?? module;
+          if (geohash?.decode_bbox) {
+            window.ngeohash = geohash;
+            return geohash;
+          }
+        } catch (error) {
+          console.error(`Failed to load ngeohash library from ${url}`, error);
         }
-      } catch (error) {
-        console.error('Failed to load ngeohash library from CDN', error);
       }
+
+      console.error('Geohash library could not be loaded from any CDN source.');
       return null;
     };
 
