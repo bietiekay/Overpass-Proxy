@@ -141,6 +141,7 @@
         <select id="mode">
           <option value="requests">Request hotspots</option>
           <option value="coverage">Request coverage</option>
+          <option value="cache">Cache coverage</option>
         </select>
       </label>
       <button id="refresh">Refresh data</button>
@@ -214,6 +215,11 @@
       cacheHitRate: 52.4,
       averageTilesPerRequest: 40,
       cacheStatus: { HIT: 9, MISS: 3, STALE: 0 },
+      cacheCoverage: [
+        { geohash: 'u33d0', entries: 3, amenityItems: 12 },
+        { geohash: 'u0qj0', entries: 2, amenityItems: 6 },
+        { geohash: 'dr5r0', entries: 4, amenityItems: 18 }
+      ],
       hotspots: [
         { geohash: 'u33d', requests: 4 },
         { geohash: 'u0qj', requests: 3 },
@@ -318,6 +324,13 @@
       }));
     };
 
+    const buildCacheCoverageEntries = (snapshot) => {
+      return (snapshot.cacheCoverage ?? []).map((entry) => ({
+        geohash: entry.geohash,
+        value: Math.max(1, entry.entries ?? 0)
+      }));
+    };
+
     const updateSummary = (snapshot) => {
       summaryEl.innerHTML = '';
       const parts = [
@@ -342,6 +355,8 @@
       const mode = modeSelect.value;
       if (mode === 'coverage') {
         await renderOverlay(buildCoverageEntries(latestSnapshot), 'Request share (%)');
+      } else if (mode === 'cache') {
+        await renderOverlay(buildCacheCoverageEntries(latestSnapshot), 'Cached tiles');
       } else {
         await renderOverlay(buildRequestEntries(latestSnapshot), 'Requests');
       }

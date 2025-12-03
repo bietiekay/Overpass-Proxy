@@ -3,6 +3,8 @@ import ngeohash from 'ngeohash';
 
 import type { BoundingBox } from './bbox.js';
 import { logger } from './logger.js';
+import type { CacheCoverageEntry } from './store.js';
+import type { TileInfo } from './tiling.js';
 import { startOfDayMs } from './time.js';
 
 export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
@@ -12,6 +14,7 @@ export interface CacheMetricsProvider {
   countCachedAmenities(): number;
   countCachedAmenityTypes(): number;
   countTotalCachedTiles(): number;
+  getCacheCoverage(): CacheCoverageEntry[];
 }
 
 interface AmenityStatsInternal {
@@ -55,6 +58,7 @@ export interface StatisticsSnapshot {
   averageTilesPerRequest: number;
   cacheStatus: Record<CacheStatus, number>;
   hotspots: Array<{ geohash: string; requests: number; share: number }>;
+  cacheCoverage: CacheCoverageEntry[];
   amenities: AmenityStatistics[];
 }
 
@@ -64,6 +68,7 @@ interface RecordRequestOptions {
   bbox: BoundingBox;
   cacheStatus: CacheStatus;
   tileCount: number;
+  tiles?: TileInfo[];
   timestamp?: number;
 }
 
@@ -259,8 +264,12 @@ export class RequestStatistics {
       amenityStats.cacheStatusCounts[options.cacheStatus] += 1;
       amenityStats.lastRequestAt = now;
 
-      const geohash = geohashForBoundingBox(options.bbox);
-      if (geohash) {
+      const geohashes =
+        options.tiles && options.tiles.length > 0
+          ? new Set(options.tiles.map((tile) => tile.hash))
+          : new Set<string>([geohashForBoundingBox(options.bbox) ?? undefined].filter(Boolean) as string[]);
+
+      for (const geohash of geohashes) {
         amenityStats.geohashCounts.set(
           geohash,
           (amenityStats.geohashCounts.get(geohash) ?? 0) + 1
@@ -333,6 +342,10 @@ export class RequestStatistics {
 
       const cacheHitRate = calculateHitRate(this.cacheStatusCounts, this.totalRequests);
 
+      const cacheCoverage = this.cacheMetrics
+        .getCacheCoverage()
+        .sort((a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash));
+
       return {
         generatedAt,
         dayStart: dayStartIso,
@@ -346,6 +359,7 @@ export class RequestStatistics {
         averageTilesPerRequest,
         cacheStatus: { ...this.cacheStatusCounts },
         hotspots,
+        cacheCoverage,
         amenities
       };
     });
