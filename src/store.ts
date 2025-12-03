@@ -13,6 +13,12 @@ interface PresenceEntry {
   amenityCount: number;
 }
 
+export interface CacheCoverageEntry {
+  geohash: string;
+  entries: number;
+  amenityItems: number;
+}
+
 type PresenceListener = () => void;
 
 class TilePresenceCache {
@@ -241,6 +247,34 @@ class TilePresenceCache {
   public getDefaultMissingTtl(): number {
     return this.defaultMissingTtlMs;
   }
+
+  public getCoverage(): CacheCoverageEntry[] {
+    const coverage = new Map<string, { entries: number; amenityItems: number }>();
+
+    for (const [amenity, entries] of this.entries) {
+      for (const [tileHash, entry] of entries) {
+        const current = this.clearIfExpired(amenity, tileHash, entry);
+        if (current?.state !== 'present') {
+          continue;
+        }
+
+        const existing = coverage.get(tileHash) ?? { entries: 0, amenityItems: 0 };
+        existing.entries += 1;
+        existing.amenityItems += current.amenityCount;
+        coverage.set(tileHash, existing);
+      }
+
+      if (entries.size === 0) {
+        this.entries.delete(amenity);
+      }
+    }
+
+    return [...coverage.entries()].map(([geohash, counts]) => ({
+      geohash,
+      entries: counts.entries,
+      amenityItems: counts.amenityItems
+    }));
+  }
 }
 
 export interface CachedTile {
@@ -353,6 +387,10 @@ export class TileStore {
 
   public countTotalCachedTiles(): number {
     return this.presence.countAllPresent();
+  }
+
+  public getCacheCoverage(): CacheCoverageEntry[] {
+    return this.presence.getCoverage();
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {

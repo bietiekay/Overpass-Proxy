@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { BoundingBox } from '../../bbox.js';
+import { tilesForBoundingBox } from '../../tiling.js';
 import {
   type PersistedStatisticsState,
   type StatisticsStorage,
@@ -25,12 +26,14 @@ describe('RequestStatistics', () => {
   it('aggregates request metrics', async () => {
     const cacheCounts = new Map<string, number>([['toilets', 5]]);
     const cachedAmenities = new Map<string, number>([['toilets', 5]]);
+    const tiles = tilesForBoundingBox(bbox, 5);
     const storage = new InMemoryStatisticsStorage();
     const stats = await RequestStatistics.create({
       countCachedTiles: (amenity) => cacheCounts.get(amenity) ?? 0,
       countCachedAmenities: () => [...cachedAmenities.values()].reduce((sum, value) => sum + value, 0),
       countCachedAmenityTypes: () => cachedAmenities.size,
-      countTotalCachedTiles: () => [...cacheCounts.values()].reduce((sum, value) => sum + value, 0)
+      countTotalCachedTiles: () => [...cacheCounts.values()].reduce((sum, value) => sum + value, 0),
+      getCacheCoverage: () => []
     }, storage);
 
     await stats.recordRequest({
@@ -39,6 +42,7 @@ describe('RequestStatistics', () => {
       bbox,
       cacheStatus: 'HIT',
       tileCount: 12,
+      tiles,
       timestamp: new Date('2024-01-01T10:00:00Z').getTime()
     });
     await stats.recordRequest({
@@ -47,6 +51,7 @@ describe('RequestStatistics', () => {
       bbox,
       cacheStatus: 'MISS',
       tileCount: 8,
+      tiles,
       timestamp: new Date('2024-01-01T11:00:00Z').getTime()
     });
     await stats.recordRequest({
@@ -55,6 +60,7 @@ describe('RequestStatistics', () => {
       bbox,
       cacheStatus: 'STALE',
       tileCount: 6,
+      tiles,
       timestamp: new Date('2024-01-01T12:00:00Z').getTime()
     });
 
@@ -77,9 +83,8 @@ describe('RequestStatistics', () => {
     expect(toilets?.cacheStatus.HIT).toBe(1);
     expect(toilets?.cacheStatus.MISS).toBe(1);
     expect(toilets?.averageTilesPerRequest).toBe(10);
-    expect(toilets?.geohashCoverage[0]?.geohash.length).toBe(4);
-    const coverageSum = toilets?.geohashCoverage.reduce((sum, entry) => sum + entry.percentage, 0) ?? 0;
-    expect(Math.round(coverageSum)).toBe(100);
+    expect(toilets?.geohashCoverage[0]?.geohash.length).toBeGreaterThanOrEqual(5);
+    expect(toilets?.geohashCoverage.length).toBe(tiles.length);
   });
 
   it('keeps aggregating across day boundaries', async () => {
@@ -89,7 +94,8 @@ describe('RequestStatistics', () => {
         countCachedTiles: () => 0,
         countCachedAmenities: () => 0,
         countCachedAmenityTypes: () => 0,
-        countTotalCachedTiles: () => 0
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => []
       },
       storage
     );
@@ -117,7 +123,8 @@ describe('RequestStatistics', () => {
         countCachedTiles: () => 0,
         countCachedAmenities: () => 0,
         countCachedAmenityTypes: () => 0,
-        countTotalCachedTiles: () => 0
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => []
       },
       storage
     );
@@ -136,7 +143,8 @@ describe('RequestStatistics', () => {
         countCachedTiles: () => 0,
         countCachedAmenities: () => 0,
         countCachedAmenityTypes: () => 0,
-        countTotalCachedTiles: () => 0
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => []
       },
       storage
     );

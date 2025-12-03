@@ -245,7 +245,8 @@ const handleCacheable = async (
     clientIp: request.ip,
     bbox,
     cacheStatus: cacheHeader,
-    tileCount: tiles.length
+    tileCount: tiles.length,
+    tiles
   });
 
   if (applyConditionalHeaders(request, reply, assembled)) {
