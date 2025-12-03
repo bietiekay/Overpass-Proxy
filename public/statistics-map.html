@@ -193,11 +193,12 @@
 
     const map = L.map('map', {
       worldCopyJump: true,
-      minZoom: 2
+      minZoom: 0
     }).setView([20, 0], 2);
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors'
+      attribution: '&copy; OpenStreetMap contributors',
+      minZoom: 0
     }).addTo(map);
 
     const overlayGroup = L.layerGroup().addTo(map);
@@ -288,11 +289,13 @@
           fillColor: toColor(clamp(entry.intensity, 0, 1)),
           fillOpacity: 0.55
         });
-        polygon.bindTooltip(
-          `${entry.geohash}<br>${description}: ${entry.value.toLocaleString(undefined, {
-            maximumFractionDigits: 2
-          })}`
-        );
+        const tooltip = [`${entry.geohash}`, `${description}: ${entry.value.toLocaleString(undefined, {
+          maximumFractionDigits: 2
+        })}`];
+        if (entry.detail) {
+          tooltip.push(entry.detail);
+        }
+        polygon.bindTooltip(tooltip.join('<br>'));
         polygon.addTo(overlayGroup);
       }
       statusEl.textContent = geohashUnavailable
@@ -327,7 +330,11 @@
     const buildCacheCoverageEntries = (snapshot) => {
       return (snapshot.cacheCoverage ?? []).map((entry) => ({
         geohash: entry.geohash,
-        value: Math.max(1, entry.entries ?? 0)
+        value: Math.max(0, entry.amenityItems ?? 0),
+        detail:
+          entry.entries !== undefined
+            ? `Tile entries: ${entry.entries.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+            : undefined
       }));
     };
 
@@ -356,7 +363,7 @@
       if (mode === 'coverage') {
         await renderOverlay(buildCoverageEntries(latestSnapshot), 'Request share (%)');
       } else if (mode === 'cache') {
-        await renderOverlay(buildCacheCoverageEntries(latestSnapshot), 'Cached tiles');
+        await renderOverlay(buildCacheCoverageEntries(latestSnapshot), 'Cached amenities');
       } else {
         await renderOverlay(buildRequestEntries(latestSnapshot), 'Requests');
       }
