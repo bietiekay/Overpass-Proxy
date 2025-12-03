@@ -123,8 +123,8 @@ The async `buildServer` helper allows tests to override any configuration or inj
 - **Metrics and tracing:** Exporting Prometheus or OpenTelemetry metrics would complement logs for production observability.
 
 ## 11. Request Statistics
-- **Recording:** `RequestStatistics.recordRequest` captures amenity, client IP (normalised), bounding box, cache disposition (HIT/STALE/MISS), and tile count for every cacheable interpreter request. Entries roll over automatically at the start of each UTC day using helpers from `src/time.ts` and persist snapshots to Redis on every update.
-- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts with a hit rate, cache inventory (total cached tiles and amenities), and per-amenity breakdowns including cache inventory, cache hit rates, geohash coverage (precision 4), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and ensures the reset boundary is written back to Redis.
+- **Recording:** `RequestStatistics.recordRequest` captures amenity, client IP (normalised), bounding box, cache disposition (HIT/STALE/MISS), and tile count for every cacheable interpreter request. Statistics persist to Redis on every update so they remain available across restarts without resetting at day boundaries.
+- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts with a hit rate, cache inventory (total cached tiles and amenities), and per-amenity breakdowns including cache inventory, cache hit rates, geohash coverage (precision 4), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and preserves the persistence boundary in Redis.
 - **Endpoint:** `/api/statistics` returns the current snapshot as JSON, enabling external systems to monitor demand and tune cache pre-warming or upstream routing strategies with data that survives process restarts.
 
 ## 12. Upstream Daily Request Limits

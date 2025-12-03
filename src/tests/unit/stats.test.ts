@@ -82,7 +82,7 @@ describe('RequestStatistics', () => {
     expect(Math.round(coverageSum)).toBe(100);
   });
 
-  it('resets when day changes', async () => {
+  it('keeps aggregating across day boundaries', async () => {
     const storage = new InMemoryStatisticsStorage();
     const stats = await RequestStatistics.create(
       {
@@ -105,9 +105,9 @@ describe('RequestStatistics', () => {
     });
 
     const snapshot = await stats.getSnapshot(new Date('2024-01-02T01:00:00Z').getTime());
-    expect(snapshot.totalRequests).toBe(0);
-    expect(snapshot.amenities).toHaveLength(0);
-    expect(snapshot.hotspots).toHaveLength(0);
+    expect(snapshot.totalRequests).toBe(1);
+    expect(snapshot.amenities).toHaveLength(1);
+    expect(snapshot.hotspots).toHaveLength(1);
   });
 
   it('restores persisted state', async () => {

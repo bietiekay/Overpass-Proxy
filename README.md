@@ -107,7 +107,7 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
 
 #### What the statistics include and how to use them
 
-- **Global totals (since 00:00 UTC):** total requests, total requested tiles, unique client IPs, cache hits/misses/stales and hit rate, current cached tile count and number of cached amenities, and the top ten geohash hotspots with their request share.
+- **Global totals (persisted across restarts):** total requests, total requested tiles, unique client IPs, cache hits/misses/stales and hit rate, current cached tile count and number of cached amenities, and the top ten geohash hotspots with their request share.
 - **Per-amenity breakdown:** requests and average tile counts, unique client IPs, cached tile inventory, cache hit/miss/stale counts with hit rate, 4-character geohash coverage percentages, and the timestamp of the last request.
 - **Persistence:** the snapshot is stored in Redis on every update so dashboards and alerts can rely on continuity through restarts.
 - **Operational uses:**
@@ -119,7 +119,7 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
 
 - **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. This is safe to poll from dashboards or alerting systems because the data comes from Redis-backed counters, so restarts do not clear it.
 - **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()` to retrieve the structured data (`StatisticsSnapshot`) inside the process without another HTTP request.
-- **Time window:** counters always reflect the current UTC day; the service automatically resets the totals when a new day begins.
+- **Time window:** counters continue accumulating until cleared from Redis, so the snapshot survives restarts and day boundaries.
 
 ## Testing
 

@@ -140,7 +140,7 @@
         View:
         <select id="mode">
           <option value="requests">Request hotspots</option>
-          <option value="coverage">Cache coverage</option>
+          <option value="coverage">Request coverage</option>
         </select>
       </label>
       <button id="refresh">Refresh data</button>
@@ -296,9 +296,6 @@
 
     const buildRequestEntries = (snapshot) => {
       const counts = new Map();
-      for (const hotspot of snapshot.hotspots ?? []) {
-        counts.set(hotspot.geohash, (counts.get(hotspot.geohash) ?? 0) + (hotspot.requests ?? 0));
-      }
       for (const amenity of snapshot.amenities ?? []) {
         for (const coverage of amenity.geohashCoverage ?? []) {
           counts.set(coverage.geohash, (counts.get(coverage.geohash) ?? 0) + (coverage.requests ?? 0));
@@ -309,12 +306,16 @@
 
     const buildCoverageEntries = (snapshot) => {
       const totals = new Map();
+      const totalRequests = snapshot.totalRequests ?? 0;
       for (const amenity of snapshot.amenities ?? []) {
         for (const coverage of amenity.geohashCoverage ?? []) {
-          totals.set(coverage.geohash, (totals.get(coverage.geohash) ?? 0) + (coverage.percentage ?? 0));
+          totals.set(coverage.geohash, (totals.get(coverage.geohash) ?? 0) + (coverage.requests ?? 0));
         }
       }
-      return Array.from(totals.entries()).map(([geohash, value]) => ({ geohash, value }));
+      return Array.from(totals.entries()).map(([geohash, value]) => ({
+        geohash,
+        value: totalRequests > 0 ? (value / totalRequests) * 100 : 0
+      }));
     };
 
     const updateSummary = (snapshot) => {
@@ -340,7 +341,7 @@
       if (!latestSnapshot) return;
       const mode = modeSelect.value;
       if (mode === 'coverage') {
-        await renderOverlay(buildCoverageEntries(latestSnapshot), 'Cache coverage (%)');
+        await renderOverlay(buildCoverageEntries(latestSnapshot), 'Request share (%)');
       } else {
         await renderOverlay(buildRequestEntries(latestSnapshot), 'Requests');
       }

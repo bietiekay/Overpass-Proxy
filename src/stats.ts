@@ -223,24 +223,6 @@ export class RequestStatistics {
     }
   }
 
-  private async rotateDay(now = Date.now()): Promise<void> {
-    const start = startOfDayMs(now);
-    if (start === this.dayStart) {
-      return;
-    }
-
-    this.dayStart = start;
-    this.totalRequests = 0;
-    this.totalTiles = 0;
-    this.uniqueClients.clear();
-    this.amenityStats.clear();
-    this.cacheStatusCounts.HIT = 0;
-    this.cacheStatusCounts.MISS = 0;
-    this.cacheStatusCounts.STALE = 0;
-
-    await this.persist();
-  }
-
   private getAmenityStats(amenity: string): AmenityStatsInternal {
     let stats = this.amenityStats.get(amenity);
     if (!stats) {
@@ -261,7 +243,6 @@ export class RequestStatistics {
   public async recordRequest(options: RecordRequestOptions): Promise<void> {
     await this.runExclusive(async () => {
       const now = options.timestamp ?? Date.now();
-      await this.rotateDay(now);
 
       const clientIp = normaliseClientIp(options.clientIp);
       const amenity = options.amenity.trim().toLowerCase();
@@ -292,8 +273,6 @@ export class RequestStatistics {
 
   public async getSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
     return this.runExclusive(async () => {
-      await this.rotateDay(now);
-
       const generatedAt = new Date(now).toISOString();
       const dayStartIso = new Date(this.dayStart).toISOString();
 
