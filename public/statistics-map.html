@@ -208,6 +208,7 @@
     const summaryEl = document.getElementById('summary');
     let latestSnapshot = null;
     let latestCacheCoverage = [];
+    let latestGeohashCoverage = [];
 
     const demoSnapshot = {
       generatedAt: new Date().toISOString(),
@@ -226,18 +227,19 @@
         { geohash: 'u33d', requests: 4 },
         { geohash: 'u0qj', requests: 3 },
         { geohash: 'dr5r', requests: 5 }
-      ],
-      amenities: [
-        {
-          amenity: 'demo',
-          geohashCoverage: [
-            { geohash: 'u33d', percentage: 30, requests: 4 },
-            { geohash: 'u0qj', percentage: 20, requests: 3 },
-            { geohash: 'dr5r', percentage: 50, requests: 5 }
-          ]
-        }
       ]
     };
+
+    const demoGeohashCoverage = [
+      {
+        amenity: 'demo',
+        geohashCoverage: [
+          { geohash: 'u33d', percentage: 30, requests: 4 },
+          { geohash: 'u0qj', percentage: 20, requests: 3 },
+          { geohash: 'dr5r', percentage: 50, requests: 5 }
+        ]
+      }
+    ];
 
     const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -304,9 +306,9 @@
         : `${description} visualised for ${normalised.length} tiles.`;
     };
 
-    const buildRequestEntries = (snapshot) => {
+    const buildRequestEntries = (coverageData) => {
       const counts = new Map();
-      for (const amenity of snapshot.amenities ?? []) {
+      for (const amenity of coverageData ?? []) {
         for (const coverage of amenity.geohashCoverage ?? []) {
           counts.set(coverage.geohash, (counts.get(coverage.geohash) ?? 0) + (coverage.requests ?? 0));
         }
@@ -314,10 +316,9 @@
       return Array.from(counts.entries()).map(([geohash, value]) => ({ geohash, value }));
     };
 
-    const buildCoverageEntries = (snapshot) => {
+    const buildCoverageEntries = (coverageData, totalRequests) => {
       const totals = new Map();
-      const totalRequests = snapshot.totalRequests ?? 0;
-      for (const amenity of snapshot.amenities ?? []) {
+      for (const amenity of coverageData ?? []) {
         for (const coverage of amenity.geohashCoverage ?? []) {
           totals.set(coverage.geohash, (totals.get(coverage.geohash) ?? 0) + (coverage.requests ?? 0));
         }
@@ -361,8 +362,12 @@
     const applyMode = async () => {
       if (!latestSnapshot) return;
       const mode = modeSelect.value;
+      const coverageData =
+        latestGeohashCoverage?.length > 0 ? latestGeohashCoverage : demoGeohashCoverage;
+      const totalRequests = latestSnapshot?.totalRequests ?? demoSnapshot.totalRequests ?? 0;
+
       if (mode === 'coverage') {
-        await renderOverlay(buildCoverageEntries(latestSnapshot), 'Request share (%)');
+        await renderOverlay(buildCoverageEntries(coverageData, totalRequests), 'Request share (%)');
       } else if (mode === 'cache') {
         const cacheCoverageData =
           latestCacheCoverage?.length > 0
@@ -370,7 +375,7 @@
             : demoSnapshot.cacheCoverage ?? [];
         await renderOverlay(buildCacheCoverageEntries(cacheCoverageData), 'Cached amenities');
       } else {
-        await renderOverlay(buildRequestEntries(latestSnapshot), 'Requests');
+        await renderOverlay(buildRequestEntries(coverageData), 'Requests');
       }
     };
 
@@ -385,6 +390,7 @@
         console.error('Failed to load live statistics, falling back to demo data.', error);
         latestSnapshot = demoSnapshot;
         latestCacheCoverage = demoSnapshot.cacheCoverage ?? [];
+        latestGeohashCoverage = demoGeohashCoverage;
         statusEl.textContent = 'Using demo data (live fetch failed).';
       }
     };
@@ -403,9 +409,23 @@
       }
     };
 
+    const fetchGeohashCoverage = async () => {
+      try {
+        const response = await fetch('/api/statistics/geohashCoverage', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Request failed');
+        const snapshot = await response.json();
+        latestGeohashCoverage = snapshot.geohashCoverage ?? [];
+      } catch (error) {
+        console.error('Failed to load geohash coverage data, falling back to demo data.', error);
+        if (!latestGeohashCoverage?.length) {
+          latestGeohashCoverage = demoGeohashCoverage;
+        }
+      }
+    };
+
     const refreshData = async () => {
       statusEl.textContent = 'Loading statistics…';
-      await Promise.all([fetchStatistics(), fetchCacheCoverage()]);
+      await Promise.all([fetchStatistics(), fetchCacheCoverage(), fetchGeohashCoverage()]);
       updateSummary(latestSnapshot);
       await applyMode();
     };
