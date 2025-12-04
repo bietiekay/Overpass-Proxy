@@ -168,6 +168,14 @@ describe('integration', () => {
     expect(Array.isArray(response.body.cacheCoverage)).toBe(true);
   });
 
+  it('does not include cache coverage in the aggregated statistics payload', async () => {
+    await redisClient?.flushall();
+
+    const response = await request(baseUrl).get('/api/statistics').expect(200);
+
+    expect(response.body.cacheCoverage).toBeUndefined();
+  });
+
   it('includes upstream health and request counters in statistics', async () => {
     await redisClient?.flushall();
 

@@ -234,4 +234,21 @@ describe('RequestStatistics', () => {
     expect(snapshot.cacheCoverage[0]?.entries).toBe(3);
     expect(snapshot.cacheCoverage[1]?.geohash).toBe('u0qj0');
   });
+
+  it('keeps statistics snapshots lean by omitting cache coverage', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => [{ geohash: 'u0qj0', entries: 2, amenityItems: 5 }]
+      },
+      storage
+    );
+
+    const snapshot = await stats.getSnapshot();
+    expect('cacheCoverage' in snapshot).toBe(false);
+  });
 });
