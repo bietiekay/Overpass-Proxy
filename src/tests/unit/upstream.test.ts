@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 import type { AppConfig } from '../../config.js';
 import { fetchTile } from '../../upstream.js';
+import { logger } from '../../logger.js';
 
 const { postMock, gotMock, RequestErrorMock } = vi.hoisted(() => {
   const post = vi.fn();
@@ -146,12 +147,31 @@ describe('upstream failover', () => {
 
   it('throws when all upstreams fail', async () => {
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    const loggerErrorSpy = vi.spyOn(logger, 'error');
     postMock.mockRejectedValue(new Error('fail-all'));
 
     try {
       const config: AppConfig = { ...baseConfig, upstreamUrls: [...baseConfig.upstreamUrls] };
       await expect(fetchTile(config, bbox, 'toilets')).rejects.toThrow('fail-all');
       expect(postMock).toHaveBeenCalledTimes(config.upstreamUrls.length);
+      expect(loggerErrorSpy).toHaveBeenCalledTimes(1);
+
+      const [payload, message] = loggerErrorSpy.mock.calls[0];
+      expect(message).toContain('no upstream URLs available');
+      expect(payload.lastError).toBe('fail-all');
+      expect(payload.upstreams).toHaveLength(config.upstreamUrls.length);
+      expect(payload.upstreams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            upstream: 'http://one.example/api/interpreter',
+            reason: expect.stringContaining('cooldown')
+          }),
+          expect.objectContaining({
+            upstream: 'http://two.example/api/interpreter',
+            reason: expect.stringContaining('cooldown')
+          })
+        ])
+      );
     } finally {
       randomSpy.mockRestore();
     }
