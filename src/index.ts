@@ -9,6 +9,7 @@ import { registerInterpreterRoutes } from './interpreter.js';
 import { createLoggerOptions, logger } from './logger.js';
 import { TileStore } from './store.js';
 import { RedisStatisticsStorage, RequestStatistics } from './stats.js';
+import { createUpstreamMetricsProvider } from './upstream.js';
 
 export interface BuildServerOptions {
   configOverrides?: Partial<AppConfig>;
@@ -101,7 +102,8 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   await store.restorePresence();
 
   const statisticsStorage = new RedisStatisticsStorage(redis);
-  const statistics = await RequestStatistics.create(store, statisticsStorage);
+  const upstreamMetrics = createUpstreamMetricsProvider(config);
+  const statistics = await RequestStatistics.create(store, statisticsStorage, upstreamMetrics);
 
   registerInterpreterRoutes(app, { config, redis, store, stats: statistics });
 

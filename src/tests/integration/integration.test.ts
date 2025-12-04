@@ -153,6 +153,23 @@ describe('integration', () => {
     expect(Array.isArray(amenityStats.geohashCoverage)).toBe(true);
   });
 
+  it('includes upstream health and request counters in statistics', async () => {
+    await redisClient?.flushall();
+
+    const response = await request(baseUrl).get('/api/statistics').expect(200);
+    const upstreams = response.body.upstreams;
+
+    expect(Array.isArray(upstreams)).toBe(true);
+    expect(upstreams).toHaveLength(upstreamUrls.length);
+    for (const entry of upstreams) {
+      expect(typeof entry.upstream).toBe('string');
+      expect(['available', 'cooldown', 'blocked']).toContain(entry.status);
+      expect(typeof entry.reason).toBe('string');
+      expect(typeof entry.requestsToday).toBe('number');
+      expect(typeof entry.dayStart).toBe('string');
+    }
+  });
+
   it('tracks unique clients using forwarded headers when proxy trust is enabled', async () => {
     await redisClient?.flushall();
     hits.splice(0, hits.length);
