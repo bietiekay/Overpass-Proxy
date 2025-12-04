@@ -5,7 +5,7 @@ import type { BoundingBox } from './bbox.js';
 import { logger } from './logger.js';
 import type { CacheCoverageEntry } from './store.js';
 import type { TileInfo } from './tiling.js';
-import { startOfDayMs } from './time.js';
+import { startOfDayMs, startOfMonthMs, startOfWeekMs } from './time.js';
 
 export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
 
@@ -48,7 +48,12 @@ export interface AmenityStatistics {
 export interface StatisticsSnapshot {
   generatedAt: string;
   dayStart: string;
+  weekStart: string;
+  monthStart: string;
   totalRequests: number;
+  totalRequestsDay: number;
+  totalRequestsWeek: number;
+  totalRequestsMonth: number;
   totalUniqueClients: number;
   totalTilesRequested: number;
   totalCachedTiles: number;
@@ -117,7 +122,12 @@ interface PersistedAmenityStats {
 
 export interface PersistedStatisticsState {
   dayStart: number;
+  weekStart: number;
+  monthStart: number;
   totalRequests: number;
+  totalRequestsDay: number;
+  totalRequestsWeek: number;
+  totalRequestsMonth: number;
   totalTiles: number;
   uniqueClients: string[];
   cacheStatusCounts: Record<CacheStatus, number>;
@@ -154,7 +164,17 @@ export class RedisStatisticsStorage implements StatisticsStorage {
 export class RequestStatistics {
   private dayStart: number = startOfDayMs();
 
+  private weekStart: number = startOfWeekMs();
+
+  private monthStart: number = startOfMonthMs();
+
   private totalRequests = 0;
+
+  private totalRequestsDay = 0;
+
+  private totalRequestsWeek = 0;
+
+  private totalRequestsMonth = 0;
 
   private totalTiles = 0;
 
@@ -197,7 +217,12 @@ export class RequestStatistics {
       }
 
       this.dayStart = persisted.dayStart;
+      this.weekStart = persisted.weekStart ?? startOfWeekMs(persisted.dayStart);
+      this.monthStart = persisted.monthStart ?? startOfMonthMs(persisted.dayStart);
       this.totalRequests = persisted.totalRequests;
+      this.totalRequestsDay = persisted.totalRequestsDay ?? persisted.totalRequests;
+      this.totalRequestsWeek = persisted.totalRequestsWeek ?? persisted.totalRequests;
+      this.totalRequestsMonth = persisted.totalRequestsMonth ?? persisted.totalRequests;
       this.totalTiles = persisted.totalTiles;
       this.uniqueClients.clear();
       for (const client of persisted.uniqueClients) {
@@ -245,14 +270,39 @@ export class RequestStatistics {
     return stats;
   }
 
+  private refreshPeriodCounters(now: number): void {
+    const currentDayStart = startOfDayMs(now);
+    if (this.dayStart !== currentDayStart) {
+      this.dayStart = currentDayStart;
+      this.totalRequestsDay = 0;
+    }
+
+    const currentWeekStart = startOfWeekMs(now);
+    if (this.weekStart !== currentWeekStart) {
+      this.weekStart = currentWeekStart;
+      this.totalRequestsWeek = 0;
+    }
+
+    const currentMonthStart = startOfMonthMs(now);
+    if (this.monthStart !== currentMonthStart) {
+      this.monthStart = currentMonthStart;
+      this.totalRequestsMonth = 0;
+    }
+  }
+
   public async recordRequest(options: RecordRequestOptions): Promise<void> {
     await this.runExclusive(async () => {
       const now = options.timestamp ?? Date.now();
+
+      this.refreshPeriodCounters(now);
 
       const clientIp = normaliseClientIp(options.clientIp);
       const amenity = options.amenity.trim().toLowerCase();
 
       this.totalRequests += 1;
+      this.totalRequestsDay += 1;
+      this.totalRequestsWeek += 1;
+      this.totalRequestsMonth += 1;
       this.totalTiles += options.tileCount;
       this.uniqueClients.add(clientIp);
       this.cacheStatusCounts[options.cacheStatus] += 1;
@@ -282,8 +332,12 @@ export class RequestStatistics {
 
   public async getSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
     return this.runExclusive(async () => {
+      this.refreshPeriodCounters(now);
+
       const generatedAt = new Date(now).toISOString();
       const dayStartIso = new Date(this.dayStart).toISOString();
+      const weekStartIso = new Date(this.weekStart).toISOString();
+      const monthStartIso = new Date(this.monthStart).toISOString();
 
       const amenities: AmenityStatistics[] = [];
       const globalGeohashCounts = new Map<string, number>();
@@ -349,7 +403,12 @@ export class RequestStatistics {
       return {
         generatedAt,
         dayStart: dayStartIso,
+        weekStart: weekStartIso,
+        monthStart: monthStartIso,
         totalRequests: this.totalRequests,
+        totalRequestsDay: this.totalRequestsDay,
+        totalRequestsWeek: this.totalRequestsWeek,
+        totalRequestsMonth: this.totalRequestsMonth,
         totalUniqueClients: this.uniqueClients.size,
         totalTilesRequested: this.totalTiles,
         totalCachedTiles: this.cacheMetrics.countTotalCachedTiles(),
@@ -376,7 +435,12 @@ export class RequestStatistics {
   private serialise(): PersistedStatisticsState {
     return {
       dayStart: this.dayStart,
+      weekStart: this.weekStart,
+      monthStart: this.monthStart,
       totalRequests: this.totalRequests,
+      totalRequestsDay: this.totalRequestsDay,
+      totalRequestsWeek: this.totalRequestsWeek,
+      totalRequestsMonth: this.totalRequestsMonth,
       totalTiles: this.totalTiles,
       uniqueClients: [...this.uniqueClients],
       cacheStatusCounts: { ...this.cacheStatusCounts },

@@ -66,6 +66,9 @@ describe('RequestStatistics', () => {
 
     const snapshot = await stats.getSnapshot(new Date('2024-01-01T13:00:00Z').getTime());
     expect(snapshot.totalRequests).toBe(3);
+    expect(snapshot.totalRequestsDay).toBe(3);
+    expect(snapshot.totalRequestsWeek).toBe(3);
+    expect(snapshot.totalRequestsMonth).toBe(3);
     expect(snapshot.totalUniqueClients).toBe(2);
     expect(snapshot.totalTilesRequested).toBe(26);
     expect(snapshot.totalCachedTiles).toBe(5);
@@ -87,7 +90,7 @@ describe('RequestStatistics', () => {
     expect(toilets?.geohashCoverage.length).toBe(tiles.length);
   });
 
-  it('keeps aggregating across day boundaries', async () => {
+  it('resets daily counters across day boundaries', async () => {
     const storage = new InMemoryStatisticsStorage();
     const stats = await RequestStatistics.create(
       {
@@ -112,6 +115,9 @@ describe('RequestStatistics', () => {
 
     const snapshot = await stats.getSnapshot(new Date('2024-01-02T01:00:00Z').getTime());
     expect(snapshot.totalRequests).toBe(1);
+    expect(snapshot.totalRequestsDay).toBe(0);
+    expect(snapshot.totalRequestsWeek).toBe(1);
+    expect(snapshot.totalRequestsMonth).toBe(1);
     expect(snapshot.amenities).toHaveLength(1);
     expect(snapshot.hotspots).toHaveLength(1);
   });
@@ -153,6 +159,56 @@ describe('RequestStatistics', () => {
       new Date('2024-01-01T09:00:00Z').getTime()
     );
     expect(snapshot.totalRequests).toBe(1);
+    expect(snapshot.totalRequestsDay).toBe(1);
+    expect(snapshot.totalRequestsWeek).toBe(1);
+    expect(snapshot.totalRequestsMonth).toBe(1);
     expect(snapshot.amenities[0]?.amenity).toBe('toilets');
+  });
+
+  it('tracks weekly and monthly request counters', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => []
+      },
+      storage
+    );
+
+    await stats.recordRequest({
+      amenity: 'toilets',
+      clientIp: '1.1.1.1',
+      bbox,
+      cacheStatus: 'HIT',
+      tileCount: 1,
+      timestamp: new Date('2024-01-05T10:00:00Z').getTime()
+    });
+
+    await stats.recordRequest({
+      amenity: 'toilets',
+      clientIp: '1.1.1.1',
+      bbox,
+      cacheStatus: 'MISS',
+      tileCount: 1,
+      timestamp: new Date('2024-01-08T09:00:00Z').getTime()
+    });
+
+    await stats.recordRequest({
+      amenity: 'toilets',
+      clientIp: '1.1.1.1',
+      bbox,
+      cacheStatus: 'MISS',
+      tileCount: 1,
+      timestamp: new Date('2024-02-02T09:00:00Z').getTime()
+    });
+
+    const snapshot = await stats.getSnapshot(new Date('2024-02-02T10:00:00Z').getTime());
+
+    expect(snapshot.totalRequests).toBe(3);
+    expect(snapshot.totalRequestsWeek).toBe(1);
+    expect(snapshot.totalRequestsMonth).toBe(1);
   });
 });
