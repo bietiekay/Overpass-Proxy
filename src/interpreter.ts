@@ -304,6 +304,12 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
     reply.send(snapshot);
   });
 
+  app.get('/api/statistics/cacheCoverage', async (_request, reply) => {
+    const snapshot = await deps.stats.getCacheCoverageSnapshot();
+    reply.header('Content-Type', 'application/json');
+    reply.send(snapshot);
+  });
+
   const transparentEndpoints = ['/api/status', '/api/timestamp', '/api/timestamp/*', '/api/kill_my_queries'];
   for (const endpoint of transparentEndpoints) {
     app.all(endpoint, async (request, reply) => {

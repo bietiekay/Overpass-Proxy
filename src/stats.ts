@@ -63,9 +63,13 @@ export interface StatisticsSnapshot {
   averageTilesPerRequest: number;
   cacheStatus: Record<CacheStatus, number>;
   hotspots: Array<{ geohash: string; requests: number; share: number }>;
-  cacheCoverage: CacheCoverageEntry[];
   amenities: AmenityStatistics[];
   upstreams: UpstreamStatisticsEntry[];
+}
+
+export interface CacheCoverageSnapshot {
+  generatedAt: string;
+  cacheCoverage: CacheCoverageEntry[];
 }
 
 export type UpstreamStatus = 'available' | 'cooldown' | 'blocked';
@@ -416,10 +420,6 @@ export class RequestStatistics {
 
       const cacheHitRate = calculateHitRate(this.cacheStatusCounts, this.totalRequests);
 
-      const cacheCoverage = this.cacheMetrics
-        .getCacheCoverage()
-        .sort((a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash));
-
       const upstreams = this.upstreamMetrics?.describeUpstreams() ?? [];
 
       return {
@@ -440,11 +440,19 @@ export class RequestStatistics {
         averageTilesPerRequest,
         cacheStatus: { ...this.cacheStatusCounts },
         hotspots,
-        cacheCoverage,
         amenities,
         upstreams
       };
     });
+  }
+
+  public async getCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
+    const generatedAt = new Date(now).toISOString();
+    const cacheCoverage = this.cacheMetrics
+      .getCacheCoverage()
+      .sort((a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash));
+
+    return { generatedAt, cacheCoverage };
   }
 
   private async persist(): Promise<void> {
