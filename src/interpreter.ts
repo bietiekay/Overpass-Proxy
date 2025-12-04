@@ -17,7 +17,12 @@ import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
-import { RequestStatistics, type CacheStatus } from './stats.js';
+import {
+  RequestStatistics,
+  type CacheCoverageSnapshot,
+  type CacheStatus,
+  type StatisticsSnapshot
+} from './stats.js';
 
 interface InterpreterDeps {
   config: AppConfig;
@@ -299,7 +304,9 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics', async (_request, reply) => {
-    const snapshot = await deps.stats.getSnapshot();
+    const { cacheCoverage: _cacheCoverage, ...snapshot } = (await deps.stats.getSnapshot()) as
+      | StatisticsSnapshot
+      | (StatisticsSnapshot & CacheCoverageSnapshot);
     reply.header('Content-Type', 'application/json');
     reply.send(snapshot);
   });
