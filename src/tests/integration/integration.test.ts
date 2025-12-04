@@ -150,7 +150,7 @@ describe('integration', () => {
     const amenityStats = snapshot.amenities.find((entry: any) => entry.amenity === 'toilets');
     expect(amenityStats).toBeDefined();
     expect(amenityStats.requests).toBeGreaterThanOrEqual(2);
-    expect(Array.isArray(amenityStats.geohashCoverage)).toBe(true);
+    expect(amenityStats.geohashCoverage).toBeUndefined();
   });
 
   it('exposes cache coverage separately', async () => {
@@ -168,12 +168,29 @@ describe('integration', () => {
     expect(Array.isArray(response.body.cacheCoverage)).toBe(true);
   });
 
+  it('exposes geohash coverage separately', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const response = await request(baseUrl).get('/api/statistics/geohashCoverage').expect(200);
+    expect(response.headers['content-type']).toContain('application/json');
+    expect(Array.isArray(response.body.geohashCoverage)).toBe(true);
+    expect(Array.isArray(response.body.geohashCoverage[0]?.geohashCoverage)).toBe(true);
+  });
+
   it('does not include cache coverage in the aggregated statistics payload', async () => {
     await redisClient?.flushall();
 
     const response = await request(baseUrl).get('/api/statistics').expect(200);
 
     expect(response.body.cacheCoverage).toBeUndefined();
+    expect(response.body.geohashCoverage).toBeUndefined();
   });
 
   it('includes upstream health and request counters in statistics', async () => {

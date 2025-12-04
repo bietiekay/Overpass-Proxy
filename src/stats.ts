@@ -41,8 +41,12 @@ export interface AmenityStatistics {
   cacheHitRate: number;
   averageTilesPerRequest: number;
   cacheStatus: Record<CacheStatus, number>;
-  geohashCoverage: GeohashCoverageEntry[];
   lastRequestAt?: string;
+}
+
+export interface AmenityGeohashCoverage {
+  amenity: string;
+  geohashCoverage: GeohashCoverageEntry[];
 }
 
 export interface StatisticsSnapshot {
@@ -70,6 +74,11 @@ export interface StatisticsSnapshot {
 export interface CacheCoverageSnapshot {
   generatedAt: string;
   cacheCoverage: CacheCoverageEntry[];
+}
+
+export interface GeohashCoverageSnapshot {
+  generatedAt: string;
+  geohashCoverage: AmenityGeohashCoverage[];
 }
 
 export type UpstreamStatus = 'available' | 'cooldown' | 'blocked';
@@ -368,19 +377,9 @@ export class RequestStatistics {
 
       for (const stats of this.amenityStats.values()) {
         const cacheItems = this.cacheMetrics.countCachedTiles(stats.amenity);
-        const geohashCoverage: GeohashCoverageEntry[] = [];
-
         for (const [hash, count] of stats.geohashCounts) {
-          const percentage = stats.requests > 0 ? (count / stats.requests) * 100 : 0;
-          geohashCoverage.push({
-            geohash: hash,
-            percentage: Number(percentage.toFixed(2)),
-            requests: count
-          });
           globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
         }
-
-        geohashCoverage.sort((a, b) => b.requests - a.requests);
 
         const averageTilesPerRequest =
           stats.requests > 0 ? Number((stats.totalTiles / stats.requests).toFixed(2)) : 0;
@@ -395,7 +394,6 @@ export class RequestStatistics {
           cacheHitRate,
           averageTilesPerRequest,
           cacheStatus: { ...stats.cacheStatusCounts },
-          geohashCoverage,
           lastRequestAt:
             stats.lastRequestAt > 0 ? new Date(stats.lastRequestAt).toISOString() : undefined
         });
@@ -446,6 +444,17 @@ export class RequestStatistics {
     });
   }
 
+  public async getGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
+    return this.runExclusive(async () => {
+      this.refreshPeriodCounters(now);
+
+      const generatedAt = new Date(now).toISOString();
+      const { amenityCoverage } = this.buildGeohashCoverage();
+
+      return { generatedAt, geohashCoverage: amenityCoverage };
+    });
+  }
+
   public async getCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
     const generatedAt = new Date(now).toISOString();
     const cacheCoverage = this.cacheMetrics
@@ -461,6 +470,44 @@ export class RequestStatistics {
     } catch (error) {
       logger.warn({ err: error }, 'failed to persist request statistics');
     }
+  }
+
+  private buildGeohashCoverage(): {
+    amenityCoverage: AmenityGeohashCoverage[];
+    globalGeohashCounts: Map<string, number>;
+  } {
+    const amenityCoverageWithCounts: Array<AmenityGeohashCoverage & { requests: number }> = [];
+    const globalGeohashCounts = new Map<string, number>();
+
+    for (const stats of this.amenityStats.values()) {
+      const geohashCoverage: GeohashCoverageEntry[] = [];
+
+      for (const [hash, count] of stats.geohashCounts) {
+        const percentage = stats.requests > 0 ? (count / stats.requests) * 100 : 0;
+        geohashCoverage.push({
+          geohash: hash,
+          percentage: Number(percentage.toFixed(2)),
+          requests: count
+        });
+        globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
+      }
+
+      geohashCoverage.sort((a, b) => b.requests - a.requests);
+
+      amenityCoverageWithCounts.push({
+        amenity: stats.amenity,
+        geohashCoverage,
+        requests: stats.requests
+      });
+    }
+
+    amenityCoverageWithCounts.sort(
+      (a, b) => b.requests - a.requests || a.amenity.localeCompare(b.amenity)
+    );
+
+    const amenityCoverage = amenityCoverageWithCounts.map(({ requests: _requests, ...rest }) => rest);
+
+    return { amenityCoverage, globalGeohashCounts };
   }
 
   private serialise(): PersistedStatisticsState {
