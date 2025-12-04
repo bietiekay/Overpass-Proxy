@@ -65,6 +65,24 @@ export interface StatisticsSnapshot {
   hotspots: Array<{ geohash: string; requests: number; share: number }>;
   cacheCoverage: CacheCoverageEntry[];
   amenities: AmenityStatistics[];
+  upstreams: UpstreamStatisticsEntry[];
+}
+
+export type UpstreamStatus = 'available' | 'cooldown' | 'blocked';
+
+export interface UpstreamStatisticsEntry {
+  upstream: string;
+  status: UpstreamStatus;
+  reason: string;
+  requestsToday: number;
+  dayStart: string;
+  blockedUntil?: string;
+  failedUntil?: string;
+  dailyLimit?: number;
+}
+
+export interface UpstreamMetricsProvider {
+  describeUpstreams(): UpstreamStatisticsEntry[];
 }
 
 interface RecordRequestOptions {
@@ -188,14 +206,16 @@ export class RequestStatistics {
 
   private constructor(
     private readonly cacheMetrics: CacheMetricsProvider,
-    private readonly storage: StatisticsStorage
+    private readonly storage: StatisticsStorage,
+    private readonly upstreamMetrics?: UpstreamMetricsProvider
   ) {}
 
   public static async create(
     cacheMetrics: CacheMetricsProvider,
-    storage: StatisticsStorage
+    storage: StatisticsStorage,
+    upstreamMetrics?: UpstreamMetricsProvider
   ): Promise<RequestStatistics> {
-    const stats = new RequestStatistics(cacheMetrics, storage);
+    const stats = new RequestStatistics(cacheMetrics, storage, upstreamMetrics);
     await stats.restore();
     return stats;
   }
@@ -400,6 +420,8 @@ export class RequestStatistics {
         .getCacheCoverage()
         .sort((a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash));
 
+      const upstreams = this.upstreamMetrics?.describeUpstreams() ?? [];
+
       return {
         generatedAt,
         dayStart: dayStartIso,
@@ -419,7 +441,8 @@ export class RequestStatistics {
         cacheStatus: { ...this.cacheStatusCounts },
         hotspots,
         cacheCoverage,
-        amenities
+        amenities,
+        upstreams
       };
     });
   }

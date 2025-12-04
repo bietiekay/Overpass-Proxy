@@ -7,6 +7,7 @@ import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
 import type { OverpassResponse } from './store.js';
 import { startOfDayMs } from './time.js';
+import type { UpstreamMetricsProvider, UpstreamStatisticsEntry } from './stats.js';
 
 export const buildTileQuery = (bbox: BoundingBox, amenity: string): string => {
   const escapedAmenity = amenity.replace(/"/g, '\\"');
@@ -204,6 +205,41 @@ class UpstreamPool {
     }
 
     state.failedUntil = 0;
+  }
+
+  describe(now = Date.now()): UpstreamStatisticsEntry[] {
+    const entries: UpstreamStatisticsEntry[] = [];
+
+    for (const [url, state] of this.states) {
+      this.refreshState(state, now);
+
+      let status: UpstreamStatisticsEntry['status'] = 'available';
+      let reason = 'available';
+
+      if (state.failedUntil > now) {
+        status = 'cooldown';
+        reason = `in cooldown until ${new Date(state.failedUntil).toISOString()}`;
+      } else if (state.blockedUntil > now) {
+        status = 'blocked';
+        reason = `daily limit reached until ${new Date(state.blockedUntil).toISOString()}`;
+      } else if (this.dailyLimit >= 0 && state.requestsToday >= this.dailyLimit) {
+        status = 'blocked';
+        reason = 'daily limit reached';
+      }
+
+      entries.push({
+        upstream: url,
+        status,
+        reason,
+        requestsToday: state.requestsToday,
+        dayStart: new Date(state.dayStart).toISOString(),
+        blockedUntil: state.blockedUntil > now ? new Date(state.blockedUntil).toISOString() : undefined,
+        failedUntil: state.failedUntil > now ? new Date(state.failedUntil).toISOString() : undefined,
+        dailyLimit: this.dailyLimit >= 0 ? this.dailyLimit : undefined
+      });
+    }
+
+    return entries.sort((a, b) => a.upstream.localeCompare(b.upstream));
   }
 }
 
@@ -443,4 +479,11 @@ export const proxyTransparent = async (
       reply.send({ error: 'Upstream error' });
     }
   }
+};
+
+export const createUpstreamMetricsProvider = (config: AppConfig): UpstreamMetricsProvider => {
+  const pool = getPool(config);
+  return {
+    describeUpstreams: () => pool.describe()
+  };
 };
