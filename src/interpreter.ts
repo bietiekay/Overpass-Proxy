@@ -305,8 +305,7 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
 
   app.get('/api/statistics', async (_request, reply) => {
     const { cacheCoverage: _cacheCoverage, ...snapshot } = (await deps.stats.getSnapshot()) as
-      | StatisticsSnapshot
-      | (StatisticsSnapshot & CacheCoverageSnapshot);
+      StatisticsSnapshot & Partial<CacheCoverageSnapshot>;
     reply.header('Content-Type', 'application/json');
     reply.send(snapshot);
   });
