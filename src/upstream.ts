@@ -129,6 +129,29 @@ class UpstreamPool {
     return true;
   }
 
+  describeUnavailability(excluded: Set<string>, now = Date.now()): Array<{ upstream: string; reason: string }> {
+    const details: Array<{ upstream: string; reason: string }> = [];
+
+    for (const [url, state] of this.states) {
+      this.refreshState(state, now);
+
+      let reason = 'available';
+      if (state.failedUntil > now) {
+        reason = `in cooldown until ${new Date(state.failedUntil).toISOString()}`;
+      } else if (state.blockedUntil > now) {
+        reason = `daily limit reached until ${new Date(state.blockedUntil).toISOString()}`;
+      } else if (this.dailyLimit >= 0 && state.requestsToday >= this.dailyLimit) {
+        reason = 'daily limit reached';
+      } else if (excluded.has(url)) {
+        reason = 'already attempted for this request';
+      }
+
+      details.push({ upstream: url, reason });
+    }
+
+    return details;
+  }
+
   next(excluded: Set<string>): string | null {
     const now = Date.now();
     const available: string[] = [];
@@ -252,9 +275,19 @@ const withUpstream = async <T>(config: AppConfig, fn: (baseUrl: string) => Promi
   }
 
   if (pool.isExhaustedByLimit()) {
+    const lastErrorMessage = lastError instanceof Error ? lastError.message : lastError;
+    logger.error(
+      { upstreams: pool.describeUnavailability(attempted), lastError: lastErrorMessage },
+      'no upstream URLs available: daily limits reached'
+    );
     throw new Error('Upstream daily request limit reached for all configured upstreams');
   }
 
+  const lastErrorMessage = lastError instanceof Error ? lastError.message : lastError;
+  logger.error(
+    { upstreams: pool.describeUnavailability(attempted), lastError: lastErrorMessage },
+    'no upstream URLs available'
+  );
   throw lastError ?? new Error('No upstream URLs available');
 };
 
