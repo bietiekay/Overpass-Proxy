@@ -207,6 +207,7 @@
     const statusEl = document.getElementById('status');
     const summaryEl = document.getElementById('summary');
     let latestSnapshot = null;
+    let latestCacheCoverage = [];
 
     const demoSnapshot = {
       generatedAt: new Date().toISOString(),
@@ -327,8 +328,8 @@
       }));
     };
 
-    const buildCacheCoverageEntries = (snapshot) => {
-      return (snapshot.cacheCoverage ?? []).map((entry) => ({
+    const buildCacheCoverageEntries = (cacheCoverage) => {
+      return (cacheCoverage ?? []).map((entry) => ({
         geohash: entry.geohash,
         value: Math.max(0, entry.amenityItems ?? 0),
         detail:
@@ -363,14 +364,17 @@
       if (mode === 'coverage') {
         await renderOverlay(buildCoverageEntries(latestSnapshot), 'Request share (%)');
       } else if (mode === 'cache') {
-        await renderOverlay(buildCacheCoverageEntries(latestSnapshot), 'Cached amenities');
+        const cacheCoverageData =
+          latestCacheCoverage?.length > 0
+            ? latestCacheCoverage
+            : demoSnapshot.cacheCoverage ?? [];
+        await renderOverlay(buildCacheCoverageEntries(cacheCoverageData), 'Cached amenities');
       } else {
         await renderOverlay(buildRequestEntries(latestSnapshot), 'Requests');
       }
     };
 
     const fetchStatistics = async () => {
-      statusEl.textContent = 'Loading statistics…';
       try {
         const response = await fetch('/api/statistics', { cache: 'no-store' });
         if (!response.ok) throw new Error('Request failed');
@@ -380,8 +384,28 @@
       } catch (error) {
         console.error('Failed to load live statistics, falling back to demo data.', error);
         latestSnapshot = demoSnapshot;
+        latestCacheCoverage = demoSnapshot.cacheCoverage ?? [];
         statusEl.textContent = 'Using demo data (live fetch failed).';
       }
+    };
+
+    const fetchCacheCoverage = async () => {
+      try {
+        const response = await fetch('/api/statistics/cacheCoverage', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Request failed');
+        const snapshot = await response.json();
+        latestCacheCoverage = snapshot.cacheCoverage ?? [];
+      } catch (error) {
+        console.error('Failed to load cache coverage data, falling back to demo data.', error);
+        if (!latestCacheCoverage?.length) {
+          latestCacheCoverage = demoSnapshot.cacheCoverage ?? [];
+        }
+      }
+    };
+
+    const refreshData = async () => {
+      statusEl.textContent = 'Loading statistics…';
+      await Promise.all([fetchStatistics(), fetchCacheCoverage()]);
       updateSummary(latestSnapshot);
       await applyMode();
     };
@@ -390,10 +414,10 @@
       void applyMode();
     });
     refreshButton.addEventListener('click', () => {
-      void fetchStatistics();
+      void refreshData();
     });
 
-    fetchStatistics();
+    refreshData();
   </script>
 </body>
 </html>

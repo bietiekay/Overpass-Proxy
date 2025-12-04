@@ -18,7 +18,7 @@ adding Redis-backed geohash tile caching for amenity-focused JSON bounding-box q
 - Fastify-based HTTP server exposing the `/api/*` Overpass endpoints
 - Strict amenity-only handling for `/api/interpreter`; non-JSON or non-amenity queries are rejected with helpful errors, and recognised amenity filters are preserved end-to-end
 - Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh, segmented by requested amenity type and persisted via pipelined Redis bulk writes
-- Request statistics collected per amenity and exposed via a JSON endpoint for observing hotspots and cache coverage
+- Request statistics collected per amenity and exposed via JSON endpoints for observing hotspots and cache coverage
 - Structured logging via Pino
 - Configurable per-upstream daily request limits with automatic 24-hour lockouts once a quota is reached
 - Comprehensive Vitest unit and integration test suites
@@ -35,6 +35,7 @@ The proxy implements the core Overpass API endpoints:
 - `GET /api/timestamp` and `GET /api/timestamp/*`
 - `POST /api/kill_my_queries`
 - `GET /api/statistics`
+- `GET /api/statistics/cacheCoverage`
 - Any other `/api/*` path is transparently proxied upstream
 
 Requests preserve HTTP methods, headers, payloads, and status codes. `/api/interpreter` requires JSON amenity queries with a bounding box; the proxy satisfies the response locally when tiles are cached and fetches amenity tiles upstream on cache misses.
@@ -103,7 +104,7 @@ docker-compose up --build
 
 This starts the proxy along with Redis and a mock Overpass service used for integration tests.
 
-The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
 #### What the statistics include and how to use them
 
@@ -117,8 +118,8 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
 
 #### Retrieving statistics at runtime
 
-- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. This is safe to poll from dashboards or alerting systems because the data comes from Redis-backed counters, so restarts do not clear it.
-- **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()` to retrieve the structured data (`StatisticsSnapshot`) inside the process without another HTTP request.
+- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. Tile cache coverage is exposed separately at `GET /api/statistics/cacheCoverage` for clients that only need the cached tile breakdowns.
+- **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()` or `await stats.getCacheCoverageSnapshot()` to retrieve the structured data inside the process without another HTTP request.
 - **Time window:** counters continue accumulating until cleared from Redis, so the snapshot survives restarts and day boundaries.
 
 ## Testing
