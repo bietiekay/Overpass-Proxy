@@ -4,12 +4,37 @@ services:
     build: .
     restart: unless-stopped
     environment:
+      # Required / typical
       PORT: 8080
-      UPSTREAM_URLS: https://overpass-api.de/api/interpreter
-      UPSTREAM_DAILY_LIMIT: -1 # -1 keeps upstream requests unlimited
       REDIS_URL: redis://redis:6379
-      LOG_VERBOSITY: info # errors | info | debug
-      TRUST_PROXY: 'true' # set to true when running behind nginx or another reverse proxy
+      # Provide one or more upstreams (comma or space separated). Example with two:
+      # UPSTREAM_URLS: https://overpass-api.de/api/interpreter, https://overpass.kumi.systems/api/interpreter
+      UPSTREAM_URLS: https://overpass-api.de/api/interpreter
+      # Set to -1 to disable per-upstream daily cap
+      UPSTREAM_DAILY_LIMIT: -1
+
+      # Caching and tiling
+      # CACHE_TTL_SECONDS: 86400        # default 24h cache TTL
+      # SWR_SECONDS: 8640               # default 10% of cache TTL; controls serve-stale window
+      # TILE_PRECISION: 5               # finer tiles served to clients
+      # UPSTREAM_TILE_PRECISION: 3      # coarser tiles fetched from upstreams
+      # MAX_TILES_PER_REQUEST: 1024     # safeguard for very large bbox requests
+
+      # Upstream health & load-balancing (EWMA + stickiness + backoff + probes)
+      # UPSTREAM_EWMA_ALPHA: 0.3             # weight for new latency/success samples (0-1)
+      # UPSTREAM_STICKINESS_TTL_SECONDS: 300 # client-IP affinity; set 0 to disable
+      # UPSTREAM_FAILURE_COOLDOWN_SECONDS: 60 # legacy fixed cooldown baseline (used as default backoff base)
+      # UPSTREAM_BACKOFF_BASE_SECONDS: 60     # initial exponential backoff delay
+      # UPSTREAM_BACKOFF_MAX_SECONDS: 600     # cap for backoff delay
+      # UPSTREAM_PROBE_INTERVAL_SECONDS: 60   # how often to probe failed upstreams
+      # UPSTREAM_PROBE_JITTER_SECONDS: 15     # random jitter added to probe interval
+      # UPSTREAM_PROBE_TIMEOUT_SECONDS: 5     # HEAD probe timeout
+
+      # Mode & logging
+      # TRANSPARENT_ONLY: 'false'       # 'true' to forward all requests without caching
+      TRUST_PROXY: 'true'              # set to true when running behind a reverse proxy
+      # LOG_VERBOSITY: info             # errors | info | debug
+      # NODE_ENV: production
     ports:
       - "127.0.0.1:5002:8080"
     depends_on:
