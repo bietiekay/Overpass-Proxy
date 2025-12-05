@@ -727,11 +727,33 @@ export const proxyTransparent = async (
       proxyOptions,
       async (baseUrl) => {
         const upstreamUrl = new URL(request.url, baseUrl);
+        const originalMethod = request.method as Method;
+        let method = originalMethod;
         let body: string | Buffer | undefined;
         let bodyReencoded = false;
         const start = Date.now();
 
-        if (request.method === 'GET' || request.method === 'HEAD') {
+        const interpreterPath = upstreamUrl.pathname.endsWith('/api/interpreter');
+        const searchEntries = Array.from(upstreamUrl.searchParams.entries());
+        const hasInterpreterQueryPayload = searchEntries.some(
+          ([key]) => key === 'data' || key === 'q'
+        );
+
+        if (
+          originalMethod === 'GET' &&
+          interpreterPath &&
+          searchEntries.length > 0 &&
+          hasInterpreterQueryPayload
+        ) {
+          const form = new URLSearchParams();
+          for (const [key, value] of searchEntries) {
+            form.append(key, value);
+          }
+          body = form.toString();
+          bodyReencoded = true;
+          method = 'POST';
+          upstreamUrl.search = '';
+        } else if (request.method === 'GET' || request.method === 'HEAD') {
           body = undefined;
         } else if (typeof request.body === 'string') {
           body = request.body;
@@ -749,6 +771,9 @@ export const proxyTransparent = async (
         if (bodyReencoded) {
           delete headers['content-length'];
           delete headers['Content-Length'];
+          if (!headers['content-type'] && !headers['Content-Type']) {
+            headers['content-type'] = 'application/x-www-form-urlencoded';
+          }
         }
 
         const summarisePayload = (payload: string | Buffer | undefined) => {
@@ -772,7 +797,8 @@ export const proxyTransparent = async (
         };
 
         const requestMeta = {
-          method: request.method,
+          method,
+          originalMethod,
           url: request.url,
           upstreamUrl: upstreamUrl.toString(),
           remoteAddress: request.ip,
@@ -805,7 +831,7 @@ export const proxyTransparent = async (
         }
 
         const response = await got(upstreamUrl.toString(), {
-          method: request.method as Method,
+          method,
           headers,
           body,
           throwHttpErrors: false,
