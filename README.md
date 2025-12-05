@@ -157,3 +157,8 @@ curl -X POST http://localhost:8080/api/interpreter \
 ## Continuous Integration
 
 `.github/workflows/ci.yml` runs linting and tests (with coverage enforcement) on every push and pull request.
+
+## Screenshots
+![Example screenshot of the proxy cache coverage statistics map](screenshot/cache-coverage-statistic.png)
+![Example screenshot of the proxy request hotspot statistics map](screenshot/request-hotspots-statistic.png)
+
