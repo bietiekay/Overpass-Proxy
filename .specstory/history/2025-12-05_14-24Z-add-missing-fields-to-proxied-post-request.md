@@ -1657,3 +1657,144 @@ Suggested commit message:
 
 ---
 
+_**User (2025-12-05 10:32Z)**_
+
+run tests, describe all changes and commit
+
+---
+
+_**Agent (model gpt-5.1-codex-max, mode Agent)**_
+
+<think><details><summary>Thought Process</summary>
+**Running all tests**</details></think>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && npm test</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && npm test
+```
+
+```
+
+&gt; overpass-proxy@1.0.0 test
+&gt; cross-env USE_DOCKER=0 vitest run
+
+
+ RUN  v3.2.4 /home/bietiekay/code/overpass-proxy
+
+ ✓ src/tests/unit/tiling.test.ts (2 tests) 66ms
+ ✓ src/tests/unit/fetchPlan.test.ts (3 tests) 102ms
+ ✓ src/tests/unit/bbox.test.ts (16 tests) 6ms
+ ✓ src/tests/unit/config.test.ts (7 tests) 3ms
+ ✓ src/tests/unit/rateLimit.test.ts (2 tests) 25ms
+ ✓ src/tests/unit/upstream.test.ts (10 tests) 19ms
+ ✓ src/tests/unit/stats.test.ts (7 tests) 11ms
+ ✓ src/tests/unit/headers.test.ts (3 tests) 4ms
+ ✓ src/tests/unit/logger.test.ts (4 tests) 3ms
+ ✓ src/tests/unit/store.test.ts (5 tests) 5ms
+ ✓ src/tests/unit/assemble.test.ts (3 tests) 4ms
+ ✓ src/tests/integration/integration.test.ts (15 tests) 259ms
+
+ Test Files  12 passed (12)
+      Tests  77 passed (77)
+   Start at  15:46:50
+   Duration  2.38s (transform 495ms, setup 0ms, collect 1.44s, tests 505ms, environment 2ms, prepare 787ms)
+
+
+```
+</details>
+</tool-use>
+
+---
+
+<think><details><summary>Thought Process</summary>
+**Checking changes before commit**</details></think>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && git status --short</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && git status --short
+```
+
+```
+ M README.md
+ M docker-compose.yml.template
+ M src/config.ts
+ M src/tests/unit/config.test.ts
+ M src/tests/unit/upstream.test.ts
+ M src/upstream.ts
+?? .specstory/history/2025-12-05_14-24Z-add-missing-fields-to-proxied-post-request.md
+
+```
+</details>
+</tool-use>
+
+---
+
+<think><details><summary>Thought Process</summary>
+**Finalizing commit with new files**
+
+Preparing to add all changes including the new specstory file to staging, then commit with message "Add configurable origin and referer for interpreter proxy" after ensuring tests and lints pass.</details></think>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && git add README.md docker-compose.yml.template src/config.ts src/tests/unit/config.test.ts src/tests/unit/upstream.test.ts src/upstream.ts .specstory/history/2025-12-05_14-24Z-add-missing-fields-to-proxied-post-request.md</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && git add README.md docker-compose.yml.template src/config.ts src/tests/unit/config.test.ts src/tests/unit/upstream.test.ts src/upstream.ts .specstory/history/2025-12-05_14-24Z-add-missing-fields-to-proxied-post-request.md
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && git commit -m "Add configurable interpreter headers and defaults"</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && git commit -m "Add configurable interpreter headers and defaults"
+```
+
+```
+[master b63a47d] Add configurable interpreter headers and defaults
+ 7 files changed, 1883 insertions(+), 36 deletions(-)
+ create mode 100644 .specstory/history/2025-12-05_14-24Z-add-missing-fields-to-proxied-post-request.md
+
+```
+</details>
+</tool-use>
+
+---
+
+<think><details><summary>Thought Process</summary>
+**Summarizing changes and tests**
+
+I'm preparing a clear summary of all implemented changes along with coverage details from the added tests to finalize the update.</details></think>
+
+---
+
+All tests ran and commit created.
+
+Tests:
+- `npm test` (full suite)
+
+Summary of changes:
+- Added configurable `UPSTREAM_ORIGIN` and `UPSTREAM_REFERER` with Overpass Turbo defaults, wired through config and interpreter proxy header injection.
+- Ensured re-encoded interpreter requests send browser-like headers and form content-type; expanded unit coverage for new headers and env handling.
+- Documented new env vars in README and docker-compose template; included specstory history file.
+
+Commit: `Add configurable interpreter headers and defaults` (b63a47d).
+
+---
+
