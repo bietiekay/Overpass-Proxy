@@ -3544,3 +3544,318 @@ Let me know if you want those added or left as-is.
 
 ---
 
+_**User (2025-12-05 10:32Z)**_
+
+edit the @docker-compose.yml.template  so that it reflects all possible options and contains explanations how to use the options (like how to add multiple upstream urls and what features exist that can be configured. Make those commented out so that users can chose themselves
+
+---
+
+_**Agent (model gpt-5.1-codex-max, mode Agent)**_
+
+<think><details><summary>Thought Process</summary>
+**Adding commented env vars to docker-compose template**
+
+I'm updating docker-compose.yml.template by inserting commented environment variables reflecting all config options with defaults and usage notes, including multiple upstream URLs and stickiness/backoff/probe settings. This keeps the existing example active but enriches the template with a clear, valid YAML block for optional config visibility, aligning with loadConfig names and explaining upstream failure cooldown and other parameters.</details></think>
+
+---
+
+<tool-use data-tool-type="unknown" data-tool-name="apply_patch">
+<details>
+<summary>Tool use: **apply_patch**</summary>
+
+
+Parameters:
+
+```json
+{
+  "relativeWorkspacePath": "docker-compose.yml.template"
+}
+```
+Additional data:
+
+```json
+{
+  "codeblockId": "2b99cb8b-0d54-4a2c-8a85-c8c89145d18f"
+}
+```
+Result:
+
+```json
+{
+  "diff": {
+    "chunks": [
+      {
+        "diffString": "      restart: unless-stopped\n      environment:\n+       # Required / typical\n        PORT: 8080\n+       REDIS_URL: redis://redis:6379\n+       # Provide one or more upstreams (comma or space separated). Example with two:\n+       # UPSTREAM_URLS: https://overpass-api.de/api/interpreter, https://overpass.kumi.systems/api/interpreter\n        UPSTREAM_URLS: https://overpass-api.de/api/interpreter\n-       UPSTREAM_DAILY_LIMIT: -1 # -1 keeps upstream requests unlimited\n-       REDIS_URL: redis://redis:6379\n-       LOG_VERBOSITY: info # errors | info | debug\n-       TRUST_PROXY: 'true' # set to true when running behind nginx or another reverse proxy\n+       # Set to -1 to disable per-upstream daily cap\n+       UPSTREAM_DAILY_LIMIT: -1\n+ \n+       # Caching and tiling\n+       # CACHE_TTL_SECONDS: 86400        # default 24h cache TTL\n+       # SWR_SECONDS: 8640               # default 10% of cache TTL; controls serve-stale window\n+       # TILE_PRECISION: 5               # finer tiles served to clients\n+       # UPSTREAM_TILE_PRECISION: 3      # coarser tiles fetched from upstreams\n+       # MAX_TILES_PER_REQUEST: 1024     # safeguard for very large bbox requests\n+ \n+       # Upstream health &amp; load-balancing (EWMA + stickiness + backoff + probes)\n+       # UPSTREAM_EWMA_ALPHA: 0.3             # weight for new latency/success samples (0-1)\n+       # UPSTREAM_STICKINESS_TTL_SECONDS: 300 # client-IP affinity; set 0 to disable\n+       # UPSTREAM_FAILURE_COOLDOWN_SECONDS: 60 # legacy fixed cooldown baseline (used as default backoff base)\n+       # UPSTREAM_BACKOFF_BASE_SECONDS: 60     # initial exponential backoff delay\n+       # UPSTREAM_BACKOFF_MAX_SECONDS: 600     # cap for backoff delay\n+       # UPSTREAM_PROBE_INTERVAL_SECONDS: 60   # how often to probe failed upstreams\n+       # UPSTREAM_PROBE_JITTER_SECONDS: 15     # random jitter added to probe interval\n+       # UPSTREAM_PROBE_TIMEOUT_SECONDS: 5     # HEAD probe timeout\n+ \n+       # Mode &amp; logging\n+       # TRANSPARENT_ONLY: 'false'       # 'true' to forward all requests without caching\n+       TRUST_PROXY: 'true'              # set to true when running behind a reverse proxy\n+       # LOG_VERBOSITY: info             # errors | info | debug\n+       # NODE_ENV: production\n      ports:\n        - \"127.0.0.1:5002:8080\"",
+        "oldStart": 5,
+        "newStart": 5,
+        "oldLines": 10,
+        "newLines": 35,
+        "linesRemoved": 4,
+        "linesAdded": 29
+      }
+    ],
+    "editor": "EDITOR_AI"
+  },
+  "shouldAutoFixLints": true,
+  "resultForModel": "Success. Updated the following files:\nM docker-compose.yml.template",
+  "contentsAfterEdit": "version: '3.3'\nservices:\n  proxy:\n    build: .\n    restart: unless-stopped\n    environment:\n      # Required / typical\n      PORT: 8080\n      REDIS_URL: redis://redis:6379\n      # Provide one or more upstreams (comma or space separated). Example with two:\n      # UPSTREAM_URLS: https://overpass-api.de/api/interpreter, https://overpass.kumi.systems/api/interpreter\n      UPSTREAM_URLS: https://overpass-api.de/api/interpreter\n      # Set to -1 to disable per-upstream daily cap\n      UPSTREAM_DAILY_LIMIT: -1\n\n      # Caching and tiling\n      # CACHE_TTL_SECONDS: 86400        # default 24h cache TTL\n      # SWR_SECONDS: 8640               # default 10% of cache TTL; controls serve-stale window\n      # TILE_PRECISION: 5               # finer tiles served to clients\n      # UPSTREAM_TILE_PRECISION: 3      # coarser tiles fetched from upstreams\n      # MAX_TILES_PER_REQUEST: 1024     # safeguard for very large bbox requests\n\n      # Upstream health &amp; load-balancing (EWMA + stickiness + backoff + probes)\n      # UPSTREAM_EWMA_ALPHA: 0.3             # weight for new latency/success samples (0-1)\n      # UPSTREAM_STICKINESS_TTL_SECONDS: 300 # client-IP affinity; set 0 to disable\n      # UPSTREAM_FAILURE_COOLDOWN_SECONDS: 60 # legacy fixed cooldown baseline (used as default backoff base)\n      # UPSTREAM_BACKOFF_BASE_SECONDS: 60     # initial exponential backoff delay\n      # UPSTREAM_BACKOFF_MAX_SECONDS: 600     # cap for backoff delay\n      # UPSTREAM_PROBE_INTERVAL_SECONDS: 60   # how often to probe failed upstreams\n      # UPSTREAM_PROBE_JITTER_SECONDS: 15     # random jitter added to probe interval\n      # UPSTREAM_PROBE_TIMEOUT_SECONDS: 5     # HEAD probe timeout\n\n      # Mode &amp; logging\n      # TRANSPARENT_ONLY: 'false'       # 'true' to forward all requests without caching\n      TRUST_PROXY: 'true'              # set to true when running behind a reverse proxy\n      # LOG_VERBOSITY: info             # errors | info | debug\n      # NODE_ENV: production\n    ports:\n      - \"127.0.0.1:5002:8080\"\n    depends_on:\n      - redis\n  redis:\n    image: redis:7-alpine\n    restart: unless-stopped\n    ports:\n      - \"127.0.0.1:6380:6379\"\n    volumes:\n      - ./redis-data:/data\n"
+}
+```
+User decision: **accepted**
+
+Status: **completed**
+
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && git add docker-compose.yml.template</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && git add docker-compose.yml.template
+```
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && git commit -m "Document upstream configuration options in docker-compose template"</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && git commit -m "Document upstream configuration options in docker-compose template"
+```
+
+```
+[master 64ade77] Document upstream configuration options in docker-compose template
+ 1 file changed, 29 insertions(+), 4 deletions(-)
+
+```
+</details>
+</tool-use>
+
+---
+
+Updated `docker-compose.yml.template` with commented examples for all upstream and cache options (EWMA weights, stickiness, backoff/probes, tiling, cache TTLs, quotas, modes, logging). Committed as `Document upstream configuration options in docker-compose template`.
+
+---
+
+_**User (2025-12-05 10:32Z)**_
+
+sometimes I get this error message in log with some upstreams. But the error 500 is not handled as failure of this upstream instead retried
+
+
+proxy_1  | {"level":30,"time":1764939870526,"pid":1,"hostname":"c212a4fdc13d","bbox":{"south":57.83203125,"west":10.37109375,"north":58.3154296875,"east":10.8544921875},"amenity":"toilets","upstreamUrl":"https://overpass.osm.jp/api/interpreter","msg":"upstream fetch start"}
+proxy_1  | {"level":50,"time":1764939870569,"pid":1,"hostname":"c212a4fdc13d","err":{"type":"HTTPError","message":"Response code 403 (Forbidden)","stack":"HTTPError: Response code 403 (Forbidden)\n    at Request.<anonymous> (file:///app/node_modules/got/dist/source/as-promise/index.j
+s:86:42)\n    at Object.onceWrapper (node:events:639:26)\n    at Request.emit (node:events:536:35)\n    at Request._onResponseBase (file:///app/node_modules/got/dist/source/core/index.js:727:22)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)\n    a
+t async Request._onResponse (file:///app/node_modules/got/dist/source/core/index.js:766:13)","code":"ERR_NON_2XX_3XX_RESPONSE","timings":{"start":1764939870528,"socket":1764939870528,"lookup":1764939870528,"connect":1764939870533,"secureConnect":1764939870541,"upload":1764939870541,"
+response":1764939870563,"end":1764939870567,"phases":{"wait":0,"dns":0,"tcp":5,"tls":8,"request":0,"firstByte":22,"download":4,"total":39}},"name":"HTTPError","options":{"agent":{},"decompress":true,"timeout":{"request":120000},"prefixUrl":"","body":"data=%5B%0A++out%3Ajson%5D%5Btime
+out%3A120%5D%3B%0A%28%0A++node%5B%22amenity%22%3D%22toilets%22%5D%2857.83203125%2C10.37109375%2C58.3154296875%2C10.8544921875%29%3B%0A++way%5B%22amenity%22%3D%22toilets%22%5D%2857.83203125%2C10.37109375%2C58.3154296875%2C10.8544921875%29%3B%0A++relation%5B%22amenity%22%3D%22toilets%2
+2%5D%2857.83203125%2C10.37109375%2C58.3154296875%2C10.8544921875%29%3B%0A%29%3B%0Aout+body+meta%3B%0A%3E%3B%0Aout+skel+qt%3B","ignoreInvalidCookies":false,"context":{},"hooks":{"init":[],"beforeRequest":[],"beforeError":[],"beforeRedirect":[],"beforeRetry":[],"afterResponse":[]},"fol
+lowRedirect":true,"maxRedirects":10,"throwHttpErrors":true,"username":"","password":"","http2":false,"allowGetBody":false,"headers":{"user-agent":"got (https://github.com/sindresorhus/got)","content-type":"application/x-www-form-urlencoded","content-length":"441","accept-encoding":"g
+zip, deflate, br"},"methodRewriting":false,"retry":{"limit":2,"methods":["GET","PUT","HEAD","DELETE","OPTIONS","TRACE"],"statusCodes":[408,413,429,500,502,503,504,521,522,524],"errorCodes":["ETIMEDOUT","ECONNRESET","EADDRINUSE","ECONNREFUSED","EPIPE","ENOTFOUND","ENETUNREACH","EAI_AG
+AIN"],"backoffLimit":null,"noise":100},"method":"POST","cacheOptions":{},"https":{},"resolveBodyOnly":false,"isStream":false,"responseType":"text","url":"https://overpass.osm.jp/api/interpreter","pagination":{"countLimit":null,"backoff":0,"requestLimit":10000,"stackAllItems":false},"
+setHost":true,"enableUnixSockets":true}},"msg":"failed to handle cacheable request"}
+proxy_1  | {"level":30,"time":1764939870570,"pid":1,"hostname":"c212a4fdc13d","reqId":"req-4n","res":{"statusCode":500},"responseTime":45.78784370422363,"msg":"request completed"}
+
+
+---
+
+_**Agent (model gpt-5.1-codex-max, mode Agent)**_
+
+<think><details><summary>Thought Process</summary>
+**Explaining 403 handling and proposing patch**
+
+The code treats 403 as non-failure due to shouldMarkFailure excluding <500 except 429, causing upstream retries to override client 403 with 500. To fix, I'll suggest disabling got retries and setting throwHttpErrors false in fetchTile, then manually throwing on 4xx/429/5xx statuses to mark failure and enable fallback. This ensures 403 is treated as failure and triggers other upstream attempts.</details></think>
+
+---
+
+<tool-use data-tool-type="unknown" data-tool-name="apply_patch">
+<details>
+<summary>Tool use: **apply_patch**</summary>
+
+
+Parameters:
+
+```json
+{
+  "relativeWorkspacePath": "src/upstream.ts"
+}
+```
+Additional data:
+
+```json
+{
+  "codeblockId": "99a3cae7-7855-4d83-b38c-ec63f6bd2392"
+}
+```
+Result:
+
+```json
+{
+  "diff": {
+    "chunks": [
+      {
+        "diffString": "          'Content-Type': 'application/x-www-form-urlencoded'\n        },\n-       timeout: { request: 120000 }\n+       timeout: { request: 120000 },\n+       throwHttpErrors: false,\n+       retry: { limit: 0 }\n      });\n+     if (response.statusCode &gt;= 400) {\n+       throw new Error(&#96;Upstream responded with status ${response.statusCode}&#96;);\n+     }\n      logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');\n      return JSON.parse(response.body) as OverpassResponse;",
+        "oldStart": 680,
+        "newStart": 680,
+        "oldLines": 6,
+        "newLines": 11,
+        "linesRemoved": 1,
+        "linesAdded": 6
+      }
+    ],
+    "editor": "EDITOR_AI"
+  },
+  "shouldAutoFixLints": true,
+  "resultForModel": "Success. Updated the following files:\nM src/upstream.ts",
+  "contentsAfterEdit": "import type { FastifyReply, FastifyRequest } from 'fastify';\nimport type { Redis } from 'ioredis';\nimport got, { RequestError } from 'got';\nimport type { Method } from 'got';\n\nimport type { BoundingBox } from './bbox.js';\nimport type { AppConfig } from './config.js';\nimport { logger } from './logger.js';\nimport type { OverpassResponse } from './store.js';\nimport { startOfDayMs } from './time.js';\nimport type { UpstreamMetricsProvider, UpstreamStatisticsEntry } from './stats.js';\n\nexport const buildTileQuery = (bbox: BoundingBox, amenity: string): string =&gt; {\n  const escapedAmenity = amenity.replace(/\"/g, '\\\\\"');\n  return &#96;[\n  out:json][timeout:120];\n(\n  node[\"amenity\"=\"${escapedAmenity}\"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});\n  way[\"amenity\"=\"${escapedAmenity}\"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});\n  relation[\"amenity\"=\"${escapedAmenity}\"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});\n);\nout body meta;\n&gt;;\nout skel qt;&#96;;\n};\n\ninterface UpstreamState {\n  backoffUntil: number;\n  backoffAttempts: number;\n  blockedUntil: number;\n  requestsToday: number;\n  dayStart: number;\n  ewmaLatencyMs: number;\n  ewmaSuccess: number;\n  totalRequests: number;\n  totalFailures: number;\n  lastSuccessAt?: number;\n  lastFailureAt?: number;\n}\n\ntype PersistedUpstreamState = UpstreamState;\n\ninterface StickyEntry {\n  upstream: string;\n  expiresAt: number;\n}\n\ninterface UpstreamPoolOptions {\n  redis?: Redis;\n  ewmaAlpha: number;\n  backoffBaseMs: number;\n  backoffMaxMs: number;\n  stickinessTtlMs: number;\n  dailyLimit: number;\n  probeIntervalMs: number;\n  probeJitterMs: number;\n  probeTimeoutMs: number;\n}\n\nclass UpstreamStateStorage {\n  constructor(private readonly redis: Redis, private readonly key = 'upstreams:state') {}\n\n  public async load(): Promise&lt;Record&lt;string, PersistedUpstreamState&gt; | null&gt; {\n    try {\n      const raw = await this.redis.get(this.key);\n      if (!raw) {\n        return null;\n      }\n\n      return JSON.parse(raw) as Record&lt;string, PersistedUpstreamState&gt;;\n    } catch (error) {\n      logger.warn({ err: error }, 'failed to load persisted upstream state');\n      return null;\n    }\n  }\n\n  public async save(states: Record&lt;string, PersistedUpstreamState&gt;): Promise&lt;void&gt; {\n    try {\n      await this.redis.set(this.key, JSON.stringify(states));\n    } catch (error) {\n      logger.warn({ err: error }, 'failed to persist upstream state');\n    }\n  }\n}\n\nclass UpstreamPool {\n  private readonly states = new Map&lt;string, UpstreamState&gt;();\n  private readonly stickiness = new Map&lt;string, StickyEntry&gt;();\n  private readonly blockDurationMs = 24 * 60 * 60 * 1000;\n  private storage: UpstreamStateStorage | null;\n  private initPromise: Promise&lt;void&gt;;\n  private readonly ewmaAlpha: number;\n  private readonly backoffBaseMs: number;\n  private readonly backoffMaxMs: number;\n  private readonly stickinessTtlMs: number;\n  private readonly probeIntervalMs: number;\n  private readonly probeJitterMs: number;\n  private readonly probeTimeoutMs: number;\n  private saveQueue: Promise&lt;void&gt; = Promise.resolve();\n  private probeTimer?: ReturnType&lt;typeof setTimeout&gt;;\n\n  constructor(urls: string[], options: UpstreamPoolOptions) {\n    this.ewmaAlpha = options.ewmaAlpha;\n    this.backoffBaseMs = options.backoffBaseMs;\n    this.backoffMaxMs = options.backoffMaxMs;\n    this.stickinessTtlMs = options.stickinessTtlMs;\n    this.probeIntervalMs = options.probeIntervalMs;\n    this.probeJitterMs = options.probeJitterMs;\n    this.probeTimeoutMs = options.probeTimeoutMs;\n    this.storage = options.redis ? new UpstreamStateStorage(options.redis) : null;\n    const start = startOfDayMs();\n    for (const url of urls) {\n      this.states.set(url, this.buildFreshState(start));\n    }\n\n    this.initPromise = this.restore();\n    if (this.probeIntervalMs &gt; 0) {\n      this.scheduleProbeLoop();\n    }\n  }\n\n  private buildFreshState(dayStart: number): UpstreamState {\n    return {\n      backoffUntil: 0,\n      backoffAttempts: 0,\n      blockedUntil: 0,\n      requestsToday: 0,\n      dayStart,\n      ewmaLatencyMs: 0,\n      ewmaSuccess: 1,\n      totalRequests: 0,\n      totalFailures: 0\n    };\n  }\n\n  private async restore(): Promise&lt;void&gt; {\n    if (!this.storage) {\n      return;\n    }\n    const persisted = await this.storage.load();\n    if (!persisted) {\n      return;\n    }\n\n    for (const [url, state] of Object.entries(persisted)) {\n      if (this.states.has(url)) {\n        this.states.set(url, { ...this.buildFreshState(state.dayStart ?? startOfDayMs()), ...state });\n      }\n    }\n\n    // Ensure all configured upstreams exist\n    const start = startOfDayMs();\n    for (const [url, state] of this.states) {\n      if (!state.dayStart) {\n        this.states.set(url, this.buildFreshState(start));\n      }\n    }\n  }\n\n  private async save(): Promise&lt;void&gt; {\n    if (!this.storage) {\n      return;\n    }\n    const snapshot: Record&lt;string, PersistedUpstreamState&gt; = {};\n    for (const [url, state] of this.states) {\n      snapshot[url] = { ...state };\n    }\n    this.saveQueue = this.saveQueue.then(() =&gt; this.storage!.save(snapshot)).catch(() =&gt; {});\n    await this.saveQueue;\n  }\n\n  attachStorage(redis: Redis): void {\n    if (this.storage) {\n      return;\n    }\n    this.storage = new UpstreamStateStorage(redis);\n    this.initPromise = this.restore();\n  }\n\n  get size(): number {\n    return this.states.size;\n  }\n\n  private refreshState(state: UpstreamState, now: number): void {\n    const currentStart = startOfDayMs(now);\n    if (state.dayStart !== currentStart) {\n      state.dayStart = currentStart;\n      state.requestsToday = 0;\n    }\n\n    if (state.blockedUntil &gt; 0 &amp;&amp; state.blockedUntil &lt;= now) {\n      state.blockedUntil = 0;\n    }\n  }\n\n  private markLimitReached(url: string, state: UpstreamState, now: number, dailyLimit: number): void {\n    if (state.blockedUntil &gt; now) {\n      return;\n    }\n\n    state.blockedUntil = now + this.blockDurationMs;\n    logger.warn(\n      {\n        upstream: url,\n        blockedUntil: new Date(state.blockedUntil).toISOString(),\n        requestsToday: state.requestsToday,\n        dailyLimit\n      },\n      'upstream daily request limit reached'\n    );\n    void this.save();\n  }\n\n  private updateEwma(current: number, sample: number): number {\n    if (current === 0) {\n      return sample;\n    }\n    return this.ewmaAlpha * sample + (1 - this.ewmaAlpha) * current;\n  }\n\n  private computeWeight(state: UpstreamState): number {\n    const latencyBaseline = 500;\n    const latencyScore =\n      state.ewmaLatencyMs &gt; 0 ? latencyBaseline / (latencyBaseline + state.ewmaLatencyMs) : 1;\n    const successScore = Math.max(0.1, Math.min(1, state.ewmaSuccess));\n    return Number((latencyScore * successScore).toFixed(4));\n  }\n\n  private pickWeighted(available: Array&lt;{ url: string; weight: number }&gt;): string {\n    const total = available.reduce((sum, entry) =&gt; sum + entry.weight, 0);\n    let r = Math.random() * total;\n    for (const entry of available) {\n      r -= entry.weight;\n      if (r &lt;= 0) {\n        return entry.url;\n      }\n    }\n    return available[available.length - 1].url;\n  }\n\n  private cleanStickiness(now: number): void {\n    for (const [key, entry] of this.stickiness) {\n      if (entry.expiresAt &lt;= now) {\n        this.stickiness.delete(key);\n      }\n    }\n  }\n\n  private pickSticky(clientKey: string | undefined, available: Set&lt;string&gt;, now: number): string | null {\n    if (!clientKey || this.stickinessTtlMs &lt;= 0) {\n      return null;\n    }\n    this.cleanStickiness(now);\n    const sticky = this.stickiness.get(clientKey);\n    if (sticky &amp;&amp; available.has(sticky.upstream)) {\n      return sticky.upstream;\n    }\n    return null;\n  }\n\n  private setSticky(clientKey: string | undefined, upstream: string, now: number): void {\n    if (!clientKey || this.stickinessTtlMs &lt;= 0) {\n      return;\n    }\n    this.stickiness.set(clientKey, { upstream, expiresAt: now + this.stickinessTtlMs });\n  }\n\n  private async scheduleProbeLoop(): Promise&lt;void&gt; {\n    const run = async () =&gt; {\n      await this.probeOnce().catch((error) =&gt;\n        logger.debug({ err: error }, 'upstream probe tick failed')\n      );\n      const jitter =\n        this.probeJitterMs &gt; 0 ? Math.floor(Math.random() * this.probeJitterMs) : 0;\n      this.probeTimer = setTimeout(run, this.probeIntervalMs + jitter);\n      this.probeTimer.unref?.();\n    };\n    this.probeTimer = setTimeout(run, this.probeIntervalMs);\n    this.probeTimer.unref?.();\n  }\n\n  private async probeOnce(): Promise&lt;void&gt; {\n    const now = Date.now();\n    const targets: string[] = [];\n    for (const [url, state] of this.states) {\n      this.refreshState(state, now);\n      if (state.backoffUntil &gt; now) {\n        targets.push(url);\n      }\n    }\n\n    const maxConcurrent = 2;\n    const queue = [...targets];\n    const workers: Promise&lt;void&gt;[] = [];\n    for (let i = 0; i &lt; maxConcurrent; i += 1) {\n      workers.push(\n        (async () =&gt; {\n          while (queue.length &gt; 0) {\n            const next = queue.shift();\n            if (!next) {\n              return;\n            }\n            await this.probeUpstream(next);\n          }\n        })()\n      );\n    }\n    await Promise.all(workers);\n  }\n\n  private async probeUpstream(url: string): Promise&lt;void&gt; {\n    const state = this.states.get(url);\n    if (!state) {\n      return;\n    }\n    const now = Date.now();\n    if (state.backoffUntil &gt; 0 &amp;&amp; state.backoffUntil &gt; now) {\n      // allow probes only when backoff window is active\n    }\n\n    try {\n      const start = Date.now();\n      const response = await got(url, {\n        method: 'HEAD',\n        throwHttpErrors: false,\n        timeout: { request: this.probeTimeoutMs }\n      });\n      const duration = Date.now() - start;\n      if (response.statusCode &lt; 500 &amp;&amp; response.statusCode !== 429) {\n        state.backoffAttempts = 0;\n        state.backoffUntil = 0;\n        state.ewmaLatencyMs = this.updateEwma(state.ewmaLatencyMs, duration);\n        state.ewmaSuccess = this.updateEwma(state.ewmaSuccess, 1);\n        state.lastSuccessAt = now;\n        await this.save();\n        return;\n      }\n    } catch (error) {\n      logger.debug({ err: error, upstream: url }, 'probe failed');\n    }\n\n    // extend backoff a little on probe failure\n    state.backoffAttempts = Math.max(1, state.backoffAttempts);\n    state.backoffUntil = now + Math.min(this.backoffMaxMs, this.backoffBaseMs * 2 ** state.backoffAttempts);\n    state.totalFailures += 1;\n    state.lastFailureAt = now;\n    await this.save();\n  }\n\n  public async ensureReady(): Promise&lt;void&gt; {\n    await this.initPromise;\n  }\n\n  public tryAcquire(url: string, dailyLimit: number): 'acquired' | 'limit' | 'cooldown' | 'blocked' {\n    const state = this.states.get(url);\n    if (!state) {\n      return 'blocked';\n    }\n\n    const now = Date.now();\n    this.refreshState(state, now);\n\n    if (state.backoffUntil &gt; now) {\n      return 'cooldown';\n    }\n\n    if (state.blockedUntil &gt; now) {\n      return 'limit';\n    }\n\n    if (dailyLimit &gt;= 0 &amp;&amp; state.requestsToday &gt;= dailyLimit) {\n      this.markLimitReached(url, state, now, dailyLimit);\n      return 'limit';\n    }\n\n    state.requestsToday += 1;\n    state.totalRequests += 1;\n\n    if (dailyLimit &gt;= 0 &amp;&amp; state.requestsToday &gt;= dailyLimit) {\n      this.markLimitReached(url, state, now, dailyLimit);\n    }\n\n    return 'acquired';\n  }\n\n  public isExhaustedByLimit(dailyLimit: number, now = Date.now()): boolean {\n    if (dailyLimit &lt; 0 || this.states.size === 0) {\n      return false;\n    }\n\n    for (const state of this.states.values()) {\n      this.refreshState(state, now);\n      if (state.blockedUntil &lt;= now &amp;&amp; state.requestsToday &lt; dailyLimit) {\n        return false;\n      }\n    }\n\n    return true;\n  }\n\n  describeUnavailability(\n    excluded: Set&lt;string&gt;,\n    dailyLimit: number,\n    now = Date.now()\n  ): Array&lt;{ upstream: string; reason: string }&gt; {\n    const details: Array&lt;{ upstream: string; reason: string }&gt; = [];\n\n    for (const [url, state] of this.states) {\n      this.refreshState(state, now);\n\n      let reason = 'available';\n      if (state.backoffUntil &gt; now) {\n        reason = &#96;in backoff until ${new Date(state.backoffUntil).toISOString()}&#96;;\n      } else if (state.blockedUntil &gt; now) {\n        reason = &#96;daily limit reached until ${new Date(state.blockedUntil).toISOString()}&#96;;\n      } else if (dailyLimit &gt;= 0 &amp;&amp; state.requestsToday &gt;= dailyLimit) {\n        reason = 'daily limit reached';\n      } else if (excluded.has(url)) {\n        reason = 'already attempted for this request';\n      }\n\n      details.push({ upstream: url, reason });\n    }\n\n    return details;\n  }\n\n  next(excluded: Set&lt;string&gt;, dailyLimit: number, clientKey?: string): string | null {\n    const now = Date.now();\n    const available: Array&lt;{ url: string; weight: number }&gt; = [];\n    const availableSet = new Set&lt;string&gt;();\n\n    for (const [url, state] of this.states) {\n      this.refreshState(state, now);\n      if (excluded.has(url)) {\n        continue;\n      }\n      if (state.backoffUntil &gt; now) {\n        continue;\n      }\n      if (state.blockedUntil &gt; now) {\n        continue;\n      }\n      if (dailyLimit &gt;= 0 &amp;&amp; state.requestsToday &gt;= dailyLimit) {\n        this.markLimitReached(url, state, now, dailyLimit);\n        continue;\n      }\n\n      const weight = this.computeWeight(state);\n      available.push({ url, weight });\n      availableSet.add(url);\n    }\n\n    if (available.length === 0) {\n      return null;\n    }\n\n    const sticky = this.pickSticky(clientKey, availableSet, now);\n    if (sticky) {\n      return sticky;\n    }\n\n    if (available.length === 1) {\n      this.setSticky(clientKey, available[0].url, now);\n      return available[0].url;\n    }\n\n    const chosen = this.pickWeighted(available);\n    this.setSticky(clientKey, chosen, now);\n    return chosen;\n  }\n\n  markFailure(url: string): void {\n    const state = this.states.get(url);\n    if (!state) {\n      return;\n    }\n\n    const now = Date.now();\n    state.backoffAttempts += 1;\n    const delayMs = Math.min(this.backoffMaxMs, this.backoffBaseMs * 2 ** (state.backoffAttempts - 1));\n    state.backoffUntil = now + delayMs;\n    state.totalFailures += 1;\n    state.lastFailureAt = now;\n    state.ewmaSuccess = this.updateEwma(state.ewmaSuccess, 0);\n    void this.save();\n  }\n\n  markSuccess(url: string, durationMs?: number): void {\n    const state = this.states.get(url);\n    if (!state) {\n      return;\n    }\n\n    state.backoffAttempts = 0;\n    state.backoffUntil = 0;\n    state.lastSuccessAt = Date.now();\n    if (durationMs !== undefined) {\n      state.ewmaLatencyMs = this.updateEwma(state.ewmaLatencyMs, durationMs);\n    }\n    state.ewmaSuccess = this.updateEwma(state.ewmaSuccess, 1);\n    void this.save();\n  }\n\n  describe(dailyLimit: number, now = Date.now()): UpstreamStatisticsEntry[] {\n    const entries: UpstreamStatisticsEntry[] = [];\n\n    for (const [url, state] of this.states) {\n      this.refreshState(state, now);\n\n      let status: UpstreamStatisticsEntry['status'] = 'available';\n      let reason = 'available';\n\n      if (state.backoffUntil &gt; now) {\n        status = 'cooldown';\n        reason = &#96;in backoff until ${new Date(state.backoffUntil).toISOString()}&#96;;\n      } else if (state.blockedUntil &gt; now) {\n        status = 'blocked';\n        reason = &#96;daily limit reached until ${new Date(state.blockedUntil).toISOString()}&#96;;\n      } else if (dailyLimit &gt;= 0 &amp;&amp; state.requestsToday &gt;= dailyLimit) {\n        status = 'blocked';\n        reason = 'daily limit reached';\n      }\n\n      entries.push({\n        upstream: url,\n        status,\n        reason,\n        requestsToday: state.requestsToday,\n        dayStart: new Date(state.dayStart).toISOString(),\n        blockedUntil: state.blockedUntil &gt; now ? new Date(state.blockedUntil).toISOString() : undefined,\n        backoffUntil: state.backoffUntil &gt; now ? new Date(state.backoffUntil).toISOString() : undefined,\n        failedUntil: state.backoffUntil &gt; now ? new Date(state.backoffUntil).toISOString() : undefined,\n        nextRetry: state.backoffUntil &gt; now ? new Date(state.backoffUntil).toISOString() : undefined,\n        backoffAttempts: state.backoffAttempts || undefined,\n        dailyLimit: dailyLimit &gt;= 0 ? dailyLimit : undefined,\n        ewmaLatencyMs: state.ewmaLatencyMs || undefined,\n        ewmaSuccess: state.ewmaSuccess || undefined,\n        weight: this.computeWeight(state),\n        totalRequests: state.totalRequests,\n        totalFailures: state.totalFailures,\n        lastSuccessAt: state.lastSuccessAt ? new Date(state.lastSuccessAt).toISOString() : undefined,\n        lastFailureAt: state.lastFailureAt ? new Date(state.lastFailureAt).toISOString() : undefined\n      });\n    }\n\n    return entries.sort((a, b) =&gt; a.upstream.localeCompare(b.upstream));\n  }\n}\n\nconst poolCache = new WeakMap&lt;AppConfig, UpstreamPool&gt;();\n\nconst getPool = (config: AppConfig, redis?: Redis): UpstreamPool =&gt; {\n  let pool = poolCache.get(config);\n  if (!pool) {\n    pool = new UpstreamPool(config.upstreamUrls, {\n      redis,\n      ewmaAlpha: config.upstreamEwmaAlpha,\n      backoffBaseMs: config.upstreamBackoffBaseSeconds * 1000,\n      backoffMaxMs: config.upstreamBackoffMaxSeconds * 1000,\n      stickinessTtlMs: config.upstreamStickinessTtlSeconds * 1000,\n      dailyLimit: config.upstreamDailyLimit,\n      probeIntervalMs: config.upstreamProbeIntervalSeconds * 1000,\n      probeJitterMs: config.upstreamProbeJitterSeconds * 1000,\n      probeTimeoutMs: config.upstreamProbeTimeoutSeconds * 1000\n    });\n    poolCache.set(config, pool);\n  } else if (redis) {\n    pool.attachStorage(redis);\n  }\n  return pool;\n};\n\nconst shouldMarkFailure = (error: unknown): boolean =&gt; {\n  if (error instanceof RequestError) {\n    const statusCode = error.response?.statusCode;\n    if (statusCode !== undefined &amp;&amp; statusCode &lt; 500 &amp;&amp; statusCode !== 429) {\n      return false;\n    }\n    return true;\n  }\n\n  return true;\n};\n\ninterface UpstreamCallOptions {\n  redis?: Redis;\n  clientKey?: string;\n}\n\nconst withUpstream = async &lt;T&gt;(\n  config: AppConfig,\n  optionsOrFn: UpstreamCallOptions | ((baseUrl: string) =&gt; Promise&lt;T&gt;),\n  maybeFn?: (baseUrl: string) =&gt; Promise&lt;T&gt;\n): Promise&lt;T&gt; =&gt; {\n  const options: UpstreamCallOptions =\n    typeof optionsOrFn === 'function' ? {} : optionsOrFn ?? {};\n  const fn: (baseUrl: string) =&gt; Promise&lt;T&gt; =\n    typeof optionsOrFn === 'function' ? optionsOrFn : (maybeFn as (baseUrl: string) =&gt; Promise&lt;T&gt;);\n\n  if (!fn) {\n    throw new Error('Upstream callback required');\n  }\n\n  const pool = getPool(config, options.redis);\n  if (pool.size === 0) {\n    throw new Error('No upstream URLs configured');\n  }\n\n  await pool.ensureReady();\n  const attempted = new Set&lt;string&gt;();\n  let lastError: unknown;\n  const dailyLimit = config.upstreamDailyLimit;\n  const clientKey = options.clientKey;\n\n  while (attempted.size &lt; pool.size) {\n    const upstream = pool.next(attempted, dailyLimit, clientKey);\n    if (!upstream) {\n      break;\n    }\n\n    const acquireResult = pool.tryAcquire(upstream, dailyLimit);\n    if (acquireResult !== 'acquired') {\n      attempted.add(upstream);\n      if (acquireResult === 'limit') {\n        lastError = new Error(&#96;Upstream daily request limit reached for ${upstream}&#96;);\n      }\n      continue;\n    }\n\n    const start = Date.now();\n    try {\n      const result = await fn(upstream);\n      pool.markSuccess(upstream, Date.now() - start);\n      return result;\n    } catch (error) {\n      attempted.add(upstream);\n      if (!shouldMarkFailure(error)) {\n        throw error;\n      }\n\n      lastError = error;\n      pool.markFailure(upstream);\n      logger.warn(\n        { err: error, upstream, backoffSeconds: config.upstreamBackoffBaseSeconds },\n        'upstream request failed'\n      );\n    }\n  }\n\n  if (pool.isExhaustedByLimit(dailyLimit)) {\n    const lastErrorMessage = lastError instanceof Error ? lastError.message : lastError;\n    logger.error(\n      { upstreams: pool.describeUnavailability(attempted, dailyLimit), lastError: lastErrorMessage },\n      'no upstream URLs available: daily limits reached'\n    );\n    throw new Error('Upstream daily request limit reached for all configured upstreams');\n  }\n\n  const lastErrorMessage = lastError instanceof Error ? lastError.message : lastError;\n  logger.error(\n    { upstreams: pool.describeUnavailability(attempted, dailyLimit), lastError: lastErrorMessage },\n    'no upstream URLs available'\n  );\n  throw lastError ?? new Error('No upstream URLs available');\n};\n\nexport const fetchTile = async (\n  config: AppConfig,\n  bbox: BoundingBox,\n  amenity: string,\n  options?: UpstreamCallOptions\n): Promise&lt;OverpassResponse&gt; =&gt; {\n  const query = buildTileQuery(bbox, amenity);\n  return await withUpstream(config, options ?? {}, async (upstreamUrl) =&gt; {\n    logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch start');\n    const response = await got.post(upstreamUrl, {\n      body: new URLSearchParams({ data: query }).toString(),\n      headers: {\n        'Content-Type': 'application/x-www-form-urlencoded'\n      },\n      timeout: { request: 120000 },\n      throwHttpErrors: false,\n      retry: { limit: 0 }\n    });\n    if (response.statusCode &gt;= 400) {\n      throw new Error(&#96;Upstream responded with status ${response.statusCode}&#96;);\n    }\n    logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');\n    return JSON.parse(response.body) as OverpassResponse;\n  });\n};\n\nexport const proxyTransparent = async (\n  request: FastifyRequest,\n  reply: FastifyReply,\n  config: AppConfig,\n  options?: UpstreamCallOptions\n): Promise&lt;void&gt; =&gt; {\n  try {\n    await withUpstream(config, options ?? {}, async (baseUrl) =&gt; {\n      const upstreamUrl = new URL(request.url, baseUrl);\n      let body: string | Buffer | undefined;\n      let bodyReencoded = false;\n      const start = Date.now();\n\n      if (request.method === 'GET' || request.method === 'HEAD') {\n        body = undefined;\n      } else if (typeof request.body === 'string') {\n        body = request.body;\n      } else if (Buffer.isBuffer(request.body)) {\n        body = request.body;\n      } else if (request.body &amp;&amp; typeof request.body === 'object') {\n        body = new URLSearchParams(request.body as Record&lt;string, string&gt;).toString();\n        bodyReencoded = true;\n      }\n\n      const headers = {\n        ...request.headers,\n        host: undefined\n      } as Record&lt;string, string | string[] | undefined&gt;;\n      if (bodyReencoded) {\n        delete headers['content-length'];\n        delete headers['Content-Length'];\n      }\n\n      const summarisePayload = (payload: string | Buffer | undefined) =&gt; {\n        if (payload === undefined) {\n          return { kind: 'empty' };\n        }\n\n        if (typeof payload === 'string') {\n          return {\n            kind: 'string',\n            size: Buffer.byteLength(payload, 'utf8'),\n            preview: payload.slice(0, 512)\n          };\n        }\n\n        return {\n          kind: 'buffer',\n          size: payload.length,\n          preview: payload.toString('utf8', 0, 512)\n        };\n      };\n\n      const requestMeta = {\n        method: request.method,\n        url: request.url,\n        upstreamUrl: upstreamUrl.toString(),\n        remoteAddress: request.ip,\n        bodyReencoded\n      };\n\n      logger.info(requestMeta, 'transparent proxy forwarding request');\n\n      if (logger.levelVal &lt;= logger.levels.values.debug) {\n        logger.debug(\n          {\n            ...requestMeta,\n            headers: request.headers,\n            body: summarisePayload(body)\n          },\n          'transparent proxy request details'\n        );\n      }\n\n      const response = await got(upstreamUrl.toString(), {\n        method: request.method as Method,\n        headers,\n        body,\n        throwHttpErrors: false,\n        responseType: 'buffer',\n        timeout: { request: 120000 }\n      });\n\n      if (response.statusCode &gt;= 500 || response.statusCode === 429) {\n        logger.warn(\n          {\n            ...requestMeta,\n            statusCode: response.statusCode\n          },\n          'transparent proxy upstream failure'\n        );\n        throw new Error(&#96;Upstream responded with status ${response.statusCode}&#96;);\n      }\n\n      const durationMs = Date.now() - start;\n\n      if (logger.levelVal &lt;= logger.levels.values.debug) {\n        logger.debug(\n          {\n            ...requestMeta,\n            statusCode: response.statusCode,\n            headers: response.headers,\n            responseSize: response.rawBody.length\n          },\n          'transparent proxy response details'\n        );\n      }\n\n      logger.info(\n        {\n          ...requestMeta,\n          statusCode: response.statusCode,\n          durationMs\n        },\n        'transparent proxy request completed'\n      );\n\n      reply.status(response.statusCode);\n      for (const [key, value] of Object.entries(response.headers)) {\n        if (typeof value === 'string') {\n          reply.header(key, value);\n        }\n      }\n\n      reply.send(response.rawBody);\n    });\n  } catch (error) {\n    logger.error({ err: error }, 'transparent proxy upstream error');\n    if (!reply.sent) {\n      reply.code(502);\n      reply.send({ error: 'Upstream error' });\n    }\n  }\n};\n\nexport const createUpstreamMetricsProvider = async (\n  config: AppConfig,\n  redis?: Redis\n): Promise&lt;UpstreamMetricsProvider&gt; =&gt; {\n  const pool = getPool(config, redis);\n  await pool.ensureReady();\n  return {\n    describeUpstreams: () =&gt; pool.describe(config.upstreamDailyLimit)\n  };\n};\n"
+}
+```
+User decision: **accepted**
+
+Status: **completed**
+
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && npm test -- --runInBand src/tests/unit/upstream.test.ts</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && npm test -- --runInBand src/tests/unit/upstream.test.ts
+```
+
+```
+
+&gt; overpass-proxy@1.0.0 test
+&gt; cross-env USE_DOCKER=0 vitest run --runInBand src/tests/unit/upstream.test.ts
+
+file:///home/bietiekay/code/overpass-proxy/node_modules/vitest/dist/chunks/cac.Cb-PYCCB.js:404
+          throw new CACError(&#96;Unknown option \&#96;${name.length &gt; 1 ? &#96;--${name}&#96; : &#96;-${name}&#96;}\&#96;&#96;);
+                ^
+
+CACError: Unknown option &#96;--runInBand&#96;
+    at Command.checkUnknownOptions (file:///home/bietiekay/code/overpass-proxy/node_modules/vitest/dist/chunks/cac.Cb-PYCCB.js:404:17)
+    at CAC.runMatchedCommand (file:///home/bietiekay/code/overpass-proxy/node_modules/vitest/dist/chunks/cac.Cb-PYCCB.js:604:13)
+    at CAC.parse (file:///home/bietiekay/code/overpass-proxy/node_modules/vitest/dist/chunks/cac.Cb-PYCCB.js:545:12)
+    at file:///home/bietiekay/code/overpass-proxy/node_modules/vitest/dist/cli.js:27:13
+    at ModuleJob.run (node:internal/modules/esm/module_job:194:25)
+
+Node.js v18.17.1
+
+```
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && npm test -- src/tests/unit/upstream.test.ts</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && npm test -- src/tests/unit/upstream.test.ts
+```
+
+```
+
+&gt; overpass-proxy@1.0.0 test
+&gt; cross-env USE_DOCKER=0 vitest run src/tests/unit/upstream.test.ts
+
+
+ RUN  v3.2.4 /home/bietiekay/code/overpass-proxy
+
+ ✓ src/tests/unit/upstream.test.ts (8 tests) 16ms
+
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+   Start at  14:06:10
+   Duration  1.66s (transform 159ms, setup 0ms, collect 190ms, tests 16ms, environment 0ms, prepare 67ms)
+
+
+```
+</details>
+</tool-use>
+
+---
+
+I’ve updated upstream handling so 4xx responses (e.g., 403) are now treated as failures and trigger failover/backoff, and disabled Got’s internal retries so our own logic decides. Change applied in `src/upstream.ts` by setting `throwHttpErrors: false`, `retry: { limit: 0 }`, and explicitly throwing on any `statusCode >= 400`. Upstream unit tests now pass:
+
+- `npm test -- src/tests/unit/upstream.test.ts` ✅
+
+If you want the same stricter handling on transparent proxy paths (treat 4xx as failures there too), I can align that as well.
+
+---
+
+_**User (2025-12-05 10:32Z)**_
+
+describe all and commit
+
+---
+
+_**Agent (model gpt-5.1-codex-max, mode Agent)**_
+
+<think><details><summary>Thought Process</summary>
+**Preparing to commit relevant changes**
+
+I'm checking the git status to identify which files have uncommitted changes and will commit only the relevant ones, excluding test or spec files.</details></think>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && git status --short</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && git status --short
+```
+
+```
+ M .specstory/history/2025-12-05_10-33Z-upgrade-upstream-handling-with-new-features.md
+ M src/upstream.ts
+
+```
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && git add src/upstream.ts</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && git add src/upstream.ts
+```
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/overpass-proxy && git commit -m "Treat upstream 4xx responses as failures"</summary>
+
+```bash
+cd /home/bietiekay/code/overpass-proxy && git commit -m "Treat upstream 4xx responses as failures"
+```
+
+```
+[master 2c82973] Treat upstream 4xx responses as failures
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+```
+</details>
+</tool-use>
+
+---
+
+Latest change: `src/upstream.ts` now treats any 4xx/5xx upstream response as a failure (no internal Got retries, explicit throw on `statusCode >= 400`) so backoff/failover engages instead of retrying the same upstream. Committed as `Treat upstream 4xx responses as failures`.
+
+Remaining unstaged: `.specstory/history/2025-12-05_10-33Z-upgrade-upstream-handling-with-new-features.md` (left untouched).
+
+---
+
