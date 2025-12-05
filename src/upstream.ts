@@ -679,8 +679,13 @@ export const fetchTile = async (
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded'
       },
-      timeout: { request: 120000 }
+      timeout: { request: 120000 },
+      throwHttpErrors: false,
+      retry: { limit: 0 }
     });
+    if (response.statusCode >= 400) {
+      throw new Error(`Upstream responded with status ${response.statusCode}`);
+    }
     logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');
     return JSON.parse(response.body) as OverpassResponse;
   });
