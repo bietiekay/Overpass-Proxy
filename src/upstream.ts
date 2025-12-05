@@ -641,7 +641,7 @@ const withUpstream = async <T>(
 
       lastError = error;
       pool.markFailure(upstream);
-      logger.warn(
+      logger.error(
         { err: error, upstream, backoffSeconds: config.upstreamBackoffBaseSeconds },
         'upstream request failed'
       );
@@ -775,7 +775,7 @@ export const proxyTransparent = async (
       });
 
       if (response.statusCode >= 500 || response.statusCode === 429) {
-        logger.warn(
+        logger.error(
           {
             ...requestMeta,
             statusCode: response.statusCode

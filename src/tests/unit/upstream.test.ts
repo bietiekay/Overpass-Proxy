@@ -164,9 +164,14 @@ describe('upstream failover', () => {
       const config: AppConfig = { ...baseConfig, upstreamUrls: [...baseConfig.upstreamUrls] };
       await expect(fetchTile(config, bbox, 'toilets')).rejects.toThrow('fail-all');
       expect(postMock).toHaveBeenCalledTimes(config.upstreamUrls.length);
-      expect(loggerErrorSpy).toHaveBeenCalledTimes(1);
+      expect(loggerErrorSpy).toHaveBeenCalledTimes(3);
 
-      const [payload, message] = loggerErrorSpy.mock.calls[0];
+      const messages = loggerErrorSpy.mock.calls.map(([, message]) => message);
+      expect(messages.filter((message) => message?.includes('upstream request failed'))).toHaveLength(
+        config.upstreamUrls.length
+      );
+
+      const [payload, message] = loggerErrorSpy.mock.calls.at(-1) ?? [];
       expect(message).toContain('no upstream URLs available');
       expect(payload.lastError).toBe('fail-all');
       expect(payload.upstreams).toHaveLength(config.upstreamUrls.length);
