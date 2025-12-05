@@ -1,8 +1,9 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 import type { AppConfig } from '../../config.js';
-import { fetchTile } from '../../upstream.js';
+import { fetchTile, createUpstreamMetricsProvider } from '../../upstream.js';
 import { logger } from '../../logger.js';
+import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 
 const { postMock, gotMock, RequestErrorMock } = vi.hoisted(() => {
   const post = vi.fn();
@@ -39,7 +40,16 @@ describe('upstream failover', () => {
     maxTilesPerRequest: 100,
     nodeEnv: 'test',
     upstreamFailureCooldownSeconds: 60,
-    upstreamDailyLimit: -1
+    upstreamBackoffBaseSeconds: 1,
+    upstreamBackoffMaxSeconds: 10,
+    upstreamEwmaAlpha: 0.5,
+    upstreamStickinessTtlSeconds: 0,
+    upstreamProbeIntervalSeconds: 0,
+    upstreamProbeJitterSeconds: 0,
+    upstreamProbeTimeoutSeconds: 2,
+    upstreamDailyLimit: -1,
+    transparentOnly: false,
+    trustProxy: false
   };
 
   const bbox = { south: 0, west: 0, north: 1, east: 1 };
@@ -160,18 +170,9 @@ describe('upstream failover', () => {
       expect(message).toContain('no upstream URLs available');
       expect(payload.lastError).toBe('fail-all');
       expect(payload.upstreams).toHaveLength(config.upstreamUrls.length);
-      expect(payload.upstreams).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            upstream: 'http://one.example/api/interpreter',
-            reason: expect.stringContaining('cooldown')
-          }),
-          expect.objectContaining({
-            upstream: 'http://two.example/api/interpreter',
-            reason: expect.stringContaining('cooldown')
-          })
-        ])
-      );
+      for (const entry of payload.upstreams) {
+        expect(entry.reason).toContain('backoff');
+      }
     } finally {
       randomSpy.mockRestore();
     }
@@ -209,5 +210,75 @@ describe('upstream failover', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('applies client stickiness when enabled', async () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValueOnce(0).mockReturnValueOnce(0.99);
+    postMock.mockResolvedValue({ body: JSON.stringify({ elements: [] }) });
+
+    const config: AppConfig = {
+      ...baseConfig,
+      upstreamStickinessTtlSeconds: 120
+    };
+
+    await fetchTile(config, bbox, 'toilets', { clientKey: 'client-a' });
+    postMock.mockClear();
+    postMock.mockResolvedValue({ body: JSON.stringify({ elements: ['again'] }) });
+    await fetchTile(config, bbox, 'toilets', { clientKey: 'client-a' });
+
+    const urls = postMock.mock.calls.map((call) => call[0]);
+    expect(urls).toEqual(['http://one.example/api/interpreter']);
+    randomSpy.mockRestore();
+  });
+
+  it('backs off exponentially after repeated failures', async () => {
+    vi.useFakeTimers();
+    const redis = new InMemoryRedis();
+    const config: AppConfig = {
+      ...baseConfig,
+      upstreamUrls: ['http://one.example/api/interpreter'],
+      upstreamBackoffBaseSeconds: 1,
+      upstreamBackoffMaxSeconds: 8,
+      upstreamStickinessTtlSeconds: 0
+    };
+
+    postMock.mockRejectedValueOnce(new Error('fail-one'));
+    await expect(fetchTile(config, bbox, 'toilets', { redis })).rejects.toThrow('fail-one');
+    const provider = await createUpstreamMetricsProvider(config, redis);
+    const first = provider.describeUpstreams()[0];
+    expect(first.status).toBe('cooldown');
+    const firstRetry = new Date(first.backoffUntil ?? '').getTime();
+
+    vi.advanceTimersByTime(1100);
+    postMock.mockRejectedValueOnce(new Error('fail-two'));
+    await expect(fetchTile(config, bbox, 'toilets', { redis })).rejects.toThrow('fail-two');
+    const second = provider.describeUpstreams()[0];
+    const secondRetry = new Date(second.backoffUntil ?? '').getTime();
+    expect(secondRetry).toBeGreaterThan(firstRetry);
+    vi.useRealTimers();
+  });
+
+  it('persists upstream state to redis for statistics', async () => {
+    vi.useFakeTimers();
+    const redis = new InMemoryRedis();
+    const config: AppConfig = {
+      ...baseConfig,
+      upstreamUrls: ['http://persist.example/api'],
+      upstreamBackoffBaseSeconds: 1,
+      upstreamStickinessTtlSeconds: 0
+    };
+
+    postMock.mockRejectedValueOnce(new Error('persist-failure'));
+    await expect(fetchTile(config, bbox, 'toilets', { redis })).rejects.toThrow('persist-failure');
+
+    const provider = await createUpstreamMetricsProvider(config, redis);
+    expect(provider.describeUpstreams()[0].status).toBe('cooldown');
+
+    const configClone: AppConfig = { ...config };
+    const restoredProvider = await createUpstreamMetricsProvider(configClone, redis);
+    const restored = restoredProvider.describeUpstreams()[0];
+    expect(restored.status).toBe('cooldown');
+    expect(restored.backoffUntil).toBeDefined();
+    vi.useRealTimers();
   });
 });

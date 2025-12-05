@@ -11,6 +11,13 @@ export interface AppConfig {
   maxTilesPerRequest: number;
   nodeEnv: string;
   upstreamFailureCooldownSeconds: number;
+  upstreamBackoffBaseSeconds: number;
+  upstreamBackoffMaxSeconds: number;
+  upstreamEwmaAlpha: number;
+  upstreamStickinessTtlSeconds: number;
+  upstreamProbeIntervalSeconds: number;
+  upstreamProbeJitterSeconds: number;
+  upstreamProbeTimeoutSeconds: number;
   transparentOnly: boolean;
   upstreamDailyLimit: number;
   trustProxy: boolean;
@@ -42,6 +49,7 @@ const toBoolean = (value: string | undefined, fallback: boolean): boolean => {
 };
 
 export const loadConfig = (): AppConfig => {
+  const failureCooldownSeconds = toNumber(env.UPSTREAM_FAILURE_COOLDOWN_SECONDS, 60);
   const cacheTtl = toNumber(env.CACHE_TTL_SECONDS, 24 * 60 * 60);
   const swr = Math.max(30, Math.floor(cacheTtl / 10));
   const tilePrecision = toNumber(env.TILE_PRECISION, 5);
@@ -74,7 +82,14 @@ export const loadConfig = (): AppConfig => {
     upstreamTilePrecision,
     maxTilesPerRequest: toNumber(env.MAX_TILES_PER_REQUEST, 1024),
     nodeEnv: env.NODE_ENV ?? 'production',
-    upstreamFailureCooldownSeconds: toNumber(env.UPSTREAM_FAILURE_COOLDOWN_SECONDS, 60),
+    upstreamFailureCooldownSeconds: failureCooldownSeconds,
+    upstreamBackoffBaseSeconds: toNumber(env.UPSTREAM_BACKOFF_BASE_SECONDS, failureCooldownSeconds),
+    upstreamBackoffMaxSeconds: toNumber(env.UPSTREAM_BACKOFF_MAX_SECONDS, 600),
+    upstreamEwmaAlpha: Math.min(1, Math.max(0.01, toNumber(env.UPSTREAM_EWMA_ALPHA, 0.3))),
+    upstreamStickinessTtlSeconds: Math.max(0, toNumber(env.UPSTREAM_STICKINESS_TTL_SECONDS, 300)),
+    upstreamProbeIntervalSeconds: Math.max(0, toNumber(env.UPSTREAM_PROBE_INTERVAL_SECONDS, 60)),
+    upstreamProbeJitterSeconds: Math.max(0, toNumber(env.UPSTREAM_PROBE_JITTER_SECONDS, 15)),
+    upstreamProbeTimeoutSeconds: Math.max(1, toNumber(env.UPSTREAM_PROBE_TIMEOUT_SECONDS, 5)),
     transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false),
     upstreamDailyLimit: toNumber(env.UPSTREAM_DAILY_LIMIT, -1),
     trustProxy: toBoolean(env.TRUST_PROXY, false)

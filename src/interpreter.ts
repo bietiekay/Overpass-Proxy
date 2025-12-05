@@ -133,6 +133,7 @@ const handleCacheable = async (
   query: string,
   amenity: string
 ): Promise<void> => {
+  const upstreamOptions = { redis: deps.redis, clientKey: request.ip };
   const normalisedAmenity = amenity.trim().toLowerCase();
   const bbox = extractBoundingBox(query);
   if (!bbox) {
@@ -214,7 +215,12 @@ const handleCacheable = async (
     void scheduleRefresh(async () => {
       await deps.store
         .withRefreshLock(representative, normalisedAmenity, async () => {
-          const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
+          const response = await fetchTile(
+            deps.config,
+            group.bounds,
+            normalisedAmenity,
+            upstreamOptions
+          );
           await writeFineTilesFromGroup(response, group.tiles);
         })
         .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
@@ -226,7 +232,7 @@ const handleCacheable = async (
     const representative = group.tiles[0];
     if (!representative) continue;
     const outcome = await deps.store.withMissLock(representative, normalisedAmenity, async () => {
-      const response = await fetchTile(deps.config, group.bounds, normalisedAmenity);
+      const response = await fetchTile(deps.config, group.bounds, normalisedAmenity, upstreamOptions);
       await writeFineTilesFromGroup(response, group.tiles);
     });
 
@@ -268,8 +274,9 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
     method: ['GET', 'POST'],
     url: '/api/interpreter',
     handler: async (request, reply) => {
+      const upstreamOptions = { redis: deps.redis, clientKey: request.ip };
       if (deps.config.transparentOnly) {
-        await proxyTransparent(request, reply, deps.config);
+        await proxyTransparent(request, reply, deps.config, upstreamOptions);
         return;
       }
 
@@ -282,7 +289,7 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
 
       // Proxy any non-cacheable requests upstream to keep full compatibility
       if (!hasJsonOutput(query) || !hasAmenityFilter(query)) {
-        await proxyTransparent(request, reply, deps.config);
+        await proxyTransparent(request, reply, deps.config, upstreamOptions);
         return;
       }
 
@@ -325,11 +332,13 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   const transparentEndpoints = ['/api/status', '/api/timestamp', '/api/timestamp/*', '/api/kill_my_queries'];
   for (const endpoint of transparentEndpoints) {
     app.all(endpoint, async (request, reply) => {
-      await proxyTransparent(request, reply, deps.config);
+      const upstreamOptions = { redis: deps.redis, clientKey: request.ip };
+      await proxyTransparent(request, reply, deps.config, upstreamOptions);
     });
   }
 
   app.all('/api/*', async (request, reply) => {
-    await proxyTransparent(request, reply, deps.config);
+    const upstreamOptions = { redis: deps.redis, clientKey: request.ip };
+    await proxyTransparent(request, reply, deps.config, upstreamOptions);
   });
 };

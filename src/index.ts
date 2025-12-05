@@ -102,7 +102,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   await store.restorePresence();
 
   const statisticsStorage = new RedisStatisticsStorage(redis);
-  const upstreamMetrics = createUpstreamMetricsProvider(config);
+  const upstreamMetrics = await createUpstreamMetricsProvider(config, redis);
   const statistics = await RequestStatistics.create(store, statisticsStorage, upstreamMetrics);
 
   registerInterpreterRoutes(app, { config, redis, store, stats: statistics });

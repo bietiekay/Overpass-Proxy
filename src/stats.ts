@@ -90,8 +90,18 @@ export interface UpstreamStatisticsEntry {
   requestsToday: number;
   dayStart: string;
   blockedUntil?: string;
+  backoffUntil?: string;
   failedUntil?: string;
   dailyLimit?: number;
+  nextRetry?: string;
+  ewmaLatencyMs?: number;
+  ewmaSuccess?: number;
+  weight?: number;
+  totalRequests?: number;
+  totalFailures?: number;
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
+  backoffAttempts?: number;
 }
 
 export interface UpstreamMetricsProvider {
