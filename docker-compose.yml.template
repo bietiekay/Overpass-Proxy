@@ -12,6 +12,9 @@ services:
       UPSTREAM_URLS: https://overpass-api.de/api/interpreter
       # Set to -1 to disable per-upstream daily cap
       UPSTREAM_DAILY_LIMIT: -1
+      # Browser-facing headers when proxying interpreter requests (defaults match Overpass Turbo)
+      # UPSTREAM_ORIGIN: https://overpass-turbo.eu
+      # UPSTREAM_REFERER: https://overpass-turbo.eu/
 
       # Caching and tiling
       # CACHE_TTL_SECONDS: 86400        # default 24h cache TTL

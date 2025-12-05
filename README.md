@@ -56,6 +56,8 @@ Environment variables are read at startup. Defaults are shown below:
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-For`/`X-Real-IP` headers from a reverse proxy when determining client IPs |
+| `UPSTREAM_ORIGIN` | `https://overpass-turbo.eu` | Origin header used when proxying `/api/interpreter` |
+| `UPSTREAM_REFERER` | `https://overpass-turbo.eu/` | Referer header used when proxying `/api/interpreter` |
 | `UPSTREAM_DAILY_LIMIT` | `-1` | Per-upstream daily request quota (`-1` keeps requests unlimited) |
 | `PORT` | `8080` | Listen port |
 | `LOG_VERBOSITY` | `info` | Logging verbosity: `errors`, `info`, or `debug` for full request/response details |

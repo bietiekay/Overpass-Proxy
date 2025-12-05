@@ -768,12 +768,43 @@ export const proxyTransparent = async (
           ...request.headers,
           host: undefined
         } as Record<string, string | string[] | undefined>;
+
+        const ensureHeader = (name: string, value: string): void => {
+          const existing =
+            headers[name] ??
+            headers[name.toLowerCase()] ??
+            headers[name.toUpperCase()];
+          if (existing === undefined) {
+            headers[name.toLowerCase()] = value;
+          }
+        };
         if (bodyReencoded) {
           delete headers['content-length'];
           delete headers['Content-Length'];
-          if (!headers['content-type'] && !headers['Content-Type']) {
-            headers['content-type'] = 'application/x-www-form-urlencoded';
-          }
+          delete headers['content-type'];
+          delete headers['Content-Type'];
+          // Always send re-encoded bodies as form data to match the upstream expectation
+          headers['content-type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+        }
+
+        if (interpreterPath) {
+          ensureHeader('origin', config.upstreamOrigin);
+          ensureHeader('pragma', 'no-cache');
+          ensureHeader('priority', 'u=1, i');
+          ensureHeader('referer', config.upstreamReferer);
+          ensureHeader(
+            'sec-ch-ua',
+            '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"'
+          );
+          ensureHeader('sec-ch-ua-mobile', '?0');
+          ensureHeader('sec-ch-ua-platform', '"Linux"');
+          ensureHeader('sec-fetch-dest', 'empty');
+          ensureHeader('sec-fetch-mode', 'cors');
+          ensureHeader('sec-fetch-site', 'cross-site');
+          ensureHeader(
+            'user-agent',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+          );
         }
 
         const summarisePayload = (payload: string | Buffer | undefined) => {

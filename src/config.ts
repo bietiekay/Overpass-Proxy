@@ -21,6 +21,8 @@ export interface AppConfig {
   transparentOnly: boolean;
   upstreamDailyLimit: number;
   trustProxy: boolean;
+  upstreamOrigin: string;
+  upstreamReferer: string;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -92,6 +94,8 @@ export const loadConfig = (): AppConfig => {
     upstreamProbeTimeoutSeconds: Math.max(1, toNumber(env.UPSTREAM_PROBE_TIMEOUT_SECONDS, 5)),
     transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false),
     upstreamDailyLimit: toNumber(env.UPSTREAM_DAILY_LIMIT, -1),
-    trustProxy: toBoolean(env.TRUST_PROXY, false)
+    trustProxy: toBoolean(env.TRUST_PROXY, false),
+    upstreamOrigin: env.UPSTREAM_ORIGIN ?? 'https://overpass-turbo.eu',
+    upstreamReferer: env.UPSTREAM_REFERER ?? 'https://overpass-turbo.eu/'
   };
 };

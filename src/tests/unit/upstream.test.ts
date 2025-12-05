@@ -1,7 +1,9 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
+import type { FastifyReply, FastifyRequest } from 'fastify';
+
 import type { AppConfig } from '../../config.js';
-import { fetchTile, createUpstreamMetricsProvider } from '../../upstream.js';
+import { fetchTile, createUpstreamMetricsProvider, proxyTransparent } from '../../upstream.js';
 import { logger } from '../../logger.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 
@@ -28,41 +30,73 @@ vi.mock('got', () => ({
   RequestError: RequestErrorMock
 }));
 
-describe('upstream failover', () => {
-  const baseConfig: AppConfig = {
-    port: 0,
-    upstreamUrls: ['http://one.example/api/interpreter', 'http://two.example/api/interpreter'],
-    redisUrl: 'redis://example',
-    cacheTtlSeconds: 60,
-    swrSeconds: 6,
-    tilePrecision: 5,
-    upstreamTilePrecision: 3,
-    maxTilesPerRequest: 100,
-    nodeEnv: 'test',
-    upstreamFailureCooldownSeconds: 60,
-    upstreamBackoffBaseSeconds: 1,
-    upstreamBackoffMaxSeconds: 10,
-    upstreamEwmaAlpha: 0.5,
-    upstreamStickinessTtlSeconds: 0,
-    upstreamProbeIntervalSeconds: 0,
-    upstreamProbeJitterSeconds: 0,
-    upstreamProbeTimeoutSeconds: 2,
-    upstreamDailyLimit: -1,
-    transparentOnly: false,
-    trustProxy: false
+const baseConfig: AppConfig = {
+  port: 0,
+  upstreamUrls: ['http://one.example/api/interpreter', 'http://two.example/api/interpreter'],
+  redisUrl: 'redis://example',
+  cacheTtlSeconds: 60,
+  swrSeconds: 6,
+  tilePrecision: 5,
+  upstreamTilePrecision: 3,
+  maxTilesPerRequest: 100,
+  nodeEnv: 'test',
+  upstreamFailureCooldownSeconds: 60,
+  upstreamBackoffBaseSeconds: 1,
+  upstreamBackoffMaxSeconds: 10,
+  upstreamEwmaAlpha: 0.5,
+  upstreamStickinessTtlSeconds: 0,
+  upstreamProbeIntervalSeconds: 0,
+  upstreamProbeJitterSeconds: 0,
+  upstreamProbeTimeoutSeconds: 2,
+  upstreamDailyLimit: -1,
+  transparentOnly: false,
+  trustProxy: false,
+  upstreamOrigin: 'https://overpass-turbo.eu',
+  upstreamReferer: 'https://overpass-turbo.eu/'
+};
+
+const mockReply = () => {
+  const headers: Record<string, string> = {};
+  const reply: Partial<FastifyReply> & {
+    headers: Record<string, string>;
+    payload?: unknown;
+    sent: boolean;
+    statusCode?: number;
+  } = {
+    headers,
+    sent: false,
+    statusCode: 200,
+    status: vi.fn((code: number) => {
+      reply.statusCode = code;
+      return reply as unknown as FastifyReply;
+    }),
+    header: vi.fn((key: string, value: string) => {
+      headers[key] = value;
+      return reply as unknown as FastifyReply;
+    }),
+    send: vi.fn((payload: unknown) => {
+      reply.sent = true;
+      reply.payload = payload;
+      return reply as unknown as FastifyReply;
+    })
   };
 
-  const bbox = { south: 0, west: 0, north: 1, east: 1 };
+  return reply;
+};
 
-  beforeEach(() => {
-    postMock.mockReset();
-    gotMock.mockReset();
-    gotMock.post = postMock;
-  });
+const bbox = { south: 0, west: 0, north: 1, east: 1 };
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+beforeEach(() => {
+  postMock.mockReset();
+  gotMock.mockReset();
+  gotMock.post = postMock;
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('upstream failover', () => {
 
   it('propagates client errors without marking upstream as failed', async () => {
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -285,5 +319,81 @@ describe('upstream failover', () => {
     expect(restored.status).toBe('cooldown');
     expect(restored.backoffUntil).toBeDefined();
     vi.useRealTimers();
+  });
+});
+
+describe('proxyTransparent', () => {
+  it('re-encodes interpreter GET requests as form POST with client headers', async () => {
+    const rawBody = Buffer.from('ok');
+    gotMock.mockResolvedValueOnce({
+      statusCode: 200,
+      headers: { 'content-type': 'application/json' },
+      rawBody
+    });
+
+    const request = {
+      method: 'GET',
+      url: '/api/interpreter?data=[out:json];node(1,1,2,2);out;',
+      headers: {
+        accept: '*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/json'
+      },
+      ip: '127.0.0.1'
+    };
+
+    const reply = mockReply();
+
+    await proxyTransparent(request as unknown as FastifyRequest, reply as FastifyReply, {
+      ...baseConfig,
+      upstreamUrls: ['http://one.example/api/interpreter']
+    });
+
+    expect(gotMock).toHaveBeenCalledTimes(1);
+    const [, options] = gotMock.mock.calls[0];
+    expect(options.method).toBe('POST');
+    expect(options.body.toString()).toContain('data=');
+    expect(options.headers['content-type']).toBe(
+      'application/x-www-form-urlencoded; charset=UTF-8'
+    );
+    expect(options.headers['accept']).toBe('*/*');
+    expect(options.headers['accept-language']).toBe('en-US,en;q=0.9');
+    expect(reply.statusCode).toBe(200);
+    expect(reply.sent).toBe(true);
+    expect(reply.payload).toBe(rawBody);
+  });
+
+  it('adds missing interpreter browser headers when absent', async () => {
+    const rawBody = Buffer.from('ok');
+    gotMock.mockResolvedValueOnce({
+      statusCode: 200,
+      headers: {},
+      rawBody
+    });
+
+    const request = {
+      method: 'POST',
+      url: '/api/interpreter',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded'
+      },
+      body: 'data=[out:json];node(1,1,2,2);out;',
+      ip: '127.0.0.1'
+    };
+
+    const reply = mockReply();
+
+    await proxyTransparent(request as unknown as FastifyRequest, reply as FastifyReply, {
+      ...baseConfig,
+      upstreamUrls: ['http://one.example/api/interpreter']
+    });
+
+    const [, options] = gotMock.mock.calls[0];
+    expect(options.headers['origin']).toBe('https://overpass-turbo.eu');
+    expect(options.headers['referer']).toBe('https://overpass-turbo.eu/');
+    expect(options.headers['user-agent']).toMatch(/Mozilla\/5\.0/);
+    expect(options.headers['sec-ch-ua']).toContain('Chromium');
+    expect(options.headers['sec-fetch-mode']).toBe('cors');
+    expect(options.headers['priority']).toBe('u=1, i');
   });
 });

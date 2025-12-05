@@ -6,6 +6,8 @@ import { loadConfig } from '../../config.js';
 
 const originalTransparent = env.TRANSPARENT_ONLY;
 const originalTrustProxy = env.TRUST_PROXY;
+const originalOrigin = env.UPSTREAM_ORIGIN;
+const originalReferer = env.UPSTREAM_REFERER;
 
 describe('loadConfig transparentOnly flag', () => {
   beforeEach(() => {
@@ -19,6 +21,16 @@ describe('loadConfig transparentOnly flag', () => {
     } else {
       env.TRUST_PROXY = originalTrustProxy;
     }
+    if (originalOrigin === undefined) {
+      delete env.UPSTREAM_ORIGIN;
+    } else {
+      env.UPSTREAM_ORIGIN = originalOrigin;
+    }
+    if (originalReferer === undefined) {
+      delete env.UPSTREAM_REFERER;
+    } else {
+      env.UPSTREAM_REFERER = originalReferer;
+    }
   });
 
   afterEach(() => {
@@ -31,6 +43,16 @@ describe('loadConfig transparentOnly flag', () => {
       delete env.TRUST_PROXY;
     } else {
       env.TRUST_PROXY = originalTrustProxy;
+    }
+    if (originalOrigin === undefined) {
+      delete env.UPSTREAM_ORIGIN;
+    } else {
+      env.UPSTREAM_ORIGIN = originalOrigin;
+    }
+    if (originalReferer === undefined) {
+      delete env.UPSTREAM_REFERER;
+    } else {
+      env.UPSTREAM_REFERER = originalReferer;
     }
   });
 
@@ -62,5 +84,21 @@ describe('loadConfig transparentOnly flag', () => {
     env.TRUST_PROXY = 'no';
     const config = loadConfig();
     expect(config.trustProxy).toBe(false);
+  });
+
+  it('uses default origin and referer when unset', () => {
+    delete env.UPSTREAM_ORIGIN;
+    delete env.UPSTREAM_REFERER;
+    const config = loadConfig();
+    expect(config.upstreamOrigin).toBe('https://overpass-turbo.eu');
+    expect(config.upstreamReferer).toBe('https://overpass-turbo.eu/');
+  });
+
+  it('reads origin and referer from env when provided', () => {
+    env.UPSTREAM_ORIGIN = 'https://example.com';
+    env.UPSTREAM_REFERER = 'https://example.com/';
+    const config = loadConfig();
+    expect(config.upstreamOrigin).toBe('https://example.com');
+    expect(config.upstreamReferer).toBe('https://example.com/');
   });
 });
