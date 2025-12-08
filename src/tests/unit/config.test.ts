@@ -103,7 +103,7 @@ describe('loadConfig transparentOnly flag', () => {
     const config = loadConfig();
     expect(config.upstreamOrigin).toBe('https://overpass-turbo.eu');
     expect(config.upstreamReferer).toBe('https://overpass-turbo.eu/');
-    expect(config.upstreamRequestTimeoutSeconds).toBe(5);
+    expect(config.upstreamRequestTimeoutSeconds).toBe(30);
   });
 
   it('reads origin and referer from env when provided', () => {
