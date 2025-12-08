@@ -4,6 +4,7 @@ import type Redis from 'ioredis';
 
 import { TileStore } from '../../store.js';
 import type { TileInfo } from '../../tiling.js';
+import { tileKey } from '../../tiling.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 
 const redis = new InMemoryRedis();
@@ -30,6 +31,27 @@ describe('TileStore', () => {
     await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 }, 'toilets');
     const values = await store.readTiles([tile], 'toilets');
     expect(values.get(tile.hash)?.stale).toBe(true);
+  });
+
+  it('removes expiration when serving stale tiles', async () => {
+    const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 1, swrSeconds: 1 });
+    const key = tileKey(tile.hash, 'toilets');
+    const payload = {
+      response: { elements: [], generator: 'test', osm3s: {}, version: 0.6 },
+      fetchedAt: Date.now() - 2000,
+      expiresAt: Date.now() - 1000
+    };
+
+    await redis.set(key, JSON.stringify(payload), 'PX', 50);
+
+    const ttlBefore = await redis.pttl(key);
+    expect(ttlBefore).toBeGreaterThan(0);
+
+    const values = await store.readTiles([tile], 'toilets');
+    expect(values.get(tile.hash)?.stale).toBe(true);
+
+    const ttlAfter = await redis.pttl(key);
+    expect(ttlAfter).toBe(-1);
   });
 
   it('writes multiple tiles in a single pipeline', async () => {

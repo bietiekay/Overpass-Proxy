@@ -352,7 +352,7 @@ export class TileStore {
       try {
         const payload = JSON.parse(raw) as OverpassTilePayload;
         const amenityCount = countAmenitiesInResponse(payload.response);
-        this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, amenityCount);
+        this.presence.markPresent(parsed.amenity, parsed.hash, Number.POSITIVE_INFINITY, amenityCount);
       } catch (error) {
         logger.warn({ err: error, key }, 'failed to restore tile presence from redis');
       }
@@ -399,6 +399,8 @@ export class TileStore {
     const values = await this.redis.mget(keys);
     const now = Date.now();
 
+    const keysToPersist: string[] = [];
+
     const result = new Map<string, CachedTile>();
 
     let hits = 0;
@@ -416,9 +418,10 @@ export class TileStore {
       try {
         const payload = JSON.parse(value) as OverpassTilePayload;
         const stale = payload.expiresAt < now;
+        keysToPersist.push(keys[index]);
         const amenityCount = countAmenitiesInResponse(payload.response);
         result.set(tile.hash, { tile, payload, stale });
-        this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount);
+        this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
         hits += 1;
         if (stale) {
           staleCount += 1;
@@ -429,6 +432,20 @@ export class TileStore {
         this.presence.markMissing(amenitySuffix, tile.hash);
       }
     });
+
+    if (keysToPersist.length > 0) {
+      const pipeline = this.redis.pipeline();
+      for (const key of keysToPersist) {
+        pipeline.persist(key);
+      }
+
+      const results = await pipeline.exec();
+      for (const [error] of results ?? []) {
+        if (error) {
+          throw error;
+        }
+      }
+    }
 
     logger.info(
       {
@@ -457,7 +474,6 @@ export class TileStore {
     }
 
     const now = Date.now();
-    const expiryMs = (this.options.ttlSeconds + this.options.swrSeconds) * 1000;
     const amenitySuffix = amenityKey(amenity);
     const pipeline = this.redis.pipeline();
     const tileHashes: string[] = [];
@@ -471,7 +487,7 @@ export class TileStore {
       };
       const amenityCount = countAmenitiesInResponse(response);
       tileHashes.push(tile.hash);
-      pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload), 'PX', expiryMs);
+      pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload));
       entriesWithPayload.push({ tile, payload, amenityCount });
     }
 
@@ -496,7 +512,7 @@ export class TileStore {
     }
 
     for (const { tile, payload, amenityCount } of entriesWithPayload) {
-      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount);
+      this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
     }
 
     logger.info(logContext, 'redis tile write');
@@ -518,8 +534,10 @@ export class TileStore {
     try {
       const payload = JSON.parse(value) as OverpassTilePayload;
       const amenityCount = countAmenitiesInResponse(payload.response);
-      const stale = payload.expiresAt < Date.now();
-      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount);
+      const now = Date.now();
+      const stale = payload.expiresAt < now;
+      await this.redis.persist(key);
+      this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
       return { tile, payload, stale };
     } catch {
       this.presence.markMissing(amenitySuffix, tile.hash);

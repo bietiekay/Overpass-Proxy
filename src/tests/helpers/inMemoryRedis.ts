@@ -50,6 +50,21 @@ export class InMemoryRedis extends EventEmitter {
     return existed ? 1 : 0;
   }
 
+  async persist(key: string): Promise<number> {
+    if (!this.store.has(key)) {
+      return 0;
+    }
+
+    const timeout = this.timeouts.get(key);
+    if (timeout) {
+      clearTimeout(timeout);
+      this.timeouts.delete(key);
+    }
+
+    const hadExpiry = this.expiry.delete(key);
+    return hadExpiry ? 1 : 0;
+  }
+
   async pttl(key: string): Promise<number> {
     if (!this.store.has(key)) {
       return -2;
@@ -115,6 +130,7 @@ export class InMemoryRedis extends EventEmitter {
       duration?: number,
       condition?: string
     ) => ReturnType<InMemoryRedis['pipeline']>;
+    persist: (key: string) => ReturnType<InMemoryRedis['pipeline']>;
     exec: () => Promise<Array<[Error | null, unknown]>>;
   } {
     const commands: Array<() => Promise<unknown>> = [];
@@ -129,6 +145,10 @@ export class InMemoryRedis extends EventEmitter {
         condition?: string
       ) {
         commands.push(() => parent.set(key, value, mode, duration, condition));
+        return pipeline;
+      },
+      persist(key: string) {
+        commands.push(() => parent.persist(key));
         return pipeline;
       },
       async exec() {

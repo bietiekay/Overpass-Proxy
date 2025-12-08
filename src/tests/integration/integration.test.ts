@@ -113,6 +113,33 @@ describe('integration', () => {
     expect(hits.length).toBe(initialHits);
   });
 
+  it('exposes the oldest fetch time for cached responses', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const first = await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const firstFetchedAt = first.headers['x-cache-fetched-at'];
+    expect(firstFetchedAt).toBeDefined();
+
+    const second = await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const secondFetchedAt = second.headers['x-cache-fetched-at'];
+    expect(secondFetchedAt).toBeDefined();
+    expect(new Date(secondFetchedAt as string).getTime()).toBeLessThanOrEqual(Date.now());
+    expect(new Date(firstFetchedAt as string).getTime()).toBeLessThanOrEqual(
+      new Date(secondFetchedAt as string).getTime()
+    );
+  });
+
   it('normalises amenity before fetching tiles', async () => {
     await redisClient?.flushall();
     hits.splice(0, hits.length);
