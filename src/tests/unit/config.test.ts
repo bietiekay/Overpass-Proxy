@@ -8,6 +8,7 @@ const originalTransparent = env.TRANSPARENT_ONLY;
 const originalTrustProxy = env.TRUST_PROXY;
 const originalOrigin = env.UPSTREAM_ORIGIN;
 const originalReferer = env.UPSTREAM_REFERER;
+const originalTimeout = env.UPSTREAM_REQUEST_TIMEOUT_SECONDS;
 
 describe('loadConfig transparentOnly flag', () => {
   beforeEach(() => {
@@ -31,6 +32,11 @@ describe('loadConfig transparentOnly flag', () => {
     } else {
       env.UPSTREAM_REFERER = originalReferer;
     }
+    if (originalTimeout === undefined) {
+      delete env.UPSTREAM_REQUEST_TIMEOUT_SECONDS;
+    } else {
+      env.UPSTREAM_REQUEST_TIMEOUT_SECONDS = originalTimeout;
+    }
   });
 
   afterEach(() => {
@@ -53,6 +59,11 @@ describe('loadConfig transparentOnly flag', () => {
       delete env.UPSTREAM_REFERER;
     } else {
       env.UPSTREAM_REFERER = originalReferer;
+    }
+    if (originalTimeout === undefined) {
+      delete env.UPSTREAM_REQUEST_TIMEOUT_SECONDS;
+    } else {
+      env.UPSTREAM_REQUEST_TIMEOUT_SECONDS = originalTimeout;
     }
   });
 
@@ -92,13 +103,16 @@ describe('loadConfig transparentOnly flag', () => {
     const config = loadConfig();
     expect(config.upstreamOrigin).toBe('https://overpass-turbo.eu');
     expect(config.upstreamReferer).toBe('https://overpass-turbo.eu/');
+    expect(config.upstreamRequestTimeoutSeconds).toBe(5);
   });
 
   it('reads origin and referer from env when provided', () => {
     env.UPSTREAM_ORIGIN = 'https://example.com';
     env.UPSTREAM_REFERER = 'https://example.com/';
+    env.UPSTREAM_REQUEST_TIMEOUT_SECONDS = '15';
     const config = loadConfig();
     expect(config.upstreamOrigin).toBe('https://example.com');
     expect(config.upstreamReferer).toBe('https://example.com/');
+    expect(config.upstreamRequestTimeoutSeconds).toBe(15);
   });
 });
