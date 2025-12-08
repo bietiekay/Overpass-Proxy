@@ -32,6 +32,9 @@ export const createMockOverpass = () => {
   const app = Fastify();
   void app.register(formbody);
   const hits: string[] = [];
+  let responder:
+    | null
+    | ((bbox: BoundingBox, amenity: string) => { status?: number; body?: unknown } | void) = null;
 
   app.all('/api/interpreter', async (request, reply) => {
     const formBody = (request as FastifyRequest<{ Body: { data?: string } }>).body;
@@ -57,6 +60,18 @@ export const createMockOverpass = () => {
         : 'toilets');
 
     hits.push(`${bbox.south},${bbox.west},${bbox.north},${bbox.east}:${amenity}`);
+
+    if (responder) {
+      const override = responder(bbox, amenity);
+      if (override) {
+        const status = override.status ?? 200;
+        reply.code(status);
+        reply.type('application/json');
+        reply.send(override.body ?? {});
+        return;
+      }
+    }
+
     reply.type('application/json');
     reply.send(buildResponse(bbox, amenity));
   });
@@ -64,6 +79,12 @@ export const createMockOverpass = () => {
   return {
     app,
     hits,
+    setResponder: (fn: typeof responder) => {
+      responder = fn;
+    },
+    resetResponder: () => {
+      responder = null;
+    },
     start: async (port: number) => {
       await app.listen({ port, host: '0.0.0.0' });
     },

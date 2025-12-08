@@ -319,10 +319,6 @@ const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
 export class TileStore {
   private readonly presence: TilePresenceCache;
 
-  private get retentionWindowMs(): number {
-    return (this.options.ttlSeconds + this.options.swrSeconds) * 1000;
-  }
-
   constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {
     const missingTtl = Math.max(250, Math.min(2000, options.swrSeconds * 1000));
     this.presence = new TilePresenceCache(missingTtl);
@@ -356,8 +352,7 @@ export class TileStore {
       try {
         const payload = JSON.parse(raw) as OverpassTilePayload;
         const amenityCount = countAmenitiesInResponse(payload.response);
-        const retentionExpiry = payload.expiresAt + this.options.swrSeconds * 1000;
-        this.presence.markPresent(parsed.amenity, parsed.hash, retentionExpiry, amenityCount);
+        this.presence.markPresent(parsed.amenity, parsed.hash, Number.POSITIVE_INFINITY, amenityCount);
       } catch (error) {
         logger.warn({ err: error, key }, 'failed to restore tile presence from redis');
       }
@@ -404,9 +399,6 @@ export class TileStore {
     const values = await this.redis.mget(keys);
     const now = Date.now();
 
-    const retentionWindowMs = this.retentionWindowMs;
-    const extensions: Array<{ key: string; value: string }> = [];
-
     const result = new Map<string, CachedTile>();
 
     let hits = 0;
@@ -424,15 +416,9 @@ export class TileStore {
       try {
         const payload = JSON.parse(value) as OverpassTilePayload;
         const stale = payload.expiresAt < now;
-        const retentionExpiry = payload.expiresAt + this.options.swrSeconds * 1000;
-        const shouldExtend = stale || retentionExpiry - now < this.options.swrSeconds * 1000;
-        if (shouldExtend) {
-          extensions.push({ key: keys[index], value });
-        }
         const amenityCount = countAmenitiesInResponse(payload.response);
         result.set(tile.hash, { tile, payload, stale });
-        const presenceExpiry = shouldExtend ? now + retentionWindowMs : retentionExpiry;
-        this.presence.markPresent(amenitySuffix, tile.hash, presenceExpiry, amenityCount);
+        this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
         hits += 1;
         if (stale) {
           staleCount += 1;
@@ -443,20 +429,6 @@ export class TileStore {
         this.presence.markMissing(amenitySuffix, tile.hash);
       }
     });
-
-    if (extensions.length > 0) {
-      const pipeline = this.redis.pipeline();
-      for (const extension of extensions) {
-        pipeline.set(extension.key, extension.value, 'PX', retentionWindowMs);
-      }
-
-      const results = await pipeline.exec();
-      for (const [error] of results ?? []) {
-        if (error) {
-          throw error;
-        }
-      }
-    }
 
     logger.info(
       {
@@ -485,7 +457,6 @@ export class TileStore {
     }
 
     const now = Date.now();
-    const expiryMs = this.retentionWindowMs;
     const amenitySuffix = amenityKey(amenity);
     const pipeline = this.redis.pipeline();
     const tileHashes: string[] = [];
@@ -499,7 +470,7 @@ export class TileStore {
       };
       const amenityCount = countAmenitiesInResponse(response);
       tileHashes.push(tile.hash);
-      pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload), 'PX', expiryMs);
+      pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload));
       entriesWithPayload.push({ tile, payload, amenityCount });
     }
 
@@ -523,9 +494,8 @@ export class TileStore {
       logContext.tile = tileHashes[0];
     }
 
-    const retentionExpiry = now + expiryMs;
     for (const { tile, payload, amenityCount } of entriesWithPayload) {
-      this.presence.markPresent(amenitySuffix, tile.hash, retentionExpiry, amenityCount);
+      this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
     }
 
     logger.info(logContext, 'redis tile write');
@@ -549,13 +519,7 @@ export class TileStore {
       const amenityCount = countAmenitiesInResponse(payload.response);
       const now = Date.now();
       const stale = payload.expiresAt < now;
-      const retentionExpiry = payload.expiresAt + this.options.swrSeconds * 1000;
-      const shouldExtend = stale || retentionExpiry - now < this.options.swrSeconds * 1000;
-      if (shouldExtend) {
-        await this.redis.set(key, value, 'PX', this.retentionWindowMs);
-      }
-      const presenceExpiry = shouldExtend ? now + this.retentionWindowMs : retentionExpiry;
-      this.presence.markPresent(amenitySuffix, tile.hash, presenceExpiry, amenityCount);
+      this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
       return { tile, payload, stale };
     } catch {
       this.presence.markMissing(amenitySuffix, tile.hash);

@@ -160,32 +160,18 @@ const handleCacheable = async (
   const missing = tiles.filter((tile) => !cached.has(tile.hash));
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
 
-  const responses: OverpassResponse[] = [];
-  const fetchedAts: number[] = [];
-  // limit concurrent stale refreshes per request (applied to coarse groups)
-  const maxConcurrentRefreshes = 8;
-  let activeRefreshes = 0;
-  const refreshQueue: Array<() => void> = [];
-  const scheduleRefresh = async (fn: () => Promise<void>) => {
-    if (activeRefreshes >= maxConcurrentRefreshes) {
-      await new Promise<void>((resolve) => refreshQueue.push(resolve));
-    }
-    activeRefreshes += 1;
-    try {
-      await fn();
-    } finally {
-      activeRefreshes -= 1;
-      const next = refreshQueue.shift();
-      if (next) next();
-    }
+  const responsesByTile = new Map<string, { response: OverpassResponse; fetchedAt: number }>();
+  const recordResponse = (tileHash: string, payload: { response: OverpassResponse; fetchedAt: number }) => {
+    responsesByTile.set(tileHash, payload);
   };
 
-  // push any cached responses immediately
   for (const tile of tiles) {
     const cachedTile = cached.get(tile.hash);
     if (cachedTile) {
-      responses.push(cachedTile.payload.response);
-      fetchedAts.push(cachedTile.payload.fetchedAt);
+      recordResponse(tile.hash, {
+        response: cachedTile.payload.response,
+        fetchedAt: cachedTile.payload.fetchedAt
+      });
     }
   }
 
@@ -214,19 +200,31 @@ const handleCacheable = async (
   for (const group of staleGroups) {
     const representative = group.tiles[0];
     if (!representative) continue;
-    void scheduleRefresh(async () => {
-      await deps.store
-        .withRefreshLock(representative, normalisedAmenity, async () => {
-          const response = await fetchTile(
-            deps.config,
-            group.bounds,
-            normalisedAmenity,
-            upstreamOptions
-          );
-          await writeFineTilesFromGroup(response, group.tiles);
-        })
-        .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
-    });
+
+    await deps.store
+      .withRefreshLock(representative, normalisedAmenity, async () => {
+        const response = await fetchTile(deps.config, group.bounds, normalisedAmenity, upstreamOptions);
+        await writeFineTilesFromGroup(response, group.tiles);
+      })
+      .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
+
+    for (const fine of group.tiles) {
+      const refreshed = await deps.store.readTile(fine, normalisedAmenity);
+      if (refreshed) {
+        recordResponse(fine.hash, {
+          response: refreshed.payload.response,
+          fetchedAt: refreshed.payload.fetchedAt
+        });
+      } else {
+        const cachedTile = cached.get(fine.hash);
+        if (cachedTile) {
+          recordResponse(fine.hash, {
+            response: cachedTile.payload.response,
+            fetchedAt: cachedTile.payload.fetchedAt
+          });
+        }
+      }
+    }
   }
 
   const missingGroups = planTileFetches(missing, planOptions);
@@ -241,15 +239,24 @@ const handleCacheable = async (
     for (const fine of group.tiles) {
       const fresh = await deps.store.readTile(fine, normalisedAmenity);
       if (fresh) {
-        responses.push(fresh.payload.response);
-        fetchedAts.push(fresh.payload.fetchedAt);
+        recordResponse(fine.hash, {
+          response: fresh.payload.response,
+          fetchedAt: fresh.payload.fetchedAt
+        });
       } else {
         logger.warn({ tile: fine.hash, outcome }, 'fine tile missing after fetch');
       }
     }
   }
 
-  const assembled = combineResponses(responses, bbox);
+  const sortedResponses = Array.from(responsesByTile.values()).sort(
+    (left, right) => left.fetchedAt - right.fetchedAt
+  );
+  const fetchedAts = sortedResponses.map((entry) => entry.fetchedAt);
+  const assembled = combineResponses(
+    sortedResponses.map((entry) => entry.response),
+    bbox
+  );
 
   const cacheHeader: CacheStatus =
     missing.length === 0 && stale.length === 0 ? 'HIT' : missing.length === 0 ? 'STALE' : 'MISS';

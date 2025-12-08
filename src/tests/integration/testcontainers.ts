@@ -11,6 +11,8 @@ export interface TestEnvironment {
   upstreamUrls: string[];
   stop: () => Promise<void>;
   hits: string[];
+  setResponder?: ReturnType<typeof createMockOverpass>['setResponder'];
+  resetResponder?: ReturnType<typeof createMockOverpass>['resetResponder'];
 }
 
 const isDockerAvailable = (): boolean => {
@@ -41,6 +43,8 @@ export const createTestEnvironment = async (): Promise<TestEnvironment> => {
       redis,
       upstreamUrls: [`http://127.0.0.1:${port}/api/interpreter`],
       hits: mockOverpass.hits,
+      setResponder: mockOverpass.setResponder,
+      resetResponder: mockOverpass.resetResponder,
       stop: async () => {
         await redis.quit();
         await mockOverpass.stop();
@@ -59,6 +63,8 @@ export const createTestEnvironment = async (): Promise<TestEnvironment> => {
     redis: mockRedis as unknown as Redis,
     upstreamUrls: [`http://127.0.0.1:${port}/api/interpreter`],
     hits: mockOverpass.hits,
+    setResponder: mockOverpass.setResponder,
+    resetResponder: mockOverpass.resetResponder,
     stop: async () => {
       await mockRedis.quit();
       await mockOverpass.stop();
