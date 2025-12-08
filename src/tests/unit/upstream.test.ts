@@ -48,6 +48,7 @@ const baseConfig: AppConfig = {
   upstreamProbeIntervalSeconds: 0,
   upstreamProbeJitterSeconds: 0,
   upstreamProbeTimeoutSeconds: 2,
+  upstreamRequestTimeoutSeconds: 5,
   upstreamDailyLimit: -1,
   transparentOnly: false,
   trustProxy: false,

@@ -694,16 +694,16 @@ export const fetchTile = async (
     config,
     fetchTileOptions,
     async (upstreamUrl) => {
-    logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch start');
-    const response = await got.post(upstreamUrl, {
-      body: new URLSearchParams({ data: query }).toString(),
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      timeout: { request: 120000 },
-      throwHttpErrors: false,
-      retry: { limit: 0 }
-    });
+      logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch start');
+      const response = await got.post(upstreamUrl, {
+        body: new URLSearchParams({ data: query }).toString(),
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 },
+        throwHttpErrors: false,
+        retry: { limit: 0 }
+      });
       if (response.statusCode >= 400) {
         throw new Error(`Upstream responded with status ${response.statusCode}`);
       }
@@ -867,7 +867,7 @@ export const proxyTransparent = async (
           body,
           throwHttpErrors: false,
           responseType: 'buffer',
-          timeout: { request: 120000 }
+          timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 }
         });
 
         if (response.statusCode >= 500 || response.statusCode === 429) {

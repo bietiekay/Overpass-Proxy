@@ -18,6 +18,7 @@ export interface AppConfig {
   upstreamProbeIntervalSeconds: number;
   upstreamProbeJitterSeconds: number;
   upstreamProbeTimeoutSeconds: number;
+  upstreamRequestTimeoutSeconds: number;
   transparentOnly: boolean;
   upstreamDailyLimit: number;
   trustProxy: boolean;
@@ -92,6 +93,10 @@ export const loadConfig = (): AppConfig => {
     upstreamProbeIntervalSeconds: Math.max(0, toNumber(env.UPSTREAM_PROBE_INTERVAL_SECONDS, 60)),
     upstreamProbeJitterSeconds: Math.max(0, toNumber(env.UPSTREAM_PROBE_JITTER_SECONDS, 15)),
     upstreamProbeTimeoutSeconds: Math.max(1, toNumber(env.UPSTREAM_PROBE_TIMEOUT_SECONDS, 5)),
+    upstreamRequestTimeoutSeconds: Math.max(
+      1,
+      toNumber(env.UPSTREAM_REQUEST_TIMEOUT_SECONDS, Math.min(5, failureCooldownSeconds))
+    ),
     transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false),
     upstreamDailyLimit: toNumber(env.UPSTREAM_DAILY_LIMIT, -1),
     trustProxy: toBoolean(env.TRUST_PROXY, false),
