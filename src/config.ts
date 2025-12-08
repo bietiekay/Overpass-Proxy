@@ -95,7 +95,7 @@ export const loadConfig = (): AppConfig => {
     upstreamProbeTimeoutSeconds: Math.max(1, toNumber(env.UPSTREAM_PROBE_TIMEOUT_SECONDS, 5)),
     upstreamRequestTimeoutSeconds: Math.max(
       1,
-      toNumber(env.UPSTREAM_REQUEST_TIMEOUT_SECONDS, Math.min(5, failureCooldownSeconds))
+      toNumber(env.UPSTREAM_REQUEST_TIMEOUT_SECONDS, Math.min(30, failureCooldownSeconds))
     ),
     transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false),
     upstreamDailyLimit: toNumber(env.UPSTREAM_DAILY_LIMIT, -1),
