@@ -130,6 +130,108 @@
       color: var(--muted);
       font-size: 0.9rem;
     }
+
+    .upstreams-panel {
+      position: absolute;
+      z-index: 900;
+      right: 1rem;
+      bottom: 1rem;
+      width: min(22rem, 90vw);
+      background: var(--panel-bg);
+      color: var(--panel-text);
+      padding: 0.85rem;
+      border-radius: 0.4rem;
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 15px 40px rgba(0, 0, 0, 0.3);
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .upstreams-panel.hidden {
+      display: none;
+    }
+
+    .upstreams-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+
+    .upstreams-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      max-height: 16rem;
+      overflow-y: auto;
+    }
+
+    .upstream-entry {
+      padding: 0.45rem 0.55rem;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 0.35rem;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .upstream-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-weight: 600;
+      font-size: 0.95rem;
+      margin-bottom: 0.15rem;
+    }
+
+    .upstream-meta {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.2rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: capitalize;
+      letter-spacing: 0.01em;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .badge-dot {
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .badge.available {
+      color: #34d399;
+      background: rgba(52, 211, 153, 0.1);
+    }
+
+    .badge.cooldown {
+      color: #fbbf24;
+      background: rgba(251, 191, 36, 0.1);
+    }
+
+    .badge.blocked {
+      color: #f87171;
+      background: rgba(248, 113, 113, 0.1);
+    }
   </style>
 </head>
 <body>
@@ -145,6 +247,7 @@
         </select>
       </label>
       <button id="refresh">Refresh data</button>
+      <button id="toggle-upstreams" aria-pressed="true">Hide upstreams</button>
       <span id="status" class="status">Loading statistics…</span>
     </div>
     <div class="stats" id="summary"></div>
@@ -156,6 +259,13 @@
     <div style="display:flex;justify-content:space-between;gap:0.5rem;margin-top:0.2rem;">
       <span>low</span><span>high</span>
     </div>
+  </div>
+  <div class="upstreams-panel" aria-live="polite">
+    <div class="upstreams-header">
+      <span>Upstream status</span>
+      <span id="upstream-updated" class="status"></span>
+    </div>
+    <ul id="upstreams" class="upstreams-list"></ul>
   </div>
 
   <script
@@ -204,11 +314,16 @@
     const overlayGroup = L.layerGroup().addTo(map);
     const modeSelect = document.getElementById('mode');
     const refreshButton = document.getElementById('refresh');
+    const toggleUpstreamsButton = document.getElementById('toggle-upstreams');
     const statusEl = document.getElementById('status');
     const summaryEl = document.getElementById('summary');
+    const upstreamsEl = document.getElementById('upstreams');
+    const upstreamUpdatedEl = document.getElementById('upstream-updated');
+    const upstreamPanelEl = document.querySelector('.upstreams-panel');
     let latestSnapshot = null;
     let latestCacheCoverage = [];
     let latestGeohashCoverage = [];
+    const upstreamPanelStorageKey = 'overpass-proxy.upstreams-panel.visible';
 
     const demoSnapshot = {
       generatedAt: new Date().toISOString(),
@@ -227,6 +342,29 @@
         { geohash: 'u33d', requests: 4 },
         { geohash: 'u0qj', requests: 3 },
         { geohash: 'dr5r', requests: 5 }
+      ],
+      upstreams: [
+        {
+          upstream: 'https://demo-overpass-1.example.com',
+          status: 'available',
+          reason: 'Healthy',
+          requestsToday: 120,
+          dayStart: new Date().toISOString(),
+          ewmaLatencyMs: 320,
+          totalFailures: 1,
+          totalRequests: 130
+        },
+        {
+          upstream: 'https://demo-overpass-2.example.com',
+          status: 'cooldown',
+          reason: 'Recent errors, cooling down',
+          requestsToday: 40,
+          dayStart: new Date().toISOString(),
+          backoffUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+          ewmaLatencyMs: 580,
+          totalFailures: 5,
+          totalRequests: 55
+        }
       ]
     };
 
@@ -359,6 +497,94 @@
       }
     };
 
+    const renderUpstreams = (snapshot) => {
+      upstreamsEl.innerHTML = '';
+      const upstreams = snapshot?.upstreams ?? [];
+      upstreamUpdatedEl.textContent = snapshot?.generatedAt
+        ? new Date(snapshot.generatedAt).toLocaleTimeString()
+        : '';
+
+      if (!upstreams.length) {
+        const empty = document.createElement('li');
+        empty.className = 'status';
+        empty.textContent = 'No upstream data available';
+        upstreamsEl.appendChild(empty);
+        return;
+      }
+
+      for (const entry of upstreams) {
+        const item = document.createElement('li');
+        item.className = 'upstream-entry';
+
+        const badge = document.createElement('span');
+        badge.className = `badge ${entry.status ?? 'available'}`;
+        badge.innerHTML = `<span class="badge-dot"></span>${entry.status ?? 'available'}`;
+
+        const title = document.createElement('div');
+        title.className = 'upstream-title';
+        title.innerHTML = `<span>${entry.upstream}</span>`;
+        title.appendChild(badge);
+
+        const meta = document.createElement('div');
+        meta.className = 'upstream-meta';
+
+        const reason = document.createElement('div');
+        reason.textContent = entry.reason ?? 'No status message';
+        meta.appendChild(reason);
+
+        const counters = [
+          entry.requestsToday !== undefined
+            ? `Requests today: ${entry.requestsToday.toLocaleString()}`
+            : null,
+          entry.totalRequests !== undefined
+            ? `Total: ${entry.totalRequests.toLocaleString()}`
+            : null,
+          entry.totalFailures !== undefined
+            ? `Failures: ${entry.totalFailures.toLocaleString()}`
+            : null
+        ].filter(Boolean);
+
+        const timers = [
+          entry.backoffUntil ? `Backoff until ${new Date(entry.backoffUntil).toLocaleTimeString()}` : null,
+          entry.blockedUntil ? `Blocked until ${new Date(entry.blockedUntil).toLocaleDateString()}` : null
+        ].filter(Boolean);
+
+        if (counters.length) {
+          const countersRow = document.createElement('div');
+          countersRow.textContent = counters.join(' · ');
+          meta.appendChild(countersRow);
+        }
+
+        if (entry.ewmaLatencyMs !== undefined) {
+          const latency = document.createElement('div');
+          latency.textContent = `EWMA latency: ${entry.ewmaLatencyMs.toLocaleString()} ms`;
+          meta.appendChild(latency);
+        }
+
+        if (timers.length) {
+          const timersRow = document.createElement('div');
+          timersRow.textContent = timers.join(' · ');
+          meta.appendChild(timersRow);
+        }
+
+        item.appendChild(title);
+        item.appendChild(meta);
+        upstreamsEl.appendChild(item);
+      }
+    };
+
+    const setUpstreamPanelVisibility = (visible) => {
+      if (visible) {
+        upstreamPanelEl.classList.remove('hidden');
+        toggleUpstreamsButton.textContent = 'Hide upstreams';
+      } else {
+        upstreamPanelEl.classList.add('hidden');
+        toggleUpstreamsButton.textContent = 'Show upstreams';
+      }
+      toggleUpstreamsButton.setAttribute('aria-pressed', String(visible));
+      localStorage.setItem(upstreamPanelStorageKey, JSON.stringify(visible));
+    };
+
     const applyMode = async () => {
       if (!latestSnapshot) return;
       const mode = modeSelect.value;
@@ -386,12 +612,14 @@
         const snapshot = await response.json();
         latestSnapshot = snapshot;
         statusEl.textContent = `Updated at ${new Date(snapshot.generatedAt ?? Date.now()).toLocaleString()}`;
+        renderUpstreams(snapshot);
       } catch (error) {
         console.error('Failed to load live statistics, falling back to demo data.', error);
         latestSnapshot = demoSnapshot;
         latestCacheCoverage = demoSnapshot.cacheCoverage ?? [];
         latestGeohashCoverage = demoGeohashCoverage;
         statusEl.textContent = 'Using demo data (live fetch failed).';
+        renderUpstreams(demoSnapshot);
       }
     };
 
@@ -436,6 +664,13 @@
     refreshButton.addEventListener('click', () => {
       void refreshData();
     });
+    toggleUpstreamsButton.addEventListener('click', () => {
+      const isVisible = upstreamPanelEl.classList.contains('hidden') ? false : true;
+      setUpstreamPanelVisibility(!isVisible);
+    });
+
+    const storedVisibility = localStorage.getItem(upstreamPanelStorageKey);
+    setUpstreamPanelVisibility(storedVisibility === null ? true : JSON.parse(storedVisibility));
 
     refreshData();
   </script>
