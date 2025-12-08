@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type Redis from 'ioredis';
 
 import { TileStore } from '../../store.js';
 import type { TileInfo } from '../../tiling.js';
+import { tileKey } from '../../tiling.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 
 const redis = new InMemoryRedis();
@@ -30,6 +31,30 @@ describe('TileStore', () => {
     await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 }, 'toilets');
     const values = await store.readTiles([tile], 'toilets');
     expect(values.get(tile.hash)?.stale).toBe(true);
+  });
+
+  it('extends retention when serving stale tiles', async () => {
+    vi.useFakeTimers();
+    const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 1, swrSeconds: 1 });
+    try {
+      await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 }, 'toilets');
+
+      const key = tileKey(tile.hash, 'toilets');
+      const initialTtl = await redis.pttl(key);
+      expect(initialTtl).toBeGreaterThan(0);
+
+      vi.setSystemTime(new Date(Date.now() + 1100));
+      const ttlBeforeExtension = await redis.pttl(key);
+
+      const values = await store.readTiles([tile], 'toilets');
+      expect(values.get(tile.hash)?.stale).toBe(true);
+
+      const extendedTtl = await redis.pttl(key);
+      expect(ttlBeforeExtension).toBeLessThan(initialTtl ?? 0);
+      expect(extendedTtl).toBeGreaterThan(ttlBeforeExtension ?? 0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('writes multiple tiles in a single pipeline', async () => {

@@ -161,6 +161,7 @@ const handleCacheable = async (
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
 
   const responses: OverpassResponse[] = [];
+  const fetchedAts: number[] = [];
   // limit concurrent stale refreshes per request (applied to coarse groups)
   const maxConcurrentRefreshes = 8;
   let activeRefreshes = 0;
@@ -184,6 +185,7 @@ const handleCacheable = async (
     const cachedTile = cached.get(tile.hash);
     if (cachedTile) {
       responses.push(cachedTile.payload.response);
+      fetchedAts.push(cachedTile.payload.fetchedAt);
     }
   }
 
@@ -240,6 +242,7 @@ const handleCacheable = async (
       const fresh = await deps.store.readTile(fine, normalisedAmenity);
       if (fresh) {
         responses.push(fresh.payload.response);
+        fetchedAts.push(fresh.payload.fetchedAt);
       } else {
         logger.warn({ tile: fine.hash, outcome }, 'fine tile missing after fetch');
       }
@@ -266,6 +269,10 @@ const handleCacheable = async (
 
   reply.header('Content-Type', 'application/json');
   reply.header('X-Cache', cacheHeader);
+  if (fetchedAts.length > 0) {
+    const oldestFetchedAt = Math.min(...fetchedAts);
+    reply.header('X-Cache-Fetched-At', new Date(oldestFetchedAt).toISOString());
+  }
   reply.send(assembled);
 };
 
