@@ -68,6 +68,35 @@ The defaults for `TILE_PRECISION` and `MAX_TILES_PER_REQUEST` are tuned for the 
 tile counts below the 1 024-tile ceiling even for the app’s widest live-map fetches (~70 km across) and cache-preload passes
 (~100 km combined width/height) while still yielding reusable tiles for the 2 km spatial grid used during normal browsing.
 
+### Tile caching lifecycle
+
+`POST /api/interpreter` requests that contain JSON amenity queries with a bounding box are split into geohash tiles at
+`TILE_PRECISION` (default 5, capped by `MAX_TILES_PER_REQUEST`, default 1 024). Each tile is keyed as
+`tile:<amenity>:<geohash>` and stores its bounding box so upstream responses can be trimmed precisely when written back. The
+workflow is:
+
+- **Cache read:** all requested tile keys are fetched in a single Redis `mget`. Entries with `expiresAt` in the past are marked
+  stale; missing entries are tracked separately. Cached tiles (fresh or stale) are added to the response immediately, and the
+  cache disposition header (`X-Cache`) reports `HIT`, `STALE`, or `MISS` accordingly.
+- **Stale-while-revalidate:** tiles become stale when `expiresAt` crosses `CACHE_TTL_SECONDS` (default 86 400 seconds). Stale
+  tiles are still served but refreshed in the background. A per-tile lock (`tile:<amenity>:<hash>:lock`) held for
+  `SWR_SECONDS` (default one tenth of `CACHE_TTL_SECONDS`, with a 30-second floor) prevents duplicate refreshes. If the
+  refresh fails, the prior stale payload remains available.
+- **Handling misses:** missing tiles trigger synchronous upstream fetches. An inflight lock (`:inflight`) keeps concurrent
+  callers from stampeding the same fetch. Late callers reuse the fresh write once it lands or fall back to waiting until the
+  inflight window expires.
+- **Upstream grouping:** tiles slated for refresh are clustered at `UPSTREAM_TILE_PRECISION` (default two geohash levels
+  coarser than `TILE_PRECISION`) so one upstream bbox request can repopulate many fine-grained tiles. Each grouped request uses
+  the canonical amenity query and obeys `UPSTREAM_REQUEST_TIMEOUT_SECONDS` (default 30 seconds, bounded by
+  `UPSTREAM_FAILURE_COOLDOWN_SECONDS`).
+- **Persistence:** successful upstream responses are clipped to each fine tile’s exact bbox and written with `fetchedAt` and
+  `expiresAt` using Redis pipelines. Presence counters that drive `GET /api/statistics/cacheCoverage` are updated alongside the
+  tile payloads.
+- **Staleness and refresh frequency:** tiles remain in Redis indefinitely until overwritten. They simply become stale when
+  `expiresAt` passes, and the next request through the interpreter endpoint triggers the stale-while-revalidate flow. Setting a
+  shorter `CACHE_TTL_SECONDS` or longer `SWR_SECONDS` alters how frequently refreshes occur and how long stale data can be
+  served while a refresh is in progress.
+
 ### Running behind a reverse proxy
 
 Set `TRUST_PROXY=true` so Fastify respects the original client IP from `X-Forwarded-For`/`X-Real-IP` headers. Example Nginx location block:
