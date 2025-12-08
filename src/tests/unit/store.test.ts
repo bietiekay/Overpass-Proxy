@@ -33,25 +33,20 @@ describe('TileStore', () => {
     expect(values.get(tile.hash)?.stale).toBe(true);
   });
 
-  it('extends retention when serving stale tiles', async () => {
+  it('retains cached tiles even after they become stale', async () => {
     vi.useFakeTimers();
     const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 1, swrSeconds: 1 });
     try {
       await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 }, 'toilets');
 
       const key = tileKey(tile.hash, 'toilets');
-      const initialTtl = await redis.pttl(key);
-      expect(initialTtl).toBeGreaterThan(0);
+      expect(await redis.pttl(key)).toBe(-1);
 
-      vi.setSystemTime(new Date(Date.now() + 1100));
-      const ttlBeforeExtension = await redis.pttl(key);
+      vi.setSystemTime(new Date(Date.now() + 5_000));
 
       const values = await store.readTiles([tile], 'toilets');
       expect(values.get(tile.hash)?.stale).toBe(true);
-
-      const extendedTtl = await redis.pttl(key);
-      expect(ttlBeforeExtension).toBeLessThan(initialTtl ?? 0);
-      expect(extendedTtl).toBeGreaterThan(ttlBeforeExtension ?? 0);
+      expect(await redis.pttl(key)).toBe(-1);
     } finally {
       vi.useRealTimers();
     }
