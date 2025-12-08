@@ -406,9 +406,19 @@
 
     const normaliseEntries = (entries) => {
       if (!entries.length) return [];
-      const max = Math.max(...entries.map((entry) => entry.value));
+
+      let max = 0;
+      for (const entry of entries) {
+        const value = Number.isFinite(entry.value) ? entry.value : 0;
+        max = Math.max(max, value);
+      }
+
       if (max === 0) return [];
-      return entries.map((entry) => ({ ...entry, intensity: entry.value / max }));
+
+      return entries.map((entry) => ({
+        ...entry,
+        intensity: (Number.isFinite(entry.value) ? entry.value : 0) / max
+      }));
     };
 
     const renderOverlay = async (entries, description) => {
