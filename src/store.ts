@@ -218,7 +218,7 @@ class TilePresenceCache {
 
     return new Promise((resolve) => {
       let settled = false;
-      let timeout: NodeJS.Timeout | undefined;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
 
       const complete = () => {
         if (settled) {
@@ -511,7 +511,7 @@ export class TileStore {
       logContext.tile = tileHashes[0];
     }
 
-    for (const { tile, payload, amenityCount } of entriesWithPayload) {
+    for (const { tile, amenityCount } of entriesWithPayload) {
       this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
     }
 
