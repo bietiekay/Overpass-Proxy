@@ -386,19 +386,119 @@
       return `hsl(${hue}, 85%, 55%)`;
     };
 
-    const decodeBbox = async (geohash) => {
+    const approxEqual = (a, b, epsilon = 1e-10) => Math.abs(a - b) <= epsilon;
+
+    const mergeHorizontally = (tiles) => {
+      const rows = new Map();
+      for (const tile of tiles) {
+        const key = `${tile.bounds.south.toFixed(10)}|${tile.bounds.north.toFixed(10)}`;
+        rows.set(key, [...(rows.get(key) ?? []), tile]);
+      }
+
+      const mergedRows = [];
+      for (const row of rows.values()) {
+        const sorted = [...row].sort((a, b) => a.bounds.west - b.bounds.west);
+        let current = sorted[0];
+        for (const next of sorted.slice(1)) {
+          if (approxEqual(current.bounds.east, next.bounds.west)) {
+            current = {
+              ...current,
+              bounds: { ...current.bounds, east: next.bounds.east },
+              geohashes: [...current.geohashes, ...next.geohashes]
+            };
+          } else {
+            mergedRows.push(current);
+            current = next;
+          }
+        }
+        mergedRows.push(current);
+      }
+
+      return mergedRows;
+    };
+
+    const mergeVertically = (tiles) => {
+      const columns = new Map();
+      for (const tile of tiles) {
+        const key = `${tile.bounds.west.toFixed(10)}|${tile.bounds.east.toFixed(10)}`;
+        columns.set(key, [...(columns.get(key) ?? []), tile]);
+      }
+
+      const mergedColumns = [];
+      for (const column of columns.values()) {
+        const sorted = [...column].sort((a, b) => a.bounds.south - b.bounds.south);
+        let current = sorted[0];
+        for (const next of sorted.slice(1)) {
+          if (approxEqual(current.bounds.north, next.bounds.south)) {
+            current = {
+              ...current,
+              bounds: { ...current.bounds, north: next.bounds.north },
+              geohashes: [...current.geohashes, ...next.geohashes]
+            };
+          } else {
+            mergedColumns.push(current);
+            current = next;
+          }
+        }
+        mergedColumns.push(current);
+      }
+
+      return mergedColumns;
+    };
+
+    const mergeTileSurfaces = (tiles) => {
+      let current = tiles;
+      while (true) {
+        const merged = mergeVertically(mergeHorizontally(current));
+        if (merged.length === current.length) {
+          return merged;
+        }
+        current = merged;
+      }
+    };
+
+    const buildMergedTiles = async (entries) => {
+      const tilesByValue = new Map();
+      let failedGeohashes = 0;
+
+      for (const entry of entries) {
+        try {
+          const bounds = await decodeBounds(entry.geohash);
+          const key = `${Number(entry.value ?? 0).toFixed(6)}|${Math.round(
+            clamp(entry.intensity ?? 0, 0, 1) * 10000
+          )}`;
+          const surfaces = tilesByValue.get(key) ?? [];
+          surfaces.push({ bounds, geohashes: [entry.geohash], entry });
+          tilesByValue.set(key, surfaces);
+        } catch (error) {
+          console.error(`Failed to decode geohash ${entry.geohash}`, error);
+          failedGeohashes += 1;
+        }
+      }
+
+      const mergedTiles = [];
+      for (const group of tilesByValue.values()) {
+        mergedTiles.push(...mergeTileSurfaces(group));
+      }
+
+      return { tiles: mergedTiles, failedGeohashes };
+    };
+
+    const decodeBounds = async (geohash) => {
       const geohashLib = await geohashReady;
       if (!geohashLib?.decode_bbox) {
         throw new Error('Geohash library not available');
       }
-      const [minLat, minLon, maxLat, maxLon] = geohashLib.decode_bbox(geohash);
-      return [
-        [minLat, minLon],
-        [maxLat, minLon],
-        [maxLat, maxLon],
-        [minLat, maxLon]
-      ];
+      const [south, west, north, east] = geohashLib.decode_bbox(geohash);
+      return { south, west, north, east };
     };
+
+    const boundsToPolygon = (bounds) => [
+      [bounds.south, bounds.west],
+      [bounds.north, bounds.west],
+      [bounds.north, bounds.east],
+      [bounds.south, bounds.east]
+    ];
 
     const clearOverlay = () => {
       overlayGroup.clearLayers();
@@ -424,34 +524,33 @@
     const renderOverlay = async (entries, description) => {
       clearOverlay();
       const normalised = normaliseEntries(entries);
-      let geohashUnavailable = false;
-      for (const entry of normalised) {
-        let bbox;
-        try {
-          bbox = await decodeBbox(entry.geohash);
-        } catch (error) {
-          console.error(`Failed to decode geohash ${entry.geohash}`, error);
-          geohashUnavailable = true;
-          continue;
-        }
-        const polygon = L.polygon(bbox, {
+      const { tiles, failedGeohashes } = await buildMergedTiles(normalised);
+
+      for (const tile of tiles) {
+        const polygon = L.polygon(boundsToPolygon(tile.bounds), {
           color: 'transparent',
           weight: 0.3,
-          fillColor: toColor(clamp(entry.intensity, 0, 1)),
+          fillColor: toColor(clamp(tile.entry.intensity ?? 0, 0, 1)),
           fillOpacity: 0.55
         });
-        const tooltip = [`${entry.geohash}`, `${description}: ${entry.value.toLocaleString(undefined, {
-          maximumFractionDigits: 2
-        })}`];
-        if (entry.detail) {
-          tooltip.push(entry.detail);
+        const geohashLabel = tile.geohashes.length === 1 ? tile.geohashes[0] : `${tile.geohashes.length} tiles`;
+        const tooltip = [
+          geohashLabel,
+          `${description}: ${tile.entry.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+        ];
+        if (tile.entry.detail) {
+          tooltip.push(tile.entry.detail);
         }
         polygon.bindTooltip(tooltip.join('<br>'));
         polygon.addTo(overlayGroup);
       }
-      statusEl.textContent = geohashUnavailable
-        ? `${description} visualised for ${overlayGroup.getLayers().length} tiles (geohash decoding unavailable for some entries).`
-        : `${description} visualised for ${normalised.length} tiles.`;
+      const mergedText =
+        tiles.length === normalised.length
+          ? `${tiles.length} tiles.`
+          : `${tiles.length} merged tiles (from ${normalised.length}).`;
+      statusEl.textContent = failedGeohashes > 0
+        ? `${description} visualised for ${tiles.length} tiles (geohash decoding unavailable for some entries).`
+        : `${description} visualised for ${mergedText}`;
     };
 
     const buildRequestEntries = (coverageData) => {
