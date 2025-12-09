@@ -11,12 +11,15 @@ interface PresenceEntry {
   state: PresenceState;
   expiresAt: number;
   amenityCount: number;
+  stale: boolean;
 }
 
 export interface CacheCoverageEntry {
   geohash: string;
   entries: number;
   amenityItems: number;
+  staleEntries: number;
+  staleAmenityItems: number;
 }
 
 type PresenceListener = () => void;
@@ -49,7 +52,13 @@ class TilePresenceCache {
     if (!entry) {
       return undefined;
     }
-    if (entry.expiresAt > Date.now()) {
+    const now = Date.now();
+    if (entry.expiresAt > now) {
+      return entry;
+    }
+    if (entry.state === 'present') {
+      entry.stale = true;
+      entry.expiresAt = Number.POSITIVE_INFINITY;
       return entry;
     }
     const amenityEntries = this.entries.get(amenity);
@@ -64,16 +73,22 @@ class TilePresenceCache {
     amenity: string,
     tileHash: string,
     expiresAt: number,
-    amenityCount: number
+    amenityCount: number,
+    stale = false
   ): void {
-    const entry: PresenceEntry = { state: 'present', expiresAt, amenityCount };
+    const entry: PresenceEntry = { state: 'present', expiresAt, amenityCount, stale };
     this.getAmenityEntries(amenity).set(tileHash, entry);
     this.notify(amenity, tileHash);
   }
 
   public markMissing(amenity: string, tileHash: string, ttlMs?: number): void {
     const duration = Math.max(1, Math.floor(ttlMs ?? this.defaultMissingTtlMs));
-    const entry: PresenceEntry = { state: 'missing', expiresAt: Date.now() + duration, amenityCount: 0 };
+    const entry: PresenceEntry = {
+      state: 'missing',
+      expiresAt: Date.now() + duration,
+      amenityCount: 0,
+      stale: false
+    };
     this.getAmenityEntries(amenity).set(tileHash, entry);
   }
 
@@ -95,9 +110,9 @@ class TilePresenceCache {
     let count = 0;
     for (const [tileHash, entry] of amenityEntries) {
       const current = this.clearIfExpired(amenity, tileHash, entry);
-      if (current?.state === 'present') {
-        count += 1;
-      }
+        if (current?.state === 'present') {
+          count += 1;
+        }
     }
 
     if (count === 0 && amenityEntries.size === 0) {
@@ -249,7 +264,7 @@ class TilePresenceCache {
   }
 
   public getCoverage(): CacheCoverageEntry[] {
-    const coverage = new Map<string, { entries: number; amenityItems: number }>();
+    const coverage = new Map<string, CacheCoverageEntry>();
 
     for (const [amenity, entries] of this.entries) {
       for (const [tileHash, entry] of entries) {
@@ -258,9 +273,18 @@ class TilePresenceCache {
           continue;
         }
 
-        const existing = coverage.get(tileHash) ?? { entries: 0, amenityItems: 0 };
-        existing.entries += 1;
-        existing.amenityItems += current.amenityCount;
+        const existing =
+          coverage.get(tileHash) ??
+          ({ geohash: tileHash, entries: 0, amenityItems: 0, staleEntries: 0, staleAmenityItems: 0 } as CacheCoverageEntry);
+
+        if (current.stale) {
+          existing.staleEntries += 1;
+          existing.staleAmenityItems += current.amenityCount;
+        } else {
+          existing.entries += 1;
+          existing.amenityItems += current.amenityCount;
+        }
+
         coverage.set(tileHash, existing);
       }
 
@@ -269,11 +293,7 @@ class TilePresenceCache {
       }
     }
 
-    return [...coverage.entries()].map(([geohash, counts]) => ({
-      geohash,
-      entries: counts.entries,
-      amenityItems: counts.amenityItems
-    }));
+    return [...coverage.values()];
   }
 }
 
@@ -352,7 +372,8 @@ export class TileStore {
       try {
         const payload = JSON.parse(raw) as OverpassTilePayload;
         const amenityCount = countAmenitiesInResponse(payload.response);
-        this.presence.markPresent(parsed.amenity, parsed.hash, Number.POSITIVE_INFINITY, amenityCount);
+        const isStale = payload.expiresAt < Date.now();
+        this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, amenityCount, isStale);
       } catch (error) {
         logger.warn({ err: error, key }, 'failed to restore tile presence from redis');
       }
@@ -418,7 +439,7 @@ export class TileStore {
         const stale = payload.expiresAt < now;
         const amenityCount = countAmenitiesInResponse(payload.response);
         result.set(tile.hash, { tile, payload, stale });
-        this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
+        this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount, stale);
         hits += 1;
         if (stale) {
           staleCount += 1;
@@ -495,7 +516,7 @@ export class TileStore {
     }
 
     for (const { tile, payload, amenityCount } of entriesWithPayload) {
-      this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
+      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount);
     }
 
     logger.info(logContext, 'redis tile write');
@@ -519,7 +540,7 @@ export class TileStore {
       const amenityCount = countAmenitiesInResponse(payload.response);
       const now = Date.now();
       const stale = payload.expiresAt < now;
-      this.presence.markPresent(amenitySuffix, tile.hash, Number.POSITIVE_INFINITY, amenityCount);
+      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount, stale);
       return { tile, payload, stale };
     } catch {
       this.presence.markMissing(amenitySuffix, tile.hash);

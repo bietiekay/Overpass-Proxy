@@ -228,8 +228,8 @@ describe('RequestStatistics', () => {
         countCachedAmenityTypes: () => 0,
         countTotalCachedTiles: () => 0,
         getCacheCoverage: () => [
-          { geohash: 'u0qj0', entries: 2, amenityItems: 5 },
-          { geohash: 'u33d0', entries: 3, amenityItems: 6 }
+          { geohash: 'u0qj0', entries: 2, amenityItems: 5, staleEntries: 0, staleAmenityItems: 0 },
+          { geohash: 'u33d0', entries: 3, amenityItems: 6, staleEntries: 0, staleAmenityItems: 0 }
         ]
       },
       storage
@@ -285,7 +285,9 @@ describe('RequestStatistics', () => {
         countCachedAmenities: () => 0,
         countCachedAmenityTypes: () => 0,
         countTotalCachedTiles: () => 0,
-        getCacheCoverage: () => [{ geohash: 'u0qj0', entries: 2, amenityItems: 5 }]
+        getCacheCoverage: () => [
+          { geohash: 'u0qj0', entries: 2, amenityItems: 5, staleEntries: 0, staleAmenityItems: 0 }
+        ]
       },
       storage
     );
