@@ -334,9 +334,9 @@
       averageTilesPerRequest: 40,
       cacheStatus: { HIT: 9, MISS: 3, STALE: 0 },
       cacheCoverage: [
-        { geohash: 'u33d0', entries: 3, amenityItems: 12 },
-        { geohash: 'u0qj0', entries: 2, amenityItems: 6 },
-        { geohash: 'dr5r0', entries: 4, amenityItems: 18 }
+        { geohash: 'u33d0', entries: 3, amenityItems: 12, staleEntries: 0, staleAmenityItems: 0 },
+        { geohash: 'u0qj0', entries: 1, amenityItems: 6, staleEntries: 1, staleAmenityItems: 6 },
+        { geohash: 'dr5r0', entries: 2, amenityItems: 12, staleEntries: 2, staleAmenityItems: 12 }
       ],
       hotspots: [
         { geohash: 'u33d', requests: 4 },
@@ -388,7 +388,7 @@
 
     const approxEqual = (a, b, epsilon = 1e-10) => Math.abs(a - b) <= epsilon;
 
-    const mergeHorizontally = (tiles) => {
+    const mergeHorizontally = (tiles, canMergeEntries, mergeEntries) => {
       const rows = new Map();
       for (const tile of tiles) {
         const key = `${tile.bounds.south.toFixed(10)}|${tile.bounds.north.toFixed(10)}`;
@@ -400,11 +400,14 @@
         const sorted = [...row].sort((a, b) => a.bounds.west - b.bounds.west);
         let current = sorted[0];
         for (const next of sorted.slice(1)) {
-          if (approxEqual(current.bounds.east, next.bounds.west)) {
+          if (approxEqual(current.bounds.east, next.bounds.west) && canMergeEntries(current, next)) {
+            const mergedEntry = mergeEntries(current, next);
             current = {
               ...current,
               bounds: { ...current.bounds, east: next.bounds.east },
-              geohashes: [...current.geohashes, ...next.geohashes]
+              geohashes: [...current.geohashes, ...next.geohashes],
+              entry: mergedEntry.entry,
+              weight: mergedEntry.weight
             };
           } else {
             mergedRows.push(current);
@@ -417,7 +420,7 @@
       return mergedRows;
     };
 
-    const mergeVertically = (tiles) => {
+    const mergeVertically = (tiles, canMergeEntries, mergeEntries) => {
       const columns = new Map();
       for (const tile of tiles) {
         const key = `${tile.bounds.west.toFixed(10)}|${tile.bounds.east.toFixed(10)}`;
@@ -429,11 +432,14 @@
         const sorted = [...column].sort((a, b) => a.bounds.south - b.bounds.south);
         let current = sorted[0];
         for (const next of sorted.slice(1)) {
-          if (approxEqual(current.bounds.north, next.bounds.south)) {
+          if (approxEqual(current.bounds.north, next.bounds.south) && canMergeEntries(current, next)) {
+            const mergedEntry = mergeEntries(current, next);
             current = {
               ...current,
               bounds: { ...current.bounds, north: next.bounds.north },
-              geohashes: [...current.geohashes, ...next.geohashes]
+              geohashes: [...current.geohashes, ...next.geohashes],
+              entry: mergedEntry.entry,
+              weight: mergedEntry.weight
             };
           } else {
             mergedColumns.push(current);
@@ -446,10 +452,10 @@
       return mergedColumns;
     };
 
-    const mergeTileSurfaces = (tiles) => {
+    const mergeTileSurfaces = (tiles, canMergeEntries, mergeEntries) => {
       let current = tiles;
       while (true) {
-        const merged = mergeVertically(mergeHorizontally(current));
+        const merged = mergeVertically(mergeHorizontally(current, canMergeEntries, mergeEntries), canMergeEntries, mergeEntries);
         if (merged.length === current.length) {
           return merged;
         }
@@ -457,18 +463,57 @@
       }
     };
 
-    const buildMergedTiles = async (entries) => {
+    const buildMergedTiles = async (entries, maxValue) => {
       const tilesByValue = new Map();
       let failedGeohashes = 0;
+
+      const canMergeEntries = (left, right) => {
+        const leftColor = left.entry?.color;
+        const rightColor = right.entry?.color;
+        if (leftColor && rightColor && leftColor !== rightColor) return false;
+
+        const leftValue = Number(left.entry?.value ?? 0);
+        const rightValue = Number(right.entry?.value ?? 0);
+        const max = Math.max(Math.abs(leftValue), Math.abs(rightValue));
+        if (max === 0) return true;
+        return Math.abs(leftValue - rightValue) / max <= 0.2;
+      };
+
+      const mergeEntries = (left, right) => {
+        const leftWeight = left.weight ?? 1;
+        const rightWeight = right.weight ?? 1;
+        const totalWeight = leftWeight + rightWeight;
+        const value =
+          ((Number(left.entry?.value ?? 0) * leftWeight + Number(right.entry?.value ?? 0) * rightWeight) /
+            totalWeight) || 0;
+        const detailParts = [left.entry?.detail, right.entry?.detail].filter(Boolean);
+        const detail = detailParts.length ? Array.from(new Set(detailParts)).join(' | ') : undefined;
+        const color = left.entry?.color ?? right.entry?.color;
+        const intensity =
+          maxValue > 0
+            ? value / maxValue
+            : ((Number(left.entry?.intensity ?? 0) * leftWeight +
+                Number(right.entry?.intensity ?? 0) * rightWeight) /
+                totalWeight) || 0;
+
+        return {
+          entry: {
+            ...left.entry,
+            value,
+            intensity,
+            detail,
+            color
+          },
+          weight: totalWeight
+        };
+      };
 
       for (const entry of entries) {
         try {
           const bounds = await decodeBounds(entry.geohash);
-          const key = `${Number(entry.value ?? 0).toFixed(6)}|${Math.round(
-            clamp(entry.intensity ?? 0, 0, 1) * 10000
-          )}`;
+          const key = entry.color ?? 'default';
           const surfaces = tilesByValue.get(key) ?? [];
-          surfaces.push({ bounds, geohashes: [entry.geohash], entry });
+          surfaces.push({ bounds, geohashes: [entry.geohash], entry, weight: 1 });
           tilesByValue.set(key, surfaces);
         } catch (error) {
           console.error(`Failed to decode geohash ${entry.geohash}`, error);
@@ -478,7 +523,7 @@
 
       const mergedTiles = [];
       for (const group of tilesByValue.values()) {
-        mergedTiles.push(...mergeTileSurfaces(group));
+        mergedTiles.push(...mergeTileSurfaces(group, canMergeEntries, mergeEntries));
       }
 
       return { tiles: mergedTiles, failedGeohashes };
@@ -505,7 +550,7 @@
     };
 
     const normaliseEntries = (entries) => {
-      if (!entries.length) return [];
+      if (!entries.length) return { entries: [], max: 0 };
 
       let max = 0;
       for (const entry of entries) {
@@ -513,24 +558,27 @@
         max = Math.max(max, value);
       }
 
-      if (max === 0) return [];
+      if (max === 0) return { entries: [], max };
 
-      return entries.map((entry) => ({
-        ...entry,
-        intensity: (Number.isFinite(entry.value) ? entry.value : 0) / max
-      }));
+      return {
+        entries: entries.map((entry) => ({
+          ...entry,
+          intensity: (Number.isFinite(entry.value) ? entry.value : 0) / max
+        })),
+        max
+      };
     };
 
     const renderOverlay = async (entries, description) => {
       clearOverlay();
       const normalised = normaliseEntries(entries);
-      const { tiles, failedGeohashes } = await buildMergedTiles(normalised);
+      const { tiles, failedGeohashes } = await buildMergedTiles(normalised.entries, normalised.max);
 
       for (const tile of tiles) {
         const polygon = L.polygon(boundsToPolygon(tile.bounds), {
           color: 'transparent',
           weight: 0.3,
-          fillColor: toColor(clamp(tile.entry.intensity ?? 0, 0, 1)),
+          fillColor: tile.entry.color ?? toColor(clamp(tile.entry.intensity ?? 0, 0, 1)),
           fillOpacity: 0.55
         });
         const geohashLabel = tile.geohashes.length === 1 ? tile.geohashes[0] : `${tile.geohashes.length} tiles`;
@@ -545,9 +593,9 @@
         polygon.addTo(overlayGroup);
       }
       const mergedText =
-        tiles.length === normalised.length
+        tiles.length === normalised.entries.length
           ? `${tiles.length} tiles.`
-          : `${tiles.length} merged tiles (from ${normalised.length}).`;
+          : `${tiles.length} merged tiles (from ${normalised.entries.length}).`;
       statusEl.textContent = failedGeohashes > 0
         ? `${description} visualised for ${tiles.length} tiles (geohash decoding unavailable for some entries).`
         : `${description} visualised for ${mergedText}`;
@@ -577,14 +625,34 @@
     };
 
     const buildCacheCoverageEntries = (cacheCoverage) => {
-      return (cacheCoverage ?? []).map((entry) => ({
-        geohash: entry.geohash,
-        value: Math.max(0, entry.amenityItems ?? 0),
-        detail:
-          entry.entries !== undefined
-            ? `Tile entries: ${entry.entries.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-            : undefined
-      }));
+      return (cacheCoverage ?? []).map((entry) => {
+        const freshEntries = Math.max(0, entry.entries ?? 0);
+        const staleEntries = Math.max(0, entry.staleEntries ?? 0);
+        const totalEntries = freshEntries + staleEntries;
+        const freshItems = Math.max(0, entry.amenityItems ?? 0);
+        const staleItems = Math.max(0, entry.staleAmenityItems ?? 0);
+        const totalItems = freshItems + staleItems;
+        const staleRatio = totalEntries > 0 ? staleEntries / totalEntries : 0;
+
+        const detailParts = [
+          `Fresh tiles: ${freshEntries.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
+          `Stale tiles: ${staleEntries.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+        ];
+
+        const color = staleEntries > 0 && freshEntries === 0
+          ? `hsl(${260 - clamp(staleRatio, 0, 1) * 20}, 70%, ${55 - clamp(staleRatio, 0, 1) * 10}%)`
+          : staleEntries > 0
+            ? 'hsl(200, 80%, 50%)'
+            : undefined;
+
+        return {
+          geohash: entry.geohash,
+          value: Math.max(0, totalItems),
+          detail: detailParts.join(' · '),
+          color,
+          staleRatio
+        };
+      });
     };
 
     const updateSummary = (snapshot) => {
