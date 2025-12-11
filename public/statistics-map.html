@@ -89,6 +89,39 @@
       font-size: 0.95rem;
     }
 
+    .progress-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-width: 14rem;
+    }
+
+    .progress-wrapper.hidden {
+      display: none;
+    }
+
+    .progress-track {
+      width: clamp(10rem, 25vw, 16rem);
+      height: 0.55rem;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #34d399, #60a5fa, #f472b6);
+      transition: width 200ms ease;
+    }
+
+    .progress-label {
+      color: var(--muted);
+      font-size: 0.9rem;
+      white-space: nowrap;
+    }
+
     .stat {
       display: flex;
       flex-direction: column;
@@ -136,7 +169,7 @@
       z-index: 900;
       right: 1rem;
       bottom: 1rem;
-      width: min(22rem, 90vw);
+      width: min(26rem, 92vw);
       background: var(--panel-bg);
       color: var(--panel-text);
       padding: 0.85rem;
@@ -249,6 +282,12 @@
       <button id="refresh">Refresh data</button>
       <button id="toggle-upstreams" aria-pressed="true">Hide upstreams</button>
       <span id="status" class="status">Loading statistics…</span>
+      <div id="progress" class="progress-wrapper hidden" role="status" aria-live="polite">
+        <div class="progress-track" aria-hidden="true">
+          <div id="progress-bar" class="progress-bar"></div>
+        </div>
+        <span id="progress-label" class="progress-label">Preparing…</span>
+      </div>
     </div>
     <div class="stats" id="summary"></div>
   </header>
@@ -320,9 +359,13 @@
     const upstreamsEl = document.getElementById('upstreams');
     const upstreamUpdatedEl = document.getElementById('upstream-updated');
     const upstreamPanelEl = document.querySelector('.upstreams-panel');
+    const progressEl = document.getElementById('progress');
+    const progressBarEl = document.getElementById('progress-bar');
+    const progressLabelEl = document.getElementById('progress-label');
     let latestSnapshot = null;
     let latestCacheCoverage = [];
     let latestGeohashCoverage = [];
+    const geohashBoundsCache = new Map();
     const upstreamPanelStorageKey = 'overpass-proxy.upstreams-panel.visible';
 
     const demoSnapshot = {
@@ -381,12 +424,73 @@
 
     const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
+    const updateProgress = (value, label) => {
+      const safeValue = clamp(Number.isFinite(value) ? value : 0, 0, 1);
+      progressBarEl.style.width = `${Math.round(safeValue * 100)}%`;
+      if (label) {
+        progressLabelEl.textContent = label;
+      }
+    };
+
+    const showProgress = (label) => {
+      progressEl.classList.remove('hidden');
+      updateProgress(0, label ?? 'Preparing…');
+    };
+
+    const hideProgress = (label) => {
+      updateProgress(1, label ?? 'Ready');
+      window.setTimeout(() => progressEl.classList.add('hidden'), 250);
+    };
+
     const toColor = (ratio) => {
       const hue = (1 - ratio) * 110; // 110 = green, 0 = red
       return `hsl(${hue}, 85%, 55%)`;
     };
 
     const approxEqual = (a, b, epsilon = 1e-10) => Math.abs(a - b) <= epsilon;
+
+    const condenseEntries = (entries) => {
+      const condensed = new Map();
+
+      for (const entry of entries ?? []) {
+        if (!entry?.geohash) continue;
+
+        const key = `${entry.geohash}|${entry.color ?? 'default'}`;
+        const value = Number.isFinite(entry.value) ? entry.value : 0;
+        const weight = Math.max(value, 1);
+        const detailParts = entry.detail ? [entry.detail] : [];
+
+        if (!condensed.has(key)) {
+          condensed.set(key, {
+            ...entry,
+            value,
+            detailParts,
+            weight,
+            staleRatio: entry.staleRatio ?? undefined
+          });
+          continue;
+        }
+
+        const bucket = condensed.get(key);
+        bucket.value += value;
+        bucket.weight += weight;
+        bucket.detailParts.push(...detailParts);
+
+        if (bucket.staleRatio !== undefined || entry.staleRatio !== undefined) {
+          const left = (bucket.staleRatio ?? 0) * (bucket.weight - weight);
+          const right = (entry.staleRatio ?? 0) * weight;
+          bucket.staleRatio = bucket.weight > 0 ? (left + right) / bucket.weight : bucket.staleRatio;
+        }
+      }
+
+      return Array.from(condensed.values()).map((bucket) => {
+        const { detailParts, weight, ...rest } = bucket;
+        return {
+          ...rest,
+          detail: detailParts.length ? Array.from(new Set(detailParts)).join(' | ') : undefined
+        };
+      });
+    };
 
     const mergeHorizontally = (tiles, canMergeEntries, mergeEntries) => {
       const rows = new Map();
@@ -463,9 +567,11 @@
       }
     };
 
-    const buildMergedTiles = async (entries, maxValue) => {
+    const buildMergedTiles = async (entries, maxValue, onProgress) => {
       const tilesByValue = new Map();
       let failedGeohashes = 0;
+      const totalEntries = entries.length || 1;
+      let processedEntries = 0;
 
       const canMergeEntries = (left, right) => {
         const leftColor = left.entry?.color;
@@ -519,6 +625,11 @@
           console.error(`Failed to decode geohash ${entry.geohash}`, error);
           failedGeohashes += 1;
         }
+
+        processedEntries += 1;
+        if (processedEntries % 100 === 0) {
+          onProgress?.(0.45 + (processedEntries / totalEntries) * 0.35, 'Decoding geohashes…');
+        }
       }
 
       const mergedTiles = [];
@@ -526,16 +637,23 @@
         mergedTiles.push(...mergeTileSurfaces(group, canMergeEntries, mergeEntries));
       }
 
+      onProgress?.(0.95, 'Finishing up…');
+
       return { tiles: mergedTiles, failedGeohashes };
     };
 
     const decodeBounds = async (geohash) => {
+      const cached = geohashBoundsCache.get(geohash);
+      if (cached) return cached;
+
       const geohashLib = await geohashReady;
       if (!geohashLib?.decode_bbox) {
         throw new Error('Geohash library not available');
       }
       const [south, west, north, east] = geohashLib.decode_bbox(geohash);
-      return { south, west, north, east };
+      const bounds = { south, west, north, east };
+      geohashBoundsCache.set(geohash, bounds);
+      return bounds;
     };
 
     const boundsToPolygon = (bounds) => [
@@ -570,35 +688,43 @@
     };
 
     const renderOverlay = async (entries, description) => {
-      clearOverlay();
-      const normalised = normaliseEntries(entries);
-      const { tiles, failedGeohashes } = await buildMergedTiles(normalised.entries, normalised.max);
+      showProgress('Verdichte Geohashes…');
+      try {
+        clearOverlay();
+        const condensed = condenseEntries(entries);
+        updateProgress(0.2, 'Normalising values…');
+        const normalised = normaliseEntries(condensed);
+        updateProgress(0.35, 'Kombiniere Kacheln…');
+        const { tiles, failedGeohashes } = await buildMergedTiles(normalised.entries, normalised.max, updateProgress);
 
-      for (const tile of tiles) {
-        const polygon = L.polygon(boundsToPolygon(tile.bounds), {
-          color: 'transparent',
-          weight: 0.3,
-          fillColor: tile.entry.color ?? toColor(clamp(tile.entry.intensity ?? 0, 0, 1)),
-          fillOpacity: 0.55
-        });
-        const geohashLabel = tile.geohashes.length === 1 ? tile.geohashes[0] : `${tile.geohashes.length} tiles`;
-        const tooltip = [
-          geohashLabel,
-          `${description}: ${tile.entry.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-        ];
-        if (tile.entry.detail) {
-          tooltip.push(tile.entry.detail);
+        for (const tile of tiles) {
+          const polygon = L.polygon(boundsToPolygon(tile.bounds), {
+            color: 'transparent',
+            weight: 0.3,
+            fillColor: tile.entry.color ?? toColor(clamp(tile.entry.intensity ?? 0, 0, 1)),
+            fillOpacity: 0.55
+          });
+          const geohashLabel = tile.geohashes.length === 1 ? tile.geohashes[0] : `${tile.geohashes.length} tiles`;
+          const tooltip = [
+            geohashLabel,
+            `${description}: ${tile.entry.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+          ];
+          if (tile.entry.detail) {
+            tooltip.push(tile.entry.detail);
+          }
+          polygon.bindTooltip(tooltip.join('<br>'));
+          polygon.addTo(overlayGroup);
         }
-        polygon.bindTooltip(tooltip.join('<br>'));
-        polygon.addTo(overlayGroup);
+        const mergedText =
+          tiles.length === normalised.entries.length
+            ? `${tiles.length} tiles.`
+            : `${tiles.length} merged tiles (from ${normalised.entries.length}).`;
+        statusEl.textContent = failedGeohashes > 0
+          ? `${description} visualised for ${tiles.length} tiles (geohash decoding unavailable for some entries).`
+          : `${description} visualised for ${mergedText}`;
+      } finally {
+        hideProgress('Ready');
       }
-      const mergedText =
-        tiles.length === normalised.entries.length
-          ? `${tiles.length} tiles.`
-          : `${tiles.length} merged tiles (from ${normalised.entries.length}).`;
-      statusEl.textContent = failedGeohashes > 0
-        ? `${description} visualised for ${tiles.length} tiles (geohash decoding unavailable for some entries).`
-        : `${description} visualised for ${mergedText}`;
     };
 
     const buildRequestEntries = (coverageData) => {
