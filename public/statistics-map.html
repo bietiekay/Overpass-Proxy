@@ -169,7 +169,7 @@
       z-index: 900;
       right: 1rem;
       bottom: 1rem;
-      width: min(26rem, 92vw);
+      width: min(32rem, 96vw);
       background: var(--panel-bg);
       color: var(--panel-text);
       padding: 0.85rem;
@@ -573,6 +573,11 @@
       const totalEntries = entries.length || 1;
       let processedEntries = 0;
 
+      const mergeDetails = (left, right) => {
+        const detailParts = [left.entry?.detail, right.entry?.detail].filter(Boolean);
+        return detailParts.length ? Array.from(new Set(detailParts)).join(' | ') : undefined;
+      };
+
       const canMergeEntries = (left, right) => {
         const leftColor = left.entry?.color;
         const rightColor = right.entry?.color;
@@ -585,6 +590,16 @@
         return Math.abs(leftValue - rightValue) / max <= 0.2;
       };
 
+      const canStrictlyMergeEntries = (left, right) => {
+        const leftColor = left.entry?.color ?? 'default';
+        const rightColor = right.entry?.color ?? 'default';
+        if (leftColor !== rightColor) return false;
+
+        const leftValue = Number(left.entry?.value ?? 0);
+        const rightValue = Number(right.entry?.value ?? 0);
+        return approxEqual(leftValue, rightValue, 1e-6);
+      };
+
       const mergeEntries = (left, right) => {
         const leftWeight = left.weight ?? 1;
         const rightWeight = right.weight ?? 1;
@@ -592,8 +607,7 @@
         const value =
           ((Number(left.entry?.value ?? 0) * leftWeight + Number(right.entry?.value ?? 0) * rightWeight) /
             totalWeight) || 0;
-        const detailParts = [left.entry?.detail, right.entry?.detail].filter(Boolean);
-        const detail = detailParts.length ? Array.from(new Set(detailParts)).join(' | ') : undefined;
+        const detail = mergeDetails(left, right);
         const color = left.entry?.color ?? right.entry?.color;
         const intensity =
           maxValue > 0
@@ -614,6 +628,31 @@
         };
       };
 
+      const mergeEntriesBySumming = (left, right) => {
+        const leftWeight = left.weight ?? 1;
+        const rightWeight = right.weight ?? 1;
+        const totalWeight = leftWeight + rightWeight;
+        const value = Number(left.entry?.value ?? 0) + Number(right.entry?.value ?? 0);
+
+        const staleRatio = (() => {
+          const leftStale = (left.entry?.staleRatio ?? 0) * leftWeight;
+          const rightStale = (right.entry?.staleRatio ?? 0) * rightWeight;
+          return totalWeight > 0 ? (leftStale + rightStale) / totalWeight : undefined;
+        })();
+
+        return {
+          entry: {
+            ...left.entry,
+            value,
+            intensity: maxValue > 0 ? value / maxValue : left.entry?.intensity ?? right.entry?.intensity ?? 0,
+            detail: mergeDetails(left, right),
+            color: left.entry?.color ?? right.entry?.color,
+            staleRatio: staleRatio === undefined ? undefined : staleRatio
+          },
+          weight: totalWeight
+        };
+      };
+
       for (const entry of entries) {
         try {
           const bounds = await decodeBounds(entry.geohash);
@@ -628,13 +667,20 @@
 
         processedEntries += 1;
         if (processedEntries % 100 === 0) {
-          onProgress?.(0.45 + (processedEntries / totalEntries) * 0.35, 'Decoding geohashes…');
+          onProgress?.(0.4 + (processedEntries / totalEntries) * 0.25, 'Decoding geohashes…');
         }
       }
 
       const mergedTiles = [];
-      for (const group of tilesByValue.values()) {
-        mergedTiles.push(...mergeTileSurfaces(group, canMergeEntries, mergeEntries));
+      const mergeGroups = Array.from(tilesByValue.values());
+      const totalGroups = mergeGroups.length || 1;
+      let mergedGroups = 0;
+
+      for (const group of mergeGroups) {
+        const strictlyMerged = mergeTileSurfaces(group, canStrictlyMergeEntries, mergeEntriesBySumming);
+        mergedTiles.push(...mergeTileSurfaces(strictlyMerged, canMergeEntries, mergeEntries));
+        mergedGroups += 1;
+        onProgress?.(0.7 + (mergedGroups / totalGroups) * 0.2, 'Optimising tiles…');
       }
 
       onProgress?.(0.95, 'Finishing up…');
@@ -688,13 +734,13 @@
     };
 
     const renderOverlay = async (entries, description) => {
-      showProgress('Verdichte Geohashes…');
+      showProgress('Optimising overlay…');
       try {
         clearOverlay();
         const condensed = condenseEntries(entries);
-        updateProgress(0.2, 'Normalising values…');
+        updateProgress(0.15, 'Normalising values…');
         const normalised = normaliseEntries(condensed);
-        updateProgress(0.35, 'Kombiniere Kacheln…');
+        updateProgress(0.3, 'Dekodiere Geohashes…');
         const { tiles, failedGeohashes } = await buildMergedTiles(normalised.entries, normalised.max, updateProgress);
 
         for (const tile of tiles) {
