@@ -556,14 +556,47 @@
       return mergedColumns;
     };
 
-    const mergeTileSurfaces = (tiles, canMergeEntries, mergeEntries) => {
+    const mergeTileSurfaces = (
+      tiles,
+      canMergeEntries,
+      mergeEntries,
+      { onProgress, progressBase = 0, progressSpan = 0 } = {}
+    ) => {
       let current = tiles;
+      let iterations = 0;
+      const safeSpan = Math.max(0, progressSpan);
+      const maxIterations = Math.max(1, tiles.length);
+
+      const reportProgress = () => {
+        if (!onProgress || safeSpan === 0) return;
+        const fraction = Math.min(1, iterations / maxIterations);
+        onProgress(progressBase + fraction * safeSpan, 'Optimising tiles…');
+      };
+
+      reportProgress();
       while (true) {
-        const merged = mergeVertically(mergeHorizontally(current, canMergeEntries, mergeEntries), canMergeEntries, mergeEntries);
+        const horizontalFirst = mergeVertically(
+          mergeHorizontally(current, canMergeEntries, mergeEntries),
+          canMergeEntries,
+          mergeEntries
+        );
+        const verticalFirst = mergeHorizontally(
+          mergeVertically(current, canMergeEntries, mergeEntries),
+          canMergeEntries,
+          mergeEntries
+        );
+
+        const merged =
+          horizontalFirst.length <= verticalFirst.length ? horizontalFirst : verticalFirst;
+
         if (merged.length === current.length) {
+          reportProgress();
           return merged;
         }
+
         current = merged;
+        iterations += 1;
+        reportProgress();
       }
     };
 
@@ -677,8 +710,20 @@
       let mergedGroups = 0;
 
       for (const group of mergeGroups) {
-        const strictlyMerged = mergeTileSurfaces(group, canStrictlyMergeEntries, mergeEntriesBySumming);
-        mergedTiles.push(...mergeTileSurfaces(strictlyMerged, canMergeEntries, mergeEntries));
+        const groupProgressBase = 0.7 + (mergedGroups / totalGroups) * 0.2;
+        const groupProgressSpan = 0.2 / totalGroups;
+        const strictlyMerged = mergeTileSurfaces(group, canStrictlyMergeEntries, mergeEntriesBySumming, {
+          onProgress,
+          progressBase: groupProgressBase,
+          progressSpan: groupProgressSpan / 2
+        });
+        mergedTiles.push(
+          ...mergeTileSurfaces(strictlyMerged, canMergeEntries, mergeEntries, {
+            onProgress,
+            progressBase: groupProgressBase + groupProgressSpan / 2,
+            progressSpan: groupProgressSpan / 2
+          })
+        );
         mergedGroups += 1;
         onProgress?.(0.7 + (mergedGroups / totalGroups) * 0.2, 'Optimising tiles…');
       }
