@@ -261,6 +261,58 @@ describe('integration', () => {
     }
   });
 
+  it('fails when stale cache does not fully cover the requested bbox and no upstreams are available', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const bbox = extractBoundingBox(jsonQuery);
+    expect(bbox).toBeDefined();
+    const tiles = tilesForBoundingBox(bbox!, 5);
+    expect(tiles.length).toBeGreaterThan(0);
+
+    const missingTile = tiles[0];
+    const amenityKey = 'toilets';
+    if (redisClient) {
+      await redisClient.del(tileKey(missingTile.hash, amenityKey));
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls: [],
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      const response = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(503);
+
+      expect(response.headers['x-cache']).toBe('STALE');
+      expect(response.body?.error).toMatch(/unavailable/i);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('normalises amenity before fetching tiles', async () => {
     await redisClient?.flushall();
     hits.splice(0, hits.length);

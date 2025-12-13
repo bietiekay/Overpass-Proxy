@@ -260,11 +260,6 @@ const handleCacheable = async (
     (left, right) => left.fetchedAt - right.fetchedAt
   );
   const fetchedAts = sortedResponses.map((entry) => entry.fetchedAt);
-  const assembled = combineResponses(
-    sortedResponses.map((entry) => entry.response),
-    bbox
-  );
-
   const unresolvedTiles = tiles.filter((tile) => !responsesByTile.has(tile.hash));
   let cacheHeader: CacheStatus;
   if (unresolvedTiles.length === 0) {
@@ -283,6 +278,23 @@ const handleCacheable = async (
     tileCount: tiles.length,
     tiles
   });
+
+  if (unresolvedTiles.length > 0 && missingFetchFailed) {
+    reply.code(503);
+    reply.header('Content-Type', 'application/json');
+    reply.header('X-Cache', cacheHeader);
+    if (fetchedAts.length > 0) {
+      const oldestFetchedAt = Math.min(...fetchedAts);
+      reply.header('X-Cache-Fetched-At', new Date(oldestFetchedAt).toISOString());
+    }
+    reply.send({ error: 'Requested area unavailable from cache' });
+    return;
+  }
+
+  const assembled = combineResponses(
+    sortedResponses.map((entry) => entry.response),
+    bbox
+  );
 
   if (applyConditionalHeaders(request, reply, assembled)) {
     return;
