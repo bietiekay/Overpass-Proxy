@@ -461,6 +461,8 @@
 
     const approxEqual = (a, b, epsilon = 1e-10) => Math.abs(a - b) <= epsilon;
 
+    const BASE32_SYMBOLS = 32;
+
     const condenseEntries = (entries) => {
       const condensed = new Map();
 
@@ -502,6 +504,105 @@
           detail: detailParts.length ? Array.from(new Set(detailParts)).join(' | ') : undefined
         };
       });
+    };
+
+    const mergeGeohashEntries = (entries, { minPrecision = 1 } = {}) => {
+      if (!entries?.length) return entries ?? [];
+
+      const bySignature = new Map();
+      for (const entry of entries) {
+        if (!entry?.geohash) continue;
+
+        const signature = JSON.stringify({
+          color: entry.color ?? 'default',
+          detail: entry.detail ?? null,
+          staleRatio: entry.staleRatio ?? null
+        });
+
+        const bucket = bySignature.get(signature) ?? [];
+        bucket.push(entry);
+        bySignature.set(signature, bucket);
+      }
+
+      const mergeEntries = (entriesToMerge, geohash) => {
+        let totalValue = 0;
+        let totalWeight = 0;
+        let totalStale = 0;
+        const details = new Set();
+
+        for (const entry of entriesToMerge) {
+          const value = Number(entry.value ?? 0);
+          const weight = Math.max(Math.abs(value), 1);
+          totalValue += value;
+          totalWeight += weight;
+          if (entry.detail) details.add(entry.detail);
+          if (entry.staleRatio !== undefined) {
+            totalStale += (entry.staleRatio ?? 0) * weight;
+          }
+        }
+
+        const merged = {
+          ...entriesToMerge[0],
+          geohash,
+          value: totalValue,
+          detail: details.size ? Array.from(details).join(' | ') : undefined
+        };
+
+        if (totalWeight > 0) {
+          merged.staleRatio = totalStale / totalWeight;
+        }
+
+        return merged;
+      };
+
+      const mergedEntries = [];
+
+      for (const group of bySignature.values()) {
+        const byLength = new Map();
+
+        for (const entry of group) {
+          const length = entry.geohash.length;
+          const bucket = byLength.get(length) ?? new Map();
+          bucket.set(entry.geohash, entry);
+          byLength.set(length, bucket);
+        }
+
+        const maxPrecision = Math.max(...byLength.keys());
+
+        for (let length = maxPrecision; length > minPrecision; length -= 1) {
+          const current = byLength.get(length);
+          if (!current || current.size === 0) continue;
+
+          const parents = byLength.get(length - 1) ?? new Map();
+          const childrenByParent = new Map();
+
+          for (const entry of current.values()) {
+            const parent = entry.geohash.slice(0, length - 1);
+            const children = childrenByParent.get(parent) ?? [];
+            children.push(entry);
+            childrenByParent.set(parent, children);
+          }
+
+          for (const [parent, children] of childrenByParent) {
+            if (children.length === BASE32_SYMBOLS) {
+              parents.set(parent, mergeEntries(children, parent));
+              for (const child of children) {
+                current.delete(child.geohash);
+              }
+            }
+          }
+
+          if (parents.size > 0) {
+            byLength.set(length - 1, parents);
+          }
+        }
+
+        for (const bucket of byLength.values()) {
+          mergedEntries.push(...bucket.values());
+        }
+      }
+
+      return mergedEntries;
     };
 
     const mergeHorizontally = (tiles, canMergeEntries, mergeEntries) => {
@@ -806,9 +907,11 @@
       try {
         clearOverlay();
         const condensed = condenseEntries(entries);
-        await updateProgress(0.15, 'Normalising values…');
-        const normalised = normaliseEntries(condensed);
-        await updateProgress(0.3, 'Decoding geohashes…');
+        await updateProgress(0.15, 'Condensing entries…');
+        const geohashOptimised = mergeGeohashEntries(condensed, { minPrecision: 1 });
+        await updateProgress(0.25, 'Merging geohashes…');
+        const normalised = normaliseEntries(geohashOptimised);
+        await updateProgress(0.35, 'Decoding geohashes…');
         const { tiles, failedGeohashes } = await buildMergedTiles(normalised.entries, normalised.max, updateProgress);
 
         for (const tile of tiles) {
