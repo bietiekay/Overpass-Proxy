@@ -424,21 +424,33 @@
 
     const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-    const updateProgress = (value, label) => {
+    const waitForAnimationFrame = () =>
+      new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+
+    let lastProgressPaint = 0;
+    const updateProgress = async (value, label) => {
       const safeValue = clamp(Number.isFinite(value) ? value : 0, 0, 1);
       progressBarEl.style.width = `${Math.round(safeValue * 100)}%`;
       if (label) {
         progressLabelEl.textContent = label;
       }
+
+      const now = performance.now();
+      if (now - lastProgressPaint > 80) {
+        await waitForAnimationFrame();
+        lastProgressPaint = now;
+      }
     };
 
-    const showProgress = (label) => {
+    const showProgress = async (label) => {
       progressEl.classList.remove('hidden');
-      updateProgress(0, label ?? 'Preparing…');
+      await waitForAnimationFrame();
+      await updateProgress(0, label ?? 'Preparing…');
     };
 
-    const hideProgress = (label) => {
-      updateProgress(1, label ?? 'Ready');
+    const hideProgress = async (label) => {
+      await updateProgress(1, label ?? 'Ready');
+      await waitForAnimationFrame();
       window.setTimeout(() => progressEl.classList.add('hidden'), 250);
     };
 
@@ -556,7 +568,7 @@
       return mergedColumns;
     };
 
-    const mergeTileSurfaces = (
+    const mergeTileSurfaces = async (
       tiles,
       canMergeEntries,
       mergeEntries,
@@ -567,13 +579,13 @@
       const safeSpan = Math.max(0, progressSpan);
       const maxIterations = Math.max(1, tiles.length);
 
-      const reportProgress = () => {
+      const reportProgress = async () => {
         if (!onProgress || safeSpan === 0) return;
         const fraction = Math.min(1, iterations / maxIterations);
-        onProgress(progressBase + fraction * safeSpan, 'Optimising tiles…');
+        await onProgress(progressBase + fraction * safeSpan, 'Optimising tiles…');
       };
 
-      reportProgress();
+      await reportProgress();
       while (true) {
         const horizontalFirst = mergeVertically(
           mergeHorizontally(current, canMergeEntries, mergeEntries),
@@ -590,13 +602,13 @@
           horizontalFirst.length <= verticalFirst.length ? horizontalFirst : verticalFirst;
 
         if (merged.length === current.length) {
-          reportProgress();
+          await reportProgress();
           return merged;
         }
 
         current = merged;
         iterations += 1;
-        reportProgress();
+        await reportProgress();
       }
     };
 
@@ -699,8 +711,8 @@
         }
 
         processedEntries += 1;
-        if (processedEntries % 100 === 0) {
-          onProgress?.(0.4 + (processedEntries / totalEntries) * 0.25, 'Decoding geohashes…');
+        if (processedEntries % 100 === 0 && onProgress) {
+          await onProgress(0.4 + (processedEntries / totalEntries) * 0.25, 'Decoding geohashes…');
         }
       }
 
@@ -712,23 +724,27 @@
       for (const group of mergeGroups) {
         const groupProgressBase = 0.7 + (mergedGroups / totalGroups) * 0.2;
         const groupProgressSpan = 0.2 / totalGroups;
-        const strictlyMerged = mergeTileSurfaces(group, canStrictlyMergeEntries, mergeEntriesBySumming, {
+        const strictlyMerged = await mergeTileSurfaces(group, canStrictlyMergeEntries, mergeEntriesBySumming, {
           onProgress,
           progressBase: groupProgressBase,
           progressSpan: groupProgressSpan / 2
         });
         mergedTiles.push(
-          ...mergeTileSurfaces(strictlyMerged, canMergeEntries, mergeEntries, {
+          ...(await mergeTileSurfaces(strictlyMerged, canMergeEntries, mergeEntries, {
             onProgress,
             progressBase: groupProgressBase + groupProgressSpan / 2,
             progressSpan: groupProgressSpan / 2
-          })
+          }))
         );
         mergedGroups += 1;
-        onProgress?.(0.7 + (mergedGroups / totalGroups) * 0.2, 'Optimising tiles…');
+        if (onProgress) {
+          await onProgress(0.7 + (mergedGroups / totalGroups) * 0.2, 'Optimising tiles…');
+        }
       }
 
-      onProgress?.(0.95, 'Finishing up…');
+      if (onProgress) {
+        await onProgress(0.95, 'Finishing up…');
+      }
 
       return { tiles: mergedTiles, failedGeohashes };
     };
@@ -778,14 +794,21 @@
       };
     };
 
-    const renderOverlay = async (entries, description) => {
-      showProgress('Optimising overlay…');
+    const renderOverlay = async (entries, description, { reuseProgress = false } = {}) => {
+      const managesProgress = !reuseProgress;
+
+      if (managesProgress) {
+        await showProgress('Optimising overlay…');
+      } else {
+        await updateProgress(0, 'Optimising overlay…');
+      }
+
       try {
         clearOverlay();
         const condensed = condenseEntries(entries);
-        updateProgress(0.15, 'Normalising values…');
+        await updateProgress(0.15, 'Normalising values…');
         const normalised = normaliseEntries(condensed);
-        updateProgress(0.3, 'Dekodiere Geohashes…');
+        await updateProgress(0.3, 'Decoding geohashes…');
         const { tiles, failedGeohashes } = await buildMergedTiles(normalised.entries, normalised.max, updateProgress);
 
         for (const tile of tiles) {
@@ -814,7 +837,9 @@
           ? `${description} visualised for ${tiles.length} tiles (geohash decoding unavailable for some entries).`
           : `${description} visualised for ${mergedText}`;
       } finally {
-        hideProgress('Ready');
+        if (managesProgress) {
+          await hideProgress('Ready');
+        }
       }
     };
 
@@ -968,7 +993,7 @@
       localStorage.setItem(upstreamPanelStorageKey, JSON.stringify(visible));
     };
 
-    const applyMode = async () => {
+    const applyMode = async ({ reuseProgress = false } = {}) => {
       if (!latestSnapshot) return;
       const mode = modeSelect.value;
       const coverageData =
@@ -976,15 +1001,17 @@
       const totalRequests = latestSnapshot?.totalRequests ?? demoSnapshot.totalRequests ?? 0;
 
       if (mode === 'coverage') {
-        await renderOverlay(buildCoverageEntries(coverageData, totalRequests), 'Request share (%)');
+        await renderOverlay(buildCoverageEntries(coverageData, totalRequests), 'Request share (%)', {
+          reuseProgress
+        });
       } else if (mode === 'cache') {
         const cacheCoverageData =
           latestCacheCoverage?.length > 0
             ? latestCacheCoverage
             : demoSnapshot.cacheCoverage ?? [];
-        await renderOverlay(buildCacheCoverageEntries(cacheCoverageData), 'Cache status');
+        await renderOverlay(buildCacheCoverageEntries(cacheCoverageData), 'Cache status', { reuseProgress });
       } else {
-        await renderOverlay(buildRequestEntries(coverageData), 'Requests');
+        await renderOverlay(buildRequestEntries(coverageData), 'Requests', { reuseProgress });
       }
     };
 
@@ -1036,9 +1063,19 @@
 
     const refreshData = async () => {
       statusEl.textContent = 'Loading statistics…';
-      await Promise.all([fetchStatistics(), fetchCacheCoverage(), fetchGeohashCoverage()]);
-      updateSummary(latestSnapshot);
-      await applyMode();
+      await showProgress('Loading statistics…');
+
+      try {
+        await updateProgress(0.05, 'Fetching statistics…');
+        await Promise.all([fetchStatistics(), fetchCacheCoverage(), fetchGeohashCoverage()]);
+        await updateProgress(0.35, 'Preparing visualisation…');
+        updateSummary(latestSnapshot);
+        await applyMode({ reuseProgress: true });
+        await hideProgress('Ready');
+      } catch (error) {
+        console.error('Failed to refresh statistics', error);
+        await hideProgress('Ready');
+      }
     };
 
     modeSelect.addEventListener('change', () => {
