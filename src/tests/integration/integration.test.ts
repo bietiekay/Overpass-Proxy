@@ -217,6 +217,50 @@ describe('integration', () => {
     }
   });
 
+  it('serves stale cache entries when no upstreams are available', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const first = await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const firstFetchedAt = new Date(first.headers['x-cache-fetched-at'] as string).getTime();
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls: [],
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      const second = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const secondFetchedAt = new Date(second.headers['x-cache-fetched-at'] as string).getTime();
+      expect(secondFetchedAt).toBe(firstFetchedAt);
+      expect(second.headers['x-cache']).toBe('STALE');
+    } finally {
+      await app.close();
+    }
+  });
+
   it('normalises amenity before fetching tiles', async () => {
     await redisClient?.flushall();
     hits.splice(0, hits.length);
