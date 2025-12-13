@@ -228,13 +228,20 @@ const handleCacheable = async (
   }
 
   const missingGroups = planTileFetches(missing, planOptions);
+  let missingFetchFailed = false;
   for (const group of missingGroups) {
     const representative = group.tiles[0];
     if (!representative) continue;
-    const outcome = await deps.store.withMissLock(representative, normalisedAmenity, async () => {
-      const response = await fetchTile(deps.config, group.bounds, normalisedAmenity, upstreamOptions);
-      await writeFineTilesFromGroup(response, group.tiles);
-    });
+    const outcome = await deps.store
+      .withMissLock(representative, normalisedAmenity, async () => {
+        const response = await fetchTile(deps.config, group.bounds, normalisedAmenity, upstreamOptions);
+        await writeFineTilesFromGroup(response, group.tiles);
+      })
+      .catch((error) => {
+        missingFetchFailed = true;
+        logger.warn({ err: error }, 'failed to fetch missing tile group');
+        return 'waited';
+      });
 
     for (const fine of group.tiles) {
       const fresh = await deps.store.readTile(fine, normalisedAmenity);
@@ -258,8 +265,15 @@ const handleCacheable = async (
     bbox
   );
 
-  const cacheHeader: CacheStatus =
-    missing.length === 0 && stale.length === 0 ? 'HIT' : missing.length === 0 ? 'STALE' : 'MISS';
+  const unresolvedTiles = tiles.filter((tile) => !responsesByTile.has(tile.hash));
+  let cacheHeader: CacheStatus;
+  if (unresolvedTiles.length === 0) {
+    cacheHeader = stale.length === 0 && !missingFetchFailed ? 'HIT' : 'STALE';
+  } else if (responsesByTile.size > 0) {
+    cacheHeader = 'STALE';
+  } else {
+    cacheHeader = 'MISS';
+  }
 
   await deps.stats.recordRequest({
     amenity: normalisedAmenity,
