@@ -260,16 +260,49 @@
       }
     };
 
-    const loadLandGeometry = async () => {
+    const loadLandGeometry = async (signal) => {
       if (landGeometry) return landGeometry;
-      statusText.textContent = 'Lade Land-Geometrie (Natural Earth)…';
-      const response = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json');
-      if (!response.ok) {
-        throw new Error('Konnte Land-Daten nicht laden');
+
+      const sources = [
+        { label: '50m (schneller)', url: 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json' },
+        { label: '110m (Fallback)', url: 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-110m.json' }
+      ];
+
+      for (const source of sources) {
+        const start = performance.now();
+        const fetchController = new AbortController();
+        const onAbort = () => fetchController.abort();
+        signal?.addEventListener('abort', onAbort);
+        const slowWarning = setTimeout(() => {
+          statusText.textContent = `Land-Geometrie lädt … (${source.label}, dauert länger als erwartet)`;
+          log(`Land-Geometrie (${source.label}) lädt länger – warte auf Antwort …`);
+        }, 4000);
+
+        try {
+          statusText.textContent = `Lade Land-Geometrie (${source.label}) …`;
+          const response = await fetch(source.url, { signal: fetchController.signal });
+          clearTimeout(slowWarning);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const topo = await response.json();
+          landGeometry = feature(topo, topo.objects.land);
+          const duration = ((performance.now() - start) / 1000).toFixed(1);
+          statusText.textContent = `Land-Geometrie geladen (${source.label} in ${duration}s)`;
+          log(`Land-Geometrie (${source.label}) geladen in ${duration}s`);
+          return landGeometry;
+        } catch (error) {
+          clearTimeout(slowWarning);
+          if (signal?.aborted || fetchController.signal.aborted) {
+            throw new DOMException('Aborted', 'AbortError');
+          }
+          log(`Quelle ${source.label} fehlgeschlagen: ${error.message || error}`);
+        } finally {
+          signal?.removeEventListener('abort', onAbort);
+        }
       }
-      const topo = await response.json();
-      landGeometry = feature(topo, topo.objects.land);
-      return landGeometry;
+
+      throw new Error('Konnte keine Land-Geometrie laden');
     };
 
     const geohashBounds = (hash) => {
@@ -300,6 +333,12 @@
       const clamped = total === 0 ? 0 : Math.min(100, Math.round((value / total) * 100));
       bar.style.width = `${clamped}%`;
       label.textContent = `${prefix}: ${value.toLocaleString()} / ${total.toLocaleString()} (${clamped}%)`;
+    };
+
+    const updateCoverageBar = (entries, suffix = 'laufend') => {
+      const pseudoProgress = Math.min(95, Math.log10(entries + 1) * 20 + 5);
+      coverageBar.style.width = `${pseudoProgress}%`;
+      coverageLabel.textContent = `Cache-Einträge gelesen: ${entries.toLocaleString()} (${suffix})`;
     };
 
     const streamCacheCoverage = async (baseUrl, onEntry, signal) => {
@@ -390,40 +429,56 @@
       }
     };
 
-    const buildTargetGeohashes = async (targetPrecision, cached, signal, maxPlan) => {
-      await loadLandGeometry();
+    const createLandPlanner = async (targetPrecision, cached, signal) => {
+      await loadLandGeometry(signal);
       const seeds = ngeohash.bboxes(-85, -180, 85, 180, 2);
       const queue = [...seeds];
       let candidates = 0;
-      let missingCount = 0;
-      const planned = [];
+      const missingSet = new Set();
 
-      while (queue.length > 0) {
-        if (signal?.aborted) {
-          throw new DOMException('Aborted', 'AbortError');
-        }
-        const hash = queue.pop();
-        if (!hash) break;
-        if (!isLandHash(hash)) continue;
+      const planBatch = (maxPlan, iterationLimit = 2000) => {
+        const planned = [];
+        let iterations = 0;
 
-        if (hash.length >= targetPrecision) {
-          candidates += 1;
-          const normalized = hash.slice(0, targetPrecision);
-          if (!cached.has(normalized)) {
-            missingCount += 1;
-            if (planned.length < maxPlan) {
+        while (queue.length > 0 && planned.length < maxPlan && iterations < iterationLimit) {
+          iterations += 1;
+          if (signal?.aborted) {
+            throw new DOMException('Aborted', 'AbortError');
+          }
+
+          const hash = queue.pop();
+          if (!hash || !isLandHash(hash)) continue;
+
+          if (hash.length >= targetPrecision) {
+            candidates += 1;
+            const normalized = hash.slice(0, targetPrecision);
+            if (!cached.has(normalized)) {
+              missingSet.add(normalized);
               planned.push(hash);
             }
+            continue;
           }
-          continue;
+
+          for (const char of base32) {
+            queue.push(`${hash}${char}`);
+          }
         }
 
-        for (const char of base32) {
-          queue.push(`${hash}${char}`);
-        }
-      }
+        return {
+          planned,
+          candidates,
+          missingCount: missingSet.size,
+          done: queue.length === 0
+        };
+      };
 
-      return { candidates, missingCount, planned };
+      const markCached = (normalized) => {
+        if (missingSet.delete(normalized)) {
+          // Keep missingCount in sync with discovered cache entries.
+        }
+      };
+
+      return { planBatch, markCached, getCounts: () => ({ candidates, missingCount: missingSet.size }) };
     };
 
     const sendPreheatRequest = async ({ baseUrl, amenity, hash, timeoutMs, signal }) => {
@@ -480,40 +535,89 @@
         let coverageEntries = 0;
         coverageLabel.textContent = 'Cache-Statistik wird geladen…';
         coverageBar.style.width = '0%';
+        updateCoverageBar(coverageEntries);
 
-        await streamCacheCoverage(baseUrl, (entry) => {
-          const normalized = entry.geohash.slice(0, targetPrecision);
-          if (normalized.length === 0) return;
-          cached.add(normalized);
-          coverageEntries += 1;
-          updateProgress(coverageBar, coverageLabel, coverageEntries, coverageEntries, 'Cache-Einträge gelesen');
-        }, signal);
-
-        cachedCountEl.textContent = cached.size.toLocaleString();
-        log(`Geladene Cache-Kacheln: ${cached.size.toLocaleString()}`);
-        statusText.textContent = 'Berechne Land-Kacheln…';
-
-        const { candidates, missingCount, planned } = await buildTargetGeohashes(
-          targetPrecision,
-          cached,
-          signal,
-          Math.max(1, maxTiles)
-        );
-        landCandidatesEl.textContent = candidates.toLocaleString();
-        missingCountEl.textContent = missingCount.toLocaleString();
-        preheatLabel.textContent = `Plane ${planned.length.toLocaleString()} fehlende Kacheln`;
-        cached.clear();
-
+        statusText.textContent = 'Starte Planung und Vorwärmung…';
+        const planner = await createLandPlanner(targetPrecision, cached, signal);
+        const plannedQueue = [];
+        const plannedSet = new Set();
+        let plannerFinished = false;
+        let plannedCount = 0;
         let completed = 0;
         let failed = 0;
         let inFlight = 0;
-        let index = 0;
+
+        const refreshStats = () => {
+          const counts = planner.getCounts();
+          landCandidatesEl.textContent = counts.candidates.toLocaleString();
+          missingCountEl.textContent = counts.missingCount.toLocaleString();
+          preheatLabel.textContent = `Plane ${plannedCount.toLocaleString()} Kacheln`;
+        };
+
+        const enqueuePlan = (maxPlan) => {
+          if (plannerFinished || plannedCount >= maxPlan) return;
+          const { planned, done } = planner.planBatch(maxPlan - plannedCount, 4000);
+          plannerFinished = done;
+
+          for (const hash of planned) {
+            const normalized = hash.slice(0, targetPrecision);
+            if (plannedSet.has(normalized)) continue;
+            plannedSet.add(normalized);
+            plannedQueue.push(hash);
+            plannedCount += 1;
+          }
+          refreshStats();
+        };
+
+        const takeNextHash = () => {
+          while (plannedQueue.length > 0) {
+            const hash = plannedQueue.shift();
+            if (!hash) continue;
+            const normalized = hash.slice(0, targetPrecision);
+            if (cached.has(normalized)) continue;
+            return hash;
+          }
+          return null;
+        };
+
+        const coveragePromise = streamCacheCoverage(
+          baseUrl,
+          (entry) => {
+            const normalized = entry.geohash.slice(0, targetPrecision);
+            if (normalized.length === 0) return;
+            cached.add(normalized);
+            planner.markCached(normalized);
+            coverageEntries += 1;
+            updateCoverageBar(coverageEntries);
+            if (plannedQueue.length < concurrency * 2 && plannedCount < maxTiles) {
+              enqueuePlan(Math.max(1, maxTiles));
+            }
+          },
+          signal
+        ).then(() => {
+          coverageBar.style.width = '100%';
+          updateCoverageBar(coverageEntries, 'fertig');
+          enqueuePlan(Math.max(1, maxTiles));
+          cachedCountEl.textContent = cached.size.toLocaleString();
+          log(`Geladene Cache-Kacheln: ${cached.size.toLocaleString()}`);
+        });
+
+        enqueuePlan(Math.max(1, maxTiles));
+        refreshStats();
+
         let stopped = false;
 
         const tick = async () => {
-          if (stopped || stopRequested || signal.aborted || index >= planned.length) return;
-          const hash = planned[index];
-          index += 1;
+          if (stopped || stopRequested || signal.aborted) return;
+          const hash = takeNextHash();
+          if (!hash) {
+            if (!plannerFinished || plannedCount < maxTiles) {
+              enqueuePlan(Math.max(1, maxTiles));
+              return tick();
+            }
+            return;
+          }
+
           inFlight += 1;
           inFlightEl.textContent = inFlight.toString();
 
@@ -529,8 +633,11 @@
           } finally {
             inFlight -= 1;
             inFlightEl.textContent = inFlight.toString();
-            updateProgress(preheatBar, preheatLabel, completed + failed, planned.length, 'Prewarming');
-            if (!stopped && index < planned.length) {
+            updateProgress(preheatBar, preheatLabel, completed + failed, plannedCount || 1, 'Prewarming');
+            if (!stopped) {
+              if (plannedQueue.length < concurrency && plannedCount < maxTiles) {
+                enqueuePlan(Math.max(1, maxTiles));
+              }
               void tick();
             }
           }
@@ -539,6 +646,7 @@
         const workers = Array.from({ length: concurrency }, () => tick());
 
         await Promise.all(workers);
+        await coveragePromise;
         stopped = true;
         statusText.textContent = 'Durchlauf beendet';
       } catch (error) {
