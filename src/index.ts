@@ -23,6 +23,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   void app.register(formbody);
 
   const statisticsMapPath = resolve(process.cwd(), 'public', 'statistics-map.html');
+  const cachePreheaterPath = resolve(process.cwd(), 'public', 'cache-preheater.html');
 
   // Simple CORS handling for browser clients
   app.addHook('onSend', async (_request, reply, payload) => {
@@ -39,6 +40,12 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.get('/statistics-map', async (_request, reply) => {
     const html = await readFile(statisticsMapPath, 'utf8');
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    reply.send(html);
+  });
+
+  app.get('/cache-preheater', async (_request, reply) => {
+    const html = await readFile(cachePreheaterPath, 'utf8');
     reply.header('Content-Type', 'text/html; charset=utf-8');
     reply.send(html);
   });
