@@ -796,13 +796,13 @@
             fillOpacity: 0.55
           });
           const geohashLabel = tile.geohashes.length === 1 ? tile.geohashes[0] : `${tile.geohashes.length} tiles`;
-          const tooltip = [
-            geohashLabel,
-            `${description}: ${tile.entry.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-          ];
-          if (tile.entry.detail) {
-            tooltip.push(tile.entry.detail);
+          const tooltip = [geohashLabel];
+          if (tile.entry.statusLabel) {
+            tooltip.push(tile.entry.statusLabel);
+          } else {
+            tooltip.push(`${description}: ${tile.entry.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
           }
+          if (tile.entry.detail) tooltip.push(tile.entry.detail);
           polygon.bindTooltip(tooltip.join('<br>'));
           polygon.addTo(overlayGroup);
         }
@@ -842,34 +842,23 @@
     };
 
     const buildCacheCoverageEntries = (cacheCoverage) => {
-      return (cacheCoverage ?? []).map((entry) => {
-        const freshEntries = Math.max(0, entry.entries ?? 0);
-        const staleEntries = Math.max(0, entry.staleEntries ?? 0);
-        const totalEntries = freshEntries + staleEntries;
-        const freshItems = Math.max(0, entry.amenityItems ?? 0);
-        const staleItems = Math.max(0, entry.staleAmenityItems ?? 0);
-        const totalItems = freshItems + staleItems;
-        const staleRatio = totalEntries > 0 ? staleEntries / totalEntries : 0;
+      return (cacheCoverage ?? [])
+        .map((entry) => {
+          const freshEntries = Math.max(0, entry.entries ?? 0);
+          const staleEntries = Math.max(0, entry.staleEntries ?? 0);
+          const totalEntries = freshEntries + staleEntries;
+          const hasStaleEntries = staleEntries > 0;
 
-        const detailParts = [
-          `Fresh tiles: ${freshEntries.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
-          `Stale tiles: ${staleEntries.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-        ];
+          if (totalEntries === 0) return null;
 
-        const color = staleEntries > 0 && freshEntries === 0
-          ? `hsl(${260 - clamp(staleRatio, 0, 1) * 20}, 70%, ${55 - clamp(staleRatio, 0, 1) * 10}%)`
-          : staleEntries > 0
-            ? 'hsl(200, 80%, 50%)'
-            : undefined;
-
-        return {
-          geohash: entry.geohash,
-          value: Math.max(0, totalItems),
-          detail: detailParts.join(' · '),
-          color,
-          staleRatio
-        };
-      });
+          return {
+            geohash: entry.geohash,
+            value: 1,
+            color: hasStaleEntries ? '#4ea8de' : '#34d399',
+            statusLabel: hasStaleEntries ? 'Cache: stale' : 'Cache: fresh'
+          };
+        })
+        .filter(Boolean);
     };
 
     const updateSummary = (snapshot) => {
@@ -993,7 +982,7 @@
           latestCacheCoverage?.length > 0
             ? latestCacheCoverage
             : demoSnapshot.cacheCoverage ?? [];
-        await renderOverlay(buildCacheCoverageEntries(cacheCoverageData), 'Cached amenities');
+        await renderOverlay(buildCacheCoverageEntries(cacheCoverageData), 'Cache status');
       } else {
         await renderOverlay(buildRequestEntries(coverageData), 'Requests');
       }
