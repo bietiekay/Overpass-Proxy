@@ -197,34 +197,49 @@ const handleCacheable = async (
   };
 
   const staleGroups = planTileFetches(stale, planOptions);
-  for (const group of staleGroups) {
-    const representative = group.tiles[0];
-    if (!representative) continue;
+  const refreshStaleTiles = async (updateResponses: boolean) => {
+    for (const group of staleGroups) {
+      const representative = group.tiles[0];
+      if (!representative) continue;
 
-    await deps.store
-      .withRefreshLock(representative, normalisedAmenity, async () => {
-        const response = await fetchTile(deps.config, group.bounds, normalisedAmenity, upstreamOptions);
-        await writeFineTilesFromGroup(response, group.tiles);
-      })
-      .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
+      await deps.store
+        .withRefreshLock(representative, normalisedAmenity, async () => {
+          const response = await fetchTile(deps.config, group.bounds, normalisedAmenity, upstreamOptions);
+          await writeFineTilesFromGroup(response, group.tiles);
+        })
+        .catch((error) => logger.warn({ err: error }, 'failed to refresh tile group'));
 
-    for (const fine of group.tiles) {
-      const refreshed = await deps.store.readTile(fine, normalisedAmenity);
-      if (refreshed) {
-        recordResponse(fine.hash, {
-          response: refreshed.payload.response,
-          fetchedAt: refreshed.payload.fetchedAt
-        });
-      } else {
-        const cachedTile = cached.get(fine.hash);
-        if (cachedTile) {
+      if (!updateResponses) continue;
+
+      for (const fine of group.tiles) {
+        const refreshed = await deps.store.readTile(fine, normalisedAmenity);
+        if (refreshed) {
           recordResponse(fine.hash, {
-            response: cachedTile.payload.response,
-            fetchedAt: cachedTile.payload.fetchedAt
+            response: refreshed.payload.response,
+            fetchedAt: refreshed.payload.fetchedAt
           });
+        } else {
+          const cachedTile = cached.get(fine.hash);
+          if (cachedTile) {
+            recordResponse(fine.hash, {
+              response: cachedTile.payload.response,
+              fetchedAt: cachedTile.payload.fetchedAt
+            });
+          }
         }
       }
     }
+  };
+
+  // If the request can be entirely satisfied from cache, optionally prefer speed by returning stale
+  // data immediately and refreshing in the background. When cache coverage is incomplete—or when the
+  // feature is disabled—we await the refresh so responses reflect the latest attempted write.
+  if (deps.config.serveStaleFromCache && stale.length > 0 && missing.length === 0) {
+    void refreshStaleTiles(false).catch((error) =>
+      logger.warn({ err: error }, 'failed to refresh stale tiles in background')
+    );
+  } else {
+    await refreshStaleTiles(true);
   }
 
   const missingGroups = planTileFetches(missing, planOptions);

@@ -75,7 +75,7 @@ flowchart TD
 1. **Tile computation:** Detected bbox coordinates are expanded into geohash tiles at `TILE_PRECISION` (default 5). Duplicate hashes are removed.
 2. **Tile budget enforcement:** Requests requiring more than `MAX_TILES_PER_REQUEST` tiles raise a `TooManyTilesError`, returning HTTP 413 (default limit 1024 tiles so ToiletFinder’s ~70 km viewport and preload flows stay cacheable).
 3. **Cache lookup:** For each tile, Redis is queried in bulk. Stored payloads include `response`, `fetchedAt`, and `expiresAt` timestamps.
-4. **Stale tracking:** Tiles past their TTL are marked `stale` but still served immediately while triggering asynchronous refreshes guarded by a per-tile lock (SWR window `SWR_SECONDS`).
+4. **Stale tracking:** Tiles past their TTL are marked `stale`. By default (`SERVE_STALE_FROM_CACHE=true`) they are served immediately and refreshed asynchronously after the response using the same per-tile lock (SWR window `SWR_SECONDS`). Set `SERVE_STALE_FROM_CACHE=false` to refresh stale tiles synchronously before assembling the response.
 5. **Upstream fetch:** Missing tiles are fetched individually by issuing the canonical Overpass multi-entity bbox query (`node`, `way`, `relation`) via POST `application/x-www-form-urlencoded`, scoped to the specific amenity type supplied by the client.
 6. **Persistence:** Fresh tile responses are persisted with a TTL covering both the primary cache duration and SWR window, namespaced by amenity. Tile writes are batched per upstream response and flushed to Redis via `MULTI/EXEC` pipelines to avoid per-tile round trips.
 7. **Assembly:** All tile responses (cached or freshly fetched) are merged, deduplicated by `(type,id)`, filtered against the original bbox, and returned with `Content-Type: application/json`. The proxy also emits `X-Cache` headers (`HIT`, `STALE`, or `MISS`).
@@ -100,6 +100,8 @@ Environment-driven configuration is loaded at startup with sensible defaults:
 - `CACHE_TTL_SECONDS` and derived `SWR_SECONDS` (min 30s)
 - `TILE_PRECISION`
 - `MAX_TILES_PER_REQUEST`
+- `SERVE_STALE_FROM_CACHE` (serve stale cache entries immediately and refresh asynchronously when the cache fully covers the
+  request; otherwise refreshes are awaited synchronously)
 - `LOG_VERBOSITY` (errors/info/debug)
 - `NODE_ENV`
 - `UPSTREAM_DAILY_LIMIT` (-1 leaves requests unlimited, non-negative values enforce per-upstream daily quotas with 24h blocks)

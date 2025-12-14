@@ -5,6 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { extractBoundingBox } from '../../bbox.js';
 import { buildServer } from '../../index.js';
 import { tileKey, tilesForBoundingBox } from '../../tiling.js';
+import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
+import { createMockOverpass } from './mock-overpass.js';
 import { createTestEnvironment } from './testcontainers.js';
 
 const jsonQuery = '[out:json];node["amenity"="toilets"](52.5,13.3,52.6,13.4);out;';
@@ -148,26 +150,96 @@ describe('integration', () => {
     await redisClient?.flushall();
     hits.splice(0, hits.length);
 
-    const first = await request(baseUrl)
-      .post('/api/interpreter')
-      .set('Content-Type', 'application/x-www-form-urlencoded')
-      .send(formBody(jsonQuery))
-      .expect(200);
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5,
+        serveStaleFromCache: false
+      },
+      redisClient
+    });
 
-    const firstFetchedAt = new Date(first.headers['x-cache-fetched-at'] as string).getTime();
-    expect(firstFetchedAt).toBeGreaterThan(0);
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
 
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    try {
+      const first = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
 
-    const second = await request(baseUrl)
-      .post('/api/interpreter')
-      .set('Content-Type', 'application/x-www-form-urlencoded')
-      .send(formBody(jsonQuery))
-      .expect(200);
+      const firstFetchedAt = new Date(first.headers['x-cache-fetched-at'] as string).getTime();
+      expect(firstFetchedAt).toBeGreaterThan(0);
 
-    const secondFetchedAt = new Date(second.headers['x-cache-fetched-at'] as string).getTime();
-    expect(secondFetchedAt).toBeGreaterThan(firstFetchedAt);
-    expect(hits.length).toBeGreaterThan(1);
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      const second = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const secondFetchedAt = new Date(second.headers['x-cache-fetched-at'] as string).getTime();
+      expect(secondFetchedAt).toBeGreaterThan(firstFetchedAt);
+      expect(hits.length).toBeGreaterThan(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('serves stale cache immediately and refreshes in the background when configured', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5,
+        serveStaleFromCache: true
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      const first = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const firstFetchedAt = new Date(first.headers['x-cache-fetched-at'] as string).getTime();
+      const hitsAfterFirst = hits.length;
+
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      const second = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const secondFetchedAt = new Date(second.headers['x-cache-fetched-at'] as string).getTime();
+      expect(secondFetchedAt).toBe(firstFetchedAt);
+      expect(second.headers['x-cache']).toBe('STALE');
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(hits.length).toBeGreaterThan(hitsAfterFirst);
+    } finally {
+      await app.close();
+    }
   });
 
   it('serves stale cache entries when refresh fails upstream', async () => {
@@ -214,6 +286,74 @@ describe('integration', () => {
     } finally {
       resetResponder?.();
       await app.close();
+    }
+  });
+
+  it('falls back to another upstream when refreshing stale tiles in the background', async () => {
+    const primaryUpstream = createMockOverpass();
+    const secondaryUpstream = createMockOverpass();
+
+    await primaryUpstream.start(0);
+    await secondaryUpstream.start(0);
+
+    const primaryAddress = primaryUpstream.app.server.address();
+    const primaryPort = typeof primaryAddress === 'object' && primaryAddress ? primaryAddress.port : 0;
+    const primaryUrl = `http://127.0.0.1:${primaryPort}/api/interpreter`;
+
+    const secondaryAddress = secondaryUpstream.app.server.address();
+    const secondaryPort =
+      typeof secondaryAddress === 'object' && secondaryAddress ? secondaryAddress.port : 0;
+    const secondaryUrl = `http://127.0.0.1:${secondaryPort}/api/interpreter`;
+
+    const redis = new InMemoryRedis();
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls: [primaryUrl, secondaryUrl],
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5,
+        serveStaleFromCache: true
+      },
+      redisClient: redis as unknown as Redis
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const initialPrimaryHits = primaryUpstream.hits.length;
+      const initialSecondaryHits = secondaryUpstream.hits.length;
+
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      primaryUpstream.setResponder?.(() => ({ status: 500 }));
+
+      const second = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      expect(second.headers['x-cache']).toBe('STALE');
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(primaryUpstream.hits.length).toBeGreaterThanOrEqual(initialPrimaryHits);
+      expect(secondaryUpstream.hits.length).toBeGreaterThan(initialSecondaryHits);
+    } finally {
+      await app.close();
+      await redis.quit();
+      await primaryUpstream.stop();
+      await secondaryUpstream.stop();
     }
   });
 

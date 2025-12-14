@@ -19,6 +19,7 @@ services:
       # Caching and tiling
       # CACHE_TTL_SECONDS: 86400        # default 24h cache TTL
       # SWR_SECONDS: 8640               # default 10% of cache TTL; controls serve-stale window
+      # SERVE_STALE_FROM_CACHE: 'true'  # default true: serve stale entries immediately, refresh async
       # TILE_PRECISION: 5               # finer tiles served to clients
       # UPSTREAM_TILE_PRECISION: 3      # coarser tiles fetched from upstreams
       # MAX_TILES_PER_REQUEST: 1024     # safeguard for very large bbox requests
