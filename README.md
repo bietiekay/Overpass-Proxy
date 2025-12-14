@@ -53,6 +53,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `REDIS_URL` | `redis://redis:6379` | Redis connection URL |
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
+| `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
@@ -78,10 +79,13 @@ workflow is:
 - **Cache read:** all requested tile keys are fetched in a single Redis `mget`. Entries with `expiresAt` in the past are marked
   stale; missing entries are tracked separately. Cached tiles (fresh or stale) are added to the response immediately, and the
   cache disposition header (`X-Cache`) reports `HIT`, `STALE`, or `MISS` accordingly.
-- **Stale-while-revalidate:** tiles become stale when `expiresAt` crosses `CACHE_TTL_SECONDS` (default 86 400 seconds). Stale
-  tiles are still served but refreshed in the background. A per-tile lock (`tile:<amenity>:<hash>:lock`) held for
-  `SWR_SECONDS` (default one tenth of `CACHE_TTL_SECONDS`, with a 30-second floor) prevents duplicate refreshes. If the
-  refresh fails, the prior stale payload remains available.
+- **Stale-while-revalidate:** tiles become stale when `expiresAt` crosses `CACHE_TTL_SECONDS` (default 86 400 seconds). By
+  default (`SERVE_STALE_FROM_CACHE=true`), stale tiles are returned immediately and refreshed asynchronously after the
+  response is sent, prioritising speed over freshness. When a request contains any missing tiles—or when
+  `SERVE_STALE_FROM_CACHE=false`—the refresh path is awaited synchronously so the response only includes data written after a
+  refresh attempt. A per-tile lock (`tile:<amenity>:<hash>:lock`) held for `SWR_SECONDS` (default one tenth of
+  `CACHE_TTL_SECONDS`, with a 30-second floor) prevents duplicate refreshes. If the refresh fails, the prior stale payload
+  remains available.
 - **Handling misses:** missing tiles trigger synchronous upstream fetches. An inflight lock (`:inflight`) keeps concurrent
   callers from stampeding the same fetch. Late callers reuse the fresh write once it lands or fall back to waiting until the
   inflight window expires.
