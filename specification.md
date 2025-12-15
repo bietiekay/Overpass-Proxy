@@ -11,7 +11,7 @@ The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public
 - **Upstream communication:** `src/upstream.ts` provides helpers to proxy non-interpreter endpoints and to materialise amenity-scoped per-tile JSON queries from bbox coordinates.
 - **Response assembly:** `src/assemble.ts` deduplicates and merges cached tile payloads, retaining metadata and filtering by bbox.
 - **Supporting utilities:** `src/headers.ts` implements deterministic weak ETags and If-None-Match handling, `src/rateLimit.ts` offers a token-bucket primitive (currently unused but available for future upstream throttling), and `src/errors.ts` defines typed errors (e.g., `TooManyTilesError`).
-- **Statistics + time helpers:** `src/stats.ts` tracks per-amenity demand, cache status, and geohash coverage for the `/api/statistics` and `/api/statistics/cacheCoverage` endpoints, while `src/time.ts` exposes day-boundary helpers shared by statistics and upstream quota logic.
+- **Statistics + time helpers:** `src/stats.ts` tracks per-amenity demand, cache status, cache coverage, and per-amenity geohash coverage for the `/api/statistics`, `/api/statistics/cacheCoverage`, and `/api/statistics/geohashCoverage` endpoints, while `src/time.ts` exposes day-boundary helpers shared by statistics and upstream quota logic.
 - **Logging:** `src/logger.ts` exposes the shared Pino logger instance configured for structured output.
 
 ## 3. Request Classification Flow
@@ -48,10 +48,10 @@ flowchart TD
         O -->|Yes| Err413["Throw TooManyTilesError"]
         O -->|No| Lookup["Fetch tiles from Redis (store.ts)"]
         Lookup --> P{"All tiles fresh?"}
-        P -->|Yes| Assemble["Assemble payload (assemble.ts)"]
-        P -->|No| FetchTiles["Fetch upstream tiles (upstream.ts)"]
-        FetchTiles --> Persist["Persist refreshed tiles (store.ts)"]
-        Persist --> Assemble
+  P -->|Yes| Assemble["Assemble payload (assemble.ts)"]
+  P -->|No| FetchTiles["Fetch upstream tiles (upstream.ts)"]
+  FetchTiles --> Persist["Persist refreshed tiles (store.ts)"]
+  Persist --> Assemble
     end
 
     ProxyTransparent --> Upstream["Proxy non-interpreter request (upstream.ts)"]
@@ -75,15 +75,15 @@ flowchart TD
 1. **Tile computation:** Detected bbox coordinates are expanded into geohash tiles at `TILE_PRECISION` (default 5). Duplicate hashes are removed.
 2. **Tile budget enforcement:** Requests requiring more than `MAX_TILES_PER_REQUEST` tiles raise a `TooManyTilesError`, returning HTTP 413 (default limit 1024 tiles so ToiletFinder’s ~70 km viewport and preload flows stay cacheable).
 3. **Cache lookup:** For each tile, Redis is queried in bulk. Stored payloads include `response`, `fetchedAt`, and `expiresAt` timestamps.
-4. **Stale tracking:** Tiles past their TTL are marked `stale`. By default (`SERVE_STALE_FROM_CACHE=true`) they are served immediately and refreshed asynchronously after the response using the same per-tile lock (SWR window `SWR_SECONDS`). Set `SERVE_STALE_FROM_CACHE=false` to refresh stale tiles synchronously before assembling the response.
-5. **Upstream fetch:** Missing tiles are fetched individually by issuing the canonical Overpass multi-entity bbox query (`node`, `way`, `relation`) via POST `application/x-www-form-urlencoded`, scoped to the specific amenity type supplied by the client.
+4. **Stale tracking:** Tiles past their TTL are marked `stale`. When `SERVE_STALE_FROM_CACHE=true` and the request is fully satisfied by cached tiles, stale data is returned immediately and refreshed asynchronously via per-tile locks (SWR window `SWR_SECONDS`). When the request contains cache misses or `SERVE_STALE_FROM_CACHE=false`, stale tiles are refreshed before replying so the client receives the latest attempted write.
+5. **Upstream fetch:** Missing tiles are fetched individually by issuing the canonical Overpass multi-entity bbox query (`node`, `way`, `relation`) via POST `application/x-www-form-urlencoded`, scoped to the specific amenity type supplied by the client. If upstream fetches fail and missing tiles remain unresolved, the proxy returns HTTP 503 with cache metadata headers rather than serving partial stale data.
 6. **Persistence:** Fresh tile responses are persisted with a TTL covering both the primary cache duration and SWR window, namespaced by amenity. Tile writes are batched per upstream response and flushed to Redis via `MULTI/EXEC` pipelines to avoid per-tile round trips.
 7. **Assembly:** All tile responses (cached or freshly fetched) are merged, deduplicated by `(type,id)`, filtered against the original bbox, and returned with `Content-Type: application/json`. The proxy also emits `X-Cache` headers (`HIT`, `STALE`, or `MISS`).
 8. **Conditional delivery:** ETags are generated from the assembled JSON payload. Matching `If-None-Match` headers yield a 304 response with no body.
 
 ## 5. Transparent Proxy Behaviour
 - Non-interpreter `/api/*` endpoints (`/api/status`, `/api/timestamp`, `/api/timestamp/*`, `/api/kill_my_queries`, `/api/statistics`, `/api/statistics/cacheCoverage`, and arbitrary paths) are proxied verbatim when caching is disabled or the request falls outside amenity JSON bbox handling.
-- `/api/statistics` and `/api/statistics/cacheCoverage` are served locally, returning aggregated JSON metrics derived from the Redis-backed `RequestStatistics` service so data survives restarts.
+- `/api/statistics`, `/api/statistics/cacheCoverage`, and `/api/statistics/geohashCoverage` are served locally, returning aggregated JSON metrics derived from the Redis-backed `RequestStatistics` service so data survives restarts.
 - The proxy streams binary bodies without transformation, preserves upstream headers (excluding `host`), and relays upstream status codes. Errors contacting the upstream translate to HTTP 502 with a JSON error object.
 
 ## 6. Redis Data Model and SWR Locks
@@ -117,17 +117,18 @@ The async `buildServer` helper allows tests to override any configuration or inj
 - **Runtime:** `npm start` executes the compiled server; Fastify listens on `0.0.0.0:PORT`.
 - **Docker:** `Dockerfile` (Node 20 Alpine) and `docker-compose.yml` orchestrate the proxy alongside Redis (and mock Overpass in development scenarios).
 - **CI:** `.github/workflows/ci.yml` installs dependencies, runs linting, executes tests with coverage, and uploads reports.
-- **Observability:** Structured logs include contextual metadata (request IDs, error stacks) through Pino, aiding debugging across deployment targets. The Redis-persisted `/api/statistics` endpoint surfaces aggregated request metrics (total demand, amenity breakdowns, cache status, cache inventory counts, and hotspot geohashes) since the start of the current UTC day, even after restarts. Tile cache coverage is exposed separately at `/api/statistics/cacheCoverage`.
+- **Observability:** Structured logs include contextual metadata (request IDs, error stacks) through Pino, aiding debugging across deployment targets. The Redis-persisted `/api/statistics` endpoint surfaces aggregated request metrics (total demand, amenity breakdowns, cache status, cache inventory counts, and hotspot geohashes) since the start of the current UTC day, even after restarts. Tile cache coverage is exposed at `/api/statistics/cacheCoverage`, and per-amenity geohash coverage is available via `/api/statistics/geohashCoverage` for dashboards that only need hotspot shares.
 
 ## 10. Future Extensions
 - **Rate limiting:** `TokenBucket` utility enables cost-based upstream throttling if Overpass rate limits become a concern.
 - **Additional caching heuristics:** Parsing refinements could support more Overpass query variants or integrate element change tracking.
 - **Metrics and tracing:** Exporting Prometheus or OpenTelemetry metrics would complement logs for production observability.
 
-## 11. Request Statistics
+## 11. Request Statistics and Operations Dashboards
 - **Recording:** `RequestStatistics.recordRequest` captures amenity, client IP (normalised), bounding box, cache disposition (HIT/STALE/MISS), and tile count for every cacheable interpreter request. Statistics persist to Redis on every update so they remain available across restarts without resetting at day boundaries.
-- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts with a hit rate, cache inventory (total cached tiles and amenities), and per-amenity breakdowns including cache inventory, cache hit rates, geohash coverage (precision 4), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and preserves the persistence boundary in Redis. `getCacheCoverageSnapshot` returns the cached tile coverage snapshot, sorted by tile entries for `/api/statistics/cacheCoverage`.
-- **Endpoint:** `/api/statistics` returns the current snapshot as JSON, enabling external systems to monitor demand and tune cache pre-warming or upstream routing strategies with data that survives process restarts. `/api/statistics/cacheCoverage` serves the cached tile coverage separately for consumers that only need inventory detail.
+- **Aggregation:** `getSnapshot` produces totals for requests, tiles, unique clients, cache status counts with a hit rate, cache inventory (total cached tiles and amenities), and per-amenity breakdowns including cache inventory, cache hit rates, geohash coverage (precision 4), last-request timestamps, and average tile counts. The service also highlights the top ten geohash hotspots across all amenities and preserves the persistence boundary in Redis. `getCacheCoverageSnapshot` returns the cached tile coverage snapshot, sorted by tile entries for `/api/statistics/cacheCoverage`, and `getGeohashCoverageSnapshot` returns per-amenity geohash coverage shares without cache inventory payloads for `/api/statistics/geohashCoverage`.
+- **Endpoint:** `/api/statistics` returns the current snapshot as JSON, enabling external systems to monitor demand and tune cache pre-warming or upstream routing strategies with data that survives process restarts. `/api/statistics/cacheCoverage` serves the cached tile coverage separately for consumers that only need inventory detail, while `/api/statistics/geohashCoverage` exposes per-amenity coverage percentages for viewers that only need hotspot context.
+- **Operations dashboards:** `public/statistics-map.html` renders request hotspots, request coverage, and cache coverage overlays with progress feedback, deduplicated geohash entries, stale coverage colouring, and toggles for refreshing data or collapsing the upstream health panel. `public/cache-preheater.html` targets manual cache warmups with live progress and batching safeguards to reduce browser memory pressure during large runs.
 
 ## 12. Upstream Daily Request Limits
 - **Configuration:** `UPSTREAM_DAILY_LIMIT` controls the number of interpreter requests each upstream base URL can serve within a UTC day (`-1` keeps the quota unlimited). Once exhausted, the upstream is blocked for 24 hours.
