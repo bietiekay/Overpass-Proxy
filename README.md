@@ -18,7 +18,7 @@ adding Redis-backed geohash tile caching for amenity-focused JSON bounding-box q
 - Fastify-based HTTP server exposing the `/api/*` Overpass endpoints
 - Strict amenity-only handling for `/api/interpreter`; non-JSON or non-amenity queries are rejected with helpful errors, and recognised amenity filters are preserved end-to-end
 - Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh, segmented by requested amenity type and persisted via pipelined Redis bulk writes
-- Request statistics collected per amenity and exposed via JSON endpoints for observing hotspots and cache coverage
+- Request statistics collected per amenity and exposed via JSON endpoints for observing hotspots, cache coverage, and per-amenity geohash coverage
 - Structured logging via Pino
 - Configurable per-upstream daily request limits with automatic 24-hour lockouts once a quota is reached
 - Comprehensive Vitest unit and integration test suites
@@ -35,6 +35,7 @@ The proxy implements the core Overpass API endpoints:
 - `GET /api/timestamp` and `GET /api/timestamp/*`
 - `POST /api/kill_my_queries`
 - `GET /api/statistics`
+- `GET /api/statistics/geohashCoverage`
 - `GET /api/statistics/cacheCoverage`
 - Any other `/api/*` path is transparently proxied upstream
 
@@ -79,13 +80,13 @@ workflow is:
 - **Cache read:** all requested tile keys are fetched in a single Redis `mget`. Entries with `expiresAt` in the past are marked
   stale; missing entries are tracked separately. Cached tiles (fresh or stale) are added to the response immediately, and the
   cache disposition header (`X-Cache`) reports `HIT`, `STALE`, or `MISS` accordingly.
-- **Stale-while-revalidate:** tiles become stale when `expiresAt` crosses `CACHE_TTL_SECONDS` (default 86 400 seconds). By
-  default (`SERVE_STALE_FROM_CACHE=true`), stale tiles are returned immediately and refreshed asynchronously after the
-  response is sent, prioritising speed over freshness. When a request contains any missing tiles—or when
-  `SERVE_STALE_FROM_CACHE=false`—the refresh path is awaited synchronously so the response only includes data written after a
-  refresh attempt. A per-tile lock (`tile:<amenity>:<hash>:lock`) held for `SWR_SECONDS` (default one tenth of
-  `CACHE_TTL_SECONDS`, with a 30-second floor) prevents duplicate refreshes. If the refresh fails, the prior stale payload
-  remains available.
+- **Stale-while-revalidate:** tiles become stale when `expiresAt` crosses `CACHE_TTL_SECONDS` (default 86 400 seconds). When
+  `SERVE_STALE_FROM_CACHE=true`, fully cached requests return stale data immediately and refresh tiles asynchronously; any
+  request that includes cache misses—or has stale data with `SERVE_STALE_FROM_CACHE=false`—awaits a refresh before replying
+  so responses include the latest attempted writes. A per-tile lock (`tile:<amenity>:<hash>:lock`) held for `SWR_SECONDS`
+  (default one tenth of `CACHE_TTL_SECONDS`, with a 30-second floor) prevents duplicate refreshes. If upstream fetches fail
+  and the request cannot be fully resolved from cache, the proxy returns HTTP 503 with `X-Cache` and `X-Cache-Fetched-At`
+  headers rather than serving partial tiles.
 - **Handling misses:** missing tiles trigger synchronous upstream fetches. An inflight lock (`:inflight`) keeps concurrent
   callers from stampeding the same fetch. Late callers reuse the fresh write once it lands or fall back to waiting until the
   inflight window expires.
@@ -140,7 +141,7 @@ docker-compose up --build
 
 This starts the proxy along with Redis and a mock Overpass service used for integration tests.
 
-The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, and per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
 #### What the statistics include and how to use them
 
@@ -154,8 +155,8 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
 
 #### Retrieving statistics at runtime
 
-- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. Tile cache coverage is exposed separately at `GET /api/statistics/cacheCoverage` for clients that only need the cached tile breakdowns.
-- **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()` or `await stats.getCacheCoverageSnapshot()` to retrieve the structured data inside the process without another HTTP request.
+- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. Tile cache coverage is exposed separately at `GET /api/statistics/cacheCoverage` for clients that only need the cached tile breakdowns, and per-amenity geohash coverage is served at `GET /api/statistics/geohashCoverage` for viewers that visualise hotspots without inventory payloads.
+- **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()`, `await stats.getCacheCoverageSnapshot()`, or `await stats.getGeohashCoverageSnapshot()` to retrieve structured data inside the process without another HTTP request.
 - **Time window:** counters continue accumulating until cleared from Redis, so the snapshot survives restarts and day boundaries.
 
 ## Testing
@@ -195,4 +196,14 @@ curl -X POST http://localhost:8080/api/interpreter \
 ## Screenshots
 ![Example screenshot of the proxy cache coverage statistics map](screenshot/cache-coverage-statistic.png)
 ![Example screenshot of the proxy request hotspot statistics map](screenshot/request-hotspots-statistic.png)
+
+## Operations dashboards
+
+Two static dashboards ship in `public/` to help operators observe coverage and pre-warm tiles:
+
+- `public/statistics-map.html` shows request hotspots, request coverage, and cache coverage overlays with a progress bar,
+  deduplicated geohash overlays, stale coverage colouring, and a collapsible upstream health panel for diagnosing routing or
+  quota issues in real time. Use the dropdown to switch visualisations or the toggle to hide upstreams.
+- `public/cache-preheater.html` targets manual preload runs with live progress, error tracking, and memory-friendly batching so
+  large geohash ranges can be warmed without exhausting the browser.
 
