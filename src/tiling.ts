@@ -71,7 +71,8 @@ export const boundsForHash = (hash: string): BoundingBox => {
 export const tilesForBoundingBox = (bbox: BoundingBox, precision: number): TileInfo[] => {
   const hashes = ngeohash.bboxes(bbox.south, bbox.west, bbox.north, bbox.east, precision);
   const unique = new Set(hashes);
-  const merged = mergeGeohashes(unique, Math.max(1, precision - 1));
+  // Keep the configured precision to avoid mixing fresh writes with stale child tiles in coverage stats.
+  const merged = mergeGeohashes(unique, precision);
   return Array.from(merged).map((hash) => ({ hash, bounds: boundsForHash(hash) }));
 };
 

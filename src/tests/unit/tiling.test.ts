@@ -17,6 +17,15 @@ describe('tilesForBoundingBox', () => {
     expect(new Set(hashes).size).toEqual(hashes.length);
   });
 
+  it('keeps the configured precision to avoid collapsing refreshed tiles', () => {
+    const tiles = tilesForBoundingBox(boundsForHash('u'), 2);
+    const precisions = new Set(tiles.map((tile) => tile.hash.length));
+    expect(precisions).toEqual(new Set([2]));
+    expect(tiles.length).toBeGreaterThan(1);
+  });
+});
+
+describe('mergeGeohashes', () => {
   it('merges full child sets into parent geohashes before parsing', () => {
     const children = new Set(
       '0123456789bcdefghjkmnpqrstuvwxyz'.split('').map((symbol) => `u${symbol}`)
@@ -24,8 +33,5 @@ describe('tilesForBoundingBox', () => {
     const merged = mergeGeohashes(children, 1);
     expect(merged.size).toBe(1);
     expect(Array.from(merged)[0]).toBe('u');
-    const tiles = tilesForBoundingBox(boundsForHash('u'), 2);
-    const mergedTiles = tiles.map((tile) => tile.hash);
-    expect(new Set(mergedTiles).size).toBe(mergedTiles.length);
   });
 });
