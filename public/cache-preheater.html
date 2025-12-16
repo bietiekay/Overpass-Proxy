@@ -162,10 +162,6 @@
           </select>
         </div>
         <div>
-          <label for="maxTiles">Maximale neue Kacheln</label>
-          <input id="maxTiles" type="number" min="1" step="1" value="400" />
-        </div>
-        <div>
           <label for="concurrency">Gleichzeitige Anfragen</label>
           <input id="concurrency" type="number" min="1" max="16" value="4" />
         </div>
@@ -181,7 +177,8 @@
         </div>
       </div>
       <p style="color:var(--muted); margin-top:0.75rem;">
-        Der Ablauf lädt zuerst die Cache-Belegung, berechnet fehlende Land-Kacheln und feuert dann gezielt Overpass-Queries, um nur nicht belegte Bereiche zu erwärmen.
+        Der Ablauf lädt zuerst die Cache-Belegung, berechnet fehlende Land-Kacheln und feuert dann gezielt Overpass-Queries, um nur nicht belegte Bereiche zu erwärmen –
+        und iteriert dabei automatisch über alle Landflächen des Planeten in der gewählten Genauigkeit.
       </p>
     </section>
 
@@ -225,7 +222,6 @@
     const proxyUrlInput = byId('proxyUrl');
     const amenityInput = byId('amenity');
     const targetPrecisionInput = byId('targetPrecision');
-    const maxTilesInput = byId('maxTiles');
     const concurrencyInput = byId('concurrency');
     const timeoutInput = byId('timeout');
     const startButton = byId('startButton');
@@ -585,9 +581,9 @@
       const amenity = amenityInput.value.trim() || 'toilets';
       const targetPrecision = Number(targetPrecisionInput.value);
       const maxPrecision = Math.min(7, targetPrecision + 1);
-      const maxTiles = Number(maxTilesInput.value);
       const concurrency = Number(concurrencyInput.value);
       const timeoutMs = Number(timeoutInput.value) * 1000;
+      const queueTarget = Math.max(concurrency * 4, 64);
 
       if (!baseUrl) {
         alert('Bitte eine Proxy-URL angeben.');
@@ -604,6 +600,7 @@
         const cachedAny = new Map();
         const staleCandidatesByPrecision = new Map();
         let coverageEntries = 0;
+        let targetTiles = 0;
         coverageLabel.textContent = 'Cache-Statistik wird geladen…';
         coverageBar.style.width = '0%';
         updateCoverageBar(coverageEntries);
@@ -620,18 +617,27 @@
         let completed = 0;
         let failed = 0;
         let inFlight = 0;
-        const remainingPlanCapacity = () =>
-          Math.max(0, maxTiles - (completed + failed + inFlight + plannedQueue.length + staleQueue.length));
+        const queueBudget = () =>
+          Math.max(0, queueTarget - (plannedQueue.length + staleQueue.length + inFlight));
+        const cachedTileCount = () => cachedAny.get(targetPrecision)?.size ?? 0;
 
         const refreshStats = () => {
           const counts = planner.getCounts();
+          targetTiles = Math.max(targetTiles, counts.missingCount);
           landCandidatesEl.textContent = counts.candidates.toLocaleString();
           missingCountEl.textContent = counts.missingCount.toLocaleString();
-          preheatLabel.textContent = `Geplant: ${plannedCount.toLocaleString()} / ${maxTiles.toLocaleString()} (Präzision ${planner.getActivePrecision()})`;
+          const totalLabel = targetTiles > 0 ? targetTiles.toLocaleString() : '…';
+          preheatLabel.textContent = `Geplant: ${plannedCount.toLocaleString()} / ${totalLabel} (Präzision ${planner.getActivePrecision()})`;
+        };
+
+        const updatePreheatProgress = () => {
+          const outstanding = plannedQueue.length + staleQueue.length + inFlight;
+          const total = Math.max(targetTiles, completed + failed + outstanding);
+          updateProgress(preheatBar, preheatLabel, completed + failed, total, 'Vorwärmen');
         };
 
         const enqueuePlan = () => {
-          const capacity = remainingPlanCapacity();
+          const capacity = queueBudget();
           if (plannerFinished || capacity <= 0) return;
           const { planned, done, promoted } = planner.planBatch(capacity, 4000);
           plannerFinished = done;
@@ -685,7 +691,7 @@
             }
             coverageEntries += 1;
             updateCoverageBar(coverageEntries);
-            if (plannedQueue.length < concurrency * 2 && remainingPlanCapacity() > 0) {
+            if (queueBudget() > 0) {
               enqueuePlan();
             }
           },
@@ -695,13 +701,15 @@
           coverageBar.style.width = '100%';
           updateCoverageBar(coverageEntries, 'fertig');
           enqueuePlan();
-          cachedCountEl.textContent = cachedAny.size.toLocaleString();
-          log(`Geladene Cache-Kacheln: ${cachedAny.size.toLocaleString()}`);
+          cachedCountEl.textContent = cachedTileCount().toLocaleString();
+          log(`Geladene Cache-Kacheln: ${cachedTileCount().toLocaleString()}`);
+          refreshStats();
+          updatePreheatProgress();
         });
 
         const fillStaleQueue = () => {
           if (!coverageFinished) return;
-          const capacity = remainingPlanCapacity();
+          const capacity = queueBudget();
           if (capacity <= 0) return;
           const activePrecision = planner.getActivePrecision();
           const candidates = staleCandidatesByPrecision.get(activePrecision);
@@ -717,13 +725,21 @@
 
         enqueuePlan();
         refreshStats();
+        updatePreheatProgress();
 
         let stopped = false;
+
+        const noWorkLeft = () =>
+          plannerFinished &&
+          coverageFinished &&
+          plannedQueue.length === 0 &&
+          staleQueue.length === 0 &&
+          inFlight === 0;
 
         const tick = async () => {
           while (true) {
             if (stopped || stopRequested || signal.aborted) return;
-            if (completed + failed >= maxTiles) return;
+            if (noWorkLeft()) return;
 
             const missingDepleted = plannerFinished && plannedQueue.length === 0;
             if (missingDepleted && staleQueue.length === 0) {
@@ -731,11 +747,11 @@
             }
 
             if (plannedQueue.length === 0 && staleQueue.length === 0) {
-              if (!plannerFinished && remainingPlanCapacity() > 0) {
+              if (!plannerFinished && queueBudget() > 0) {
                 enqueuePlan();
               }
               if (plannedQueue.length === 0 && staleQueue.length === 0) {
-                if ((plannerFinished && coverageFinished) || remainingPlanCapacity() === 0) return;
+                if (noWorkLeft()) return;
                 await wait(50);
                 continue;
               }
@@ -748,7 +764,7 @@
               isStaleJob = Boolean(job);
             }
             if (!job) {
-              if (plannerFinished || remainingPlanCapacity() === 0) return;
+              if (noWorkLeft()) return;
               await wait(20);
               continue;
             }
@@ -759,6 +775,7 @@
             try {
               await sendPreheatRequest({ baseUrl, amenity, hash: job.hash, timeoutMs, signal });
               completed += 1;
+              planner.markCached(job.precision, job.normalized);
               requestsDoneEl.textContent = completed.toLocaleString();
               log(
                 isStaleJob
@@ -772,7 +789,8 @@
             } finally {
               inFlight -= 1;
               inFlightEl.textContent = inFlight.toString();
-              updateProgress(preheatBar, preheatLabel, completed + failed, maxTiles, 'Prewarming');
+              refreshStats();
+              updatePreheatProgress();
             }
           }
         };
@@ -783,7 +801,9 @@
         await coveragePromise;
         stopped = true;
         statusText.textContent =
-          completed + failed >= maxTiles ? 'Zielanzahl erreicht' : 'Durchlauf beendet';
+          noWorkLeft() && completed + failed > 0
+            ? 'Alle nicht gecachten Land-Kacheln verarbeitet'
+            : 'Durchlauf beendet';
       } catch (error) {
         if ((error && error.name === 'AbortError') || stopRequested) {
           statusText.textContent = 'Abgebrochen';
