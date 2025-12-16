@@ -249,6 +249,15 @@
     let landGeometry = null;
     let abortController = null;
     let stopRequested = false;
+    const precisionKey = (precision, hash) => `${precision}:${hash}`;
+    const ensureSet = (map, precision) => {
+      let set = map.get(precision);
+      if (!set) {
+        set = new Set();
+        map.set(precision, set);
+      }
+      return set;
+    };
 
     const log = (message) => {
       const p = document.createElement('p');
@@ -439,32 +448,74 @@
       }
     };
 
-    const createLandPlanner = async (targetPrecision, cached, signal) => {
+    const createLandPlanner = async (initialPrecision, maxPrecision, cachedByPrecision, signal) => {
       await loadLandGeometry(signal);
       const seeds = ngeohash.bboxes(-90, -180, 90, 180, 2);
       const queue = [...seeds];
       let candidates = 0;
+      let activePrecision = initialPrecision;
       const missingSet = new Set();
+      const landByPrecision = new Map();
+      const landSeen = new Set();
+      const cacheKey = (precision, hash) => precisionKey(precision, hash);
+      const cachedAtPrecision = (precision, hash) =>
+        cachedByPrecision.get(precision)?.has(hash) ?? false;
+      const promotePrecision = () => {
+        if (activePrecision >= maxPrecision) {
+          return false;
+        }
+        const landBuckets = landByPrecision.get(activePrecision);
+        if (!landBuckets || landBuckets.size === 0) {
+          return false;
+        }
+        const next = [];
+        for (const parent of landBuckets) {
+          for (const char of base32) {
+            next.push(`${parent}${char}`);
+          }
+        }
+        activePrecision += 1;
+        queue.push(...next);
+        return true;
+      };
 
       const planBatch = (maxPlan, iterationLimit = 2000) => {
         const planned = [];
         let iterations = 0;
+        let promoted = false;
+        let exhausted = false;
 
-        while (queue.length > 0 && planned.length < maxPlan && iterations < iterationLimit) {
+        while (planned.length < maxPlan && iterations < iterationLimit) {
           iterations += 1;
           if (signal?.aborted) {
             throw new DOMException('Aborted', 'AbortError');
           }
 
-          const hash = queue.pop();
-          if (!hash || !isLandHash(hash)) continue;
+          if (queue.length === 0) {
+            if (!promotePrecision()) {
+              exhausted = true;
+              break;
+            }
+            promoted = true;
+            continue;
+          }
 
-          if (hash.length >= targetPrecision) {
-            candidates += 1;
-            const normalized = hash.slice(0, targetPrecision);
-            if (!cached.has(normalized)) {
-              missingSet.add(normalized);
-              planned.push(hash);
+          const hash = queue.pop();
+          if (!hash) continue;
+
+          if (!isLandHash(hash)) continue;
+
+          if (hash.length >= activePrecision) {
+            const normalized = hash.slice(0, activePrecision);
+            ensureSet(landByPrecision, activePrecision).add(normalized);
+            const key = cacheKey(activePrecision, normalized);
+            if (!landSeen.has(key)) {
+              landSeen.add(key);
+              candidates += 1;
+            }
+            if (!cachedAtPrecision(activePrecision, normalized)) {
+              missingSet.add(key);
+              planned.push({ hash, precision: activePrecision, normalized });
             }
             continue;
           }
@@ -474,21 +525,29 @@
           }
         }
 
+        const done = exhausted || (queue.length === 0 && activePrecision >= maxPrecision);
+
         return {
           planned,
           candidates,
           missingCount: missingSet.size,
-          done: queue.length === 0
+          done,
+          activePrecision,
+          promoted
         };
       };
 
-      const markCached = (normalized) => {
-        if (missingSet.delete(normalized)) {
-          // Keep missingCount in sync with discovered cache entries.
-        }
+      const markCached = (precision, normalized) => {
+        missingSet.delete(cacheKey(precision, normalized));
       };
 
-      return { planBatch, markCached, getCounts: () => ({ candidates, missingCount: missingSet.size }) };
+      return {
+        planBatch,
+        markCached,
+        getCounts: () => ({ candidates, missingCount: missingSet.size }),
+        getActivePrecision: () => activePrecision,
+        getMaxPrecision: () => maxPrecision
+      };
     };
 
     const sendPreheatRequest = async ({ baseUrl, amenity, hash, timeoutMs, signal }) => {
@@ -525,6 +584,7 @@
       const baseUrl = proxyUrlInput.value.trim();
       const amenity = amenityInput.value.trim() || 'toilets';
       const targetPrecision = Number(targetPrecisionInput.value);
+      const maxPrecision = Math.min(7, targetPrecision + 1);
       const maxTiles = Number(maxTilesInput.value);
       const concurrency = Number(concurrencyInput.value);
       const timeoutMs = Number(timeoutInput.value) * 1000;
@@ -541,21 +601,19 @@
       const signal = abortController.signal;
 
       try {
-        const cachedAny = new Set();
-        const cachedFresh = new Set();
-        const cachedStale = new Set();
+        const cachedAny = new Map();
+        const staleCandidatesByPrecision = new Map();
         let coverageEntries = 0;
         coverageLabel.textContent = 'Cache-Statistik wird geladen…';
         coverageBar.style.width = '0%';
         updateCoverageBar(coverageEntries);
 
         statusText.textContent = 'Starte Planung und Vorwärmung…';
-        const planner = await createLandPlanner(targetPrecision, cachedAny, signal);
+        const planner = await createLandPlanner(targetPrecision, maxPrecision, cachedAny, signal);
         const plannedQueue = [];
         const staleQueue = [];
         const plannedSet = new Set();
         const stalePlannedSet = new Set();
-        const staleCandidates = new Set();
         let plannerFinished = false;
         let coverageFinished = false;
         let plannedCount = 0;
@@ -569,38 +627,41 @@
           const counts = planner.getCounts();
           landCandidatesEl.textContent = counts.candidates.toLocaleString();
           missingCountEl.textContent = counts.missingCount.toLocaleString();
-          preheatLabel.textContent = `Geplant: ${plannedCount.toLocaleString()} / ${maxTiles.toLocaleString()}`;
+          preheatLabel.textContent = `Geplant: ${plannedCount.toLocaleString()} / ${maxTiles.toLocaleString()} (Präzision ${planner.getActivePrecision()})`;
         };
 
         const enqueuePlan = () => {
           const capacity = remainingPlanCapacity();
           if (plannerFinished || capacity <= 0) return;
-          const { planned, done } = planner.planBatch(capacity, 4000);
+          const { planned, done, promoted } = planner.planBatch(capacity, 4000);
           plannerFinished = done;
 
-          for (const hash of planned) {
-            const normalized = hash.slice(0, targetPrecision);
-            if (plannedSet.has(normalized)) continue;
-            plannedSet.add(normalized);
-            plannedQueue.push(hash);
+          for (const job of planned) {
+            const planKey = precisionKey(job.precision, job.normalized);
+            if (plannedSet.has(planKey)) continue;
+            plannedSet.add(planKey);
+            plannedQueue.push(job);
             plannedCount += 1;
+          }
+          if (promoted) {
+            statusText.textContent = `Keine fehlenden Kacheln auf Präzision ${planner.getActivePrecision() - 1}, verfeinere auf ${planner.getActivePrecision()} …`;
           }
           refreshStats();
         };
 
         const takeNextHash = () => {
           while (plannedQueue.length > 0) {
-            const hash = plannedQueue.shift();
-            if (!hash) continue;
-            const normalized = hash.slice(0, targetPrecision);
-            if (cachedAny.has(normalized)) {
-              if (plannedSet.delete(normalized)) {
+            const job = plannedQueue.shift();
+            if (!job) continue;
+            const cached = cachedAny.get(job.precision);
+            if (cached?.has(job.normalized)) {
+              if (plannedSet.delete(precisionKey(job.precision, job.normalized))) {
                 plannedCount = Math.max(0, plannedCount - 1);
                 refreshStats();
               }
               continue;
             }
-            return hash;
+            return job;
           }
           return null;
         };
@@ -608,20 +669,20 @@
         const coveragePromise = streamCacheCoverage(
           baseUrl,
           (entry) => {
-            const normalized = entry.geohash.slice(0, targetPrecision);
-            if (normalized.length === 0) return;
+            const maxCachePrecision = Math.min(planner.getMaxPrecision(), entry.geohash.length);
+            if (maxCachePrecision === 0) return;
             const hasFresh = (entry.entries ?? 0) > 0 || (entry.amenityItems ?? 0) > 0;
             const hasStale = (entry.staleEntries ?? 0) > 0 || (entry.staleAmenityItems ?? 0) > 0;
-            if (hasFresh) {
-              cachedAny.add(normalized);
-              cachedFresh.add(normalized);
+            for (let precision = targetPrecision; precision <= maxCachePrecision; precision += 1) {
+              const normalized = entry.geohash.slice(0, precision);
+              ensureSet(cachedAny, precision).add(normalized);
+              if (hasStale) {
+                ensureSet(staleCandidatesByPrecision, precision).add(normalized);
+              }
+              if (hasFresh || hasStale) {
+                planner.markCached(precision, normalized);
+              }
             }
-            if (hasStale) {
-              cachedAny.add(normalized);
-              cachedStale.add(normalized);
-              staleCandidates.add(normalized);
-            }
-            planner.markCached(normalized);
             coverageEntries += 1;
             updateCoverageBar(coverageEntries);
             if (plannedQueue.length < concurrency * 2 && remainingPlanCapacity() > 0) {
@@ -642,10 +703,14 @@
           if (!coverageFinished) return;
           const capacity = remainingPlanCapacity();
           if (capacity <= 0) return;
-          for (const hash of staleCandidates) {
-            if (stalePlannedSet.has(hash)) continue;
-            stalePlannedSet.add(hash);
-            staleQueue.push(hash);
+          const activePrecision = planner.getActivePrecision();
+          const candidates = staleCandidatesByPrecision.get(activePrecision);
+          if (!candidates) return;
+          for (const hash of candidates) {
+            const key = precisionKey(activePrecision, hash);
+            if (stalePlannedSet.has(key)) continue;
+            stalePlannedSet.add(key);
+            staleQueue.push({ hash, precision: activePrecision, normalized: hash });
             if (staleQueue.length >= capacity) break;
           }
         };
@@ -676,13 +741,13 @@
               }
             }
 
-            let hash = takeNextHash();
+            let job = takeNextHash();
             let isStaleJob = false;
-            if (!hash && staleQueue.length > 0 && (plannerFinished || coverageFinished)) {
-              hash = staleQueue.shift() ?? null;
-              isStaleJob = Boolean(hash);
+            if (!job && staleQueue.length > 0 && (plannerFinished || coverageFinished)) {
+              job = staleQueue.shift() ?? null;
+              isStaleJob = Boolean(job);
             }
-            if (!hash) {
+            if (!job) {
               if (plannerFinished || remainingPlanCapacity() === 0) return;
               await wait(20);
               continue;
@@ -692,14 +757,18 @@
             inFlightEl.textContent = inFlight.toString();
 
             try {
-              await sendPreheatRequest({ baseUrl, amenity, hash, timeoutMs, signal });
+              await sendPreheatRequest({ baseUrl, amenity, hash: job.hash, timeoutMs, signal });
               completed += 1;
               requestsDoneEl.textContent = completed.toLocaleString();
-              log(isStaleJob ? `Stale-Kachel ${hash} erneuert` : `Kachel ${hash} erwärmt`);
+              log(
+                isStaleJob
+                  ? `Stale-Kachel ${job.hash} (Präzision ${job.precision}) erneuert`
+                  : `Kachel ${job.hash} (Präzision ${job.precision}) erwärmt`
+              );
             } catch (error) {
               failed += 1;
               requestsFailedEl.textContent = failed.toLocaleString();
-              log(`Fehler für ${hash}: ${error.message || error}`);
+              log(`Fehler für ${job.hash}: ${error.message || error}`);
             } finally {
               inFlight -= 1;
               inFlightEl.textContent = inFlight.toString();
