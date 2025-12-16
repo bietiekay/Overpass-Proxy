@@ -265,6 +265,177 @@
       color: #f87171;
       background: rgba(248, 113, 113, 0.1);
     }
+
+    .settings-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .settings-button:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .settings-icon {
+      width: 1.1rem;
+      height: 1.1rem;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 150ms ease;
+    }
+
+    .modal-overlay.visible {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .modal {
+      background: var(--panel-bg);
+      color: var(--panel-text);
+      padding: 1.5rem;
+      border-radius: 0.5rem;
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+      width: 100%;
+      max-width: 28rem;
+      max-height: 90vh;
+      overflow-y: auto;
+      transform: scale(0.95);
+      transition: transform 150ms ease;
+    }
+
+    .modal-overlay.visible .modal {
+      transform: scale(1);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .modal-title {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 0.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 0.25rem;
+      transition: background 150ms ease, color 150ms ease;
+    }
+
+    .modal-close:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--panel-text);
+    }
+
+    .modal-close-icon {
+      width: 1.25rem;
+      height: 1.25rem;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .modal-form {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .form-label {
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: var(--panel-text);
+    }
+
+    .form-input {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--panel-text);
+      padding: 0.5rem 0.75rem;
+      border-radius: 0.4rem;
+      font-size: 0.95rem;
+      font-family: inherit;
+      transition: border-color 150ms ease, background 150ms ease;
+    }
+
+    .form-input:focus {
+      outline: none;
+      border-color: var(--accent);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .form-help {
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 0.75rem;
+      justify-content: flex-end;
+      margin-top: 0.5rem;
+    }
+
+    .modal-actions button {
+      min-width: 5rem;
+    }
+
+    .button-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .button-primary:hover {
+      background: #ff7d4d;
+      border-color: #ff7d4d;
+    }
   </style>
 </head>
 <body>
@@ -281,6 +452,12 @@
       </label>
       <button id="refresh">Refresh data</button>
       <button id="toggle-upstreams" aria-pressed="true">Hide upstreams</button>
+      <button id="settings" class="settings-button" aria-label="Settings" title="Settings">
+        <svg class="settings-icon" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M12 1v6m0 6v6m9-9h-6m-6 0H3m15.364 6.364l-4.243-4.243m-4.242 0l-4.243 4.243m9.9-9.9l-4.243 4.243m-4.242 0L5.636 5.636"></path>
+        </svg>
+      </button>
       <span id="status" class="status">Loading statistics…</span>
       <div id="progress" class="progress-wrapper hidden" role="status" aria-live="polite">
         <div class="progress-track" aria-hidden="true">
@@ -305,6 +482,39 @@
       <span id="upstream-updated" class="status"></span>
     </div>
     <ul id="upstreams" class="upstreams-list"></ul>
+  </div>
+
+  <div id="settings-modal" class="modal-overlay" role="dialog" aria-labelledby="modal-title" aria-hidden="true">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="modal-title" class="modal-title">Settings</h2>
+        <button class="modal-close" aria-label="Close" title="Close">
+          <svg class="modal-close-icon" viewBox="0 0 24 24">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <form class="modal-form" id="settings-form">
+        <div class="form-group">
+          <label for="server-url" class="form-label">Server URL</label>
+          <input
+            type="text"
+            id="server-url"
+            class="form-input"
+            placeholder="Leave empty for default (relative URLs)"
+            autocomplete="off"
+          />
+          <div class="form-help">
+            Base URL for API requests. Leave empty to use relative URLs (default).
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="settings-cancel">Cancel</button>
+          <button type="submit" id="settings-save" class="button-primary">Save</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <script
@@ -362,11 +572,42 @@
     const progressEl = document.getElementById('progress');
     const progressBarEl = document.getElementById('progress-bar');
     const progressLabelEl = document.getElementById('progress-label');
+    const settingsButton = document.getElementById('settings');
+    const settingsModal = document.getElementById('settings-modal');
+    const settingsForm = document.getElementById('settings-form');
+    const serverUrlInput = document.getElementById('server-url');
+    const settingsCancel = document.getElementById('settings-cancel');
+    const settingsSave = document.getElementById('settings-save');
     let latestSnapshot = null;
     let latestCacheCoverage = [];
     let latestGeohashCoverage = [];
     const geohashBoundsCache = new Map();
     const upstreamPanelStorageKey = 'overpass-proxy.upstreams-panel.visible';
+    const serverUrlStorageKey = 'overpass-proxy.server-url';
+
+    const getServerUrl = () => {
+      const stored = localStorage.getItem(serverUrlStorageKey);
+      return stored ? stored.trim() : '';
+    };
+
+    const setServerUrl = (url) => {
+      const trimmed = url ? url.trim() : '';
+      if (trimmed) {
+        localStorage.setItem(serverUrlStorageKey, trimmed);
+      } else {
+        localStorage.removeItem(serverUrlStorageKey);
+      }
+    };
+
+    const buildApiUrl = (path) => {
+      const baseUrl = getServerUrl();
+      if (!baseUrl) {
+        return path;
+      }
+      const base = baseUrl.replace(/\/$/, '');
+      const apiPath = path.startsWith('/') ? path : `/${path}`;
+      return `${base}${apiPath}`;
+    };
 
     const demoSnapshot = {
       generatedAt: new Date().toISOString(),
@@ -598,7 +839,9 @@
         }
 
         for (const bucket of byLength.values()) {
-          mergedEntries.push(...bucket.values());
+          for (const entry of bucket.values()) {
+            mergedEntries.push(entry);
+          }
         }
       }
 
@@ -1120,7 +1363,7 @@
 
     const fetchStatistics = async () => {
       try {
-        const response = await fetch('/api/statistics', { cache: 'no-store' });
+        const response = await fetch(buildApiUrl('/api/statistics'), { cache: 'no-store' });
         if (!response.ok) throw new Error('Request failed');
         const snapshot = await response.json();
         latestSnapshot = snapshot;
@@ -1138,7 +1381,7 @@
 
     const fetchCacheCoverage = async () => {
       try {
-        const response = await fetch('/api/statistics/cacheCoverage', { cache: 'no-store' });
+        const response = await fetch(buildApiUrl('/api/statistics/cacheCoverage'), { cache: 'no-store' });
         if (!response.ok) throw new Error('Request failed');
         const snapshot = await response.json();
         latestCacheCoverage = snapshot.cacheCoverage ?? [];
@@ -1152,7 +1395,7 @@
 
     const fetchGeohashCoverage = async () => {
       try {
-        const response = await fetch('/api/statistics/geohashCoverage', { cache: 'no-store' });
+        const response = await fetch(buildApiUrl('/api/statistics/geohashCoverage'), { cache: 'no-store' });
         if (!response.ok) throw new Error('Request failed');
         const snapshot = await response.json();
         latestGeohashCoverage = snapshot.geohashCoverage ?? [];
@@ -1180,6 +1423,46 @@
         await hideProgress('Ready');
       }
     };
+
+    const openSettingsModal = () => {
+      serverUrlInput.value = getServerUrl();
+      settingsModal.classList.add('visible');
+      settingsModal.setAttribute('aria-hidden', 'false');
+      serverUrlInput.focus();
+    };
+
+    const closeSettingsModal = () => {
+      settingsModal.classList.remove('visible');
+      settingsModal.setAttribute('aria-hidden', 'true');
+    };
+
+    settingsButton.addEventListener('click', () => {
+      openSettingsModal();
+    });
+
+    settingsForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const url = serverUrlInput.value.trim();
+      setServerUrl(url);
+      closeSettingsModal();
+      void refreshData();
+    });
+
+    settingsCancel.addEventListener('click', () => {
+      closeSettingsModal();
+    });
+
+    settingsModal.addEventListener('click', (e) => {
+      if (e.target === settingsModal) {
+        closeSettingsModal();
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && settingsModal.classList.contains('visible')) {
+        closeSettingsModal();
+      }
+    });
 
     modeSelect.addEventListener('change', () => {
       void applyMode();
