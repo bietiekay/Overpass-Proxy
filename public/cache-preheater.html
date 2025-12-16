@@ -546,17 +546,20 @@
         let completed = 0;
         let failed = 0;
         let inFlight = 0;
+        const remainingPlanCapacity = () =>
+          Math.max(0, maxTiles - (completed + failed + inFlight + plannedQueue.length));
 
         const refreshStats = () => {
           const counts = planner.getCounts();
           landCandidatesEl.textContent = counts.candidates.toLocaleString();
           missingCountEl.textContent = counts.missingCount.toLocaleString();
-          preheatLabel.textContent = `Plane ${plannedCount.toLocaleString()} Kacheln`;
+          preheatLabel.textContent = `Geplant: ${plannedCount.toLocaleString()} / ${maxTiles.toLocaleString()}`;
         };
 
-        const enqueuePlan = (maxPlan) => {
-          if (plannerFinished || plannedCount >= maxPlan) return;
-          const { planned, done } = planner.planBatch(maxPlan - plannedCount, 4000);
+        const enqueuePlan = () => {
+          const capacity = remainingPlanCapacity();
+          if (plannerFinished || capacity <= 0) return;
+          const { planned, done } = planner.planBatch(capacity, 4000);
           plannerFinished = done;
 
           for (const hash of planned) {
@@ -595,31 +598,37 @@
             planner.markCached(normalized);
             coverageEntries += 1;
             updateCoverageBar(coverageEntries);
-            if (plannedQueue.length < concurrency * 2 && plannedCount < maxTiles) {
-              enqueuePlan(Math.max(1, maxTiles));
+            if (plannedQueue.length < concurrency * 2 && remainingPlanCapacity() > 0) {
+              enqueuePlan();
             }
           },
           signal
         ).then(() => {
           coverageBar.style.width = '100%';
           updateCoverageBar(coverageEntries, 'fertig');
-          enqueuePlan(Math.max(1, maxTiles));
+          enqueuePlan();
           cachedCountEl.textContent = cached.size.toLocaleString();
           log(`Geladene Cache-Kacheln: ${cached.size.toLocaleString()}`);
         });
 
-        enqueuePlan(Math.max(1, maxTiles));
+        enqueuePlan();
         refreshStats();
 
         let stopped = false;
 
         const tick = async () => {
           if (stopped || stopRequested || signal.aborted) return;
+          if (completed + failed >= maxTiles) return;
+          if (plannedQueue.length === 0 && remainingPlanCapacity() > 0) {
+            enqueuePlan();
+          }
           const hash = takeNextHash();
           if (!hash) {
-            if (!plannerFinished || plannedCount < maxTiles) {
-              enqueuePlan(Math.max(1, maxTiles));
-              return tick();
+            if (!plannerFinished && remainingPlanCapacity() > 0) {
+              enqueuePlan();
+              if (plannedQueue.length > 0) {
+                return tick();
+              }
             }
             return;
           }
@@ -639,12 +648,14 @@
           } finally {
             inFlight -= 1;
             inFlightEl.textContent = inFlight.toString();
-            updateProgress(preheatBar, preheatLabel, completed + failed, plannedCount || 1, 'Prewarming');
-            if (!stopped) {
-              if (plannedQueue.length < concurrency && plannedCount < maxTiles) {
-                enqueuePlan(Math.max(1, maxTiles));
+            updateProgress(preheatBar, preheatLabel, completed + failed, maxTiles, 'Prewarming');
+            if (!stopped && completed + failed < maxTiles) {
+              if (plannedQueue.length < concurrency && remainingPlanCapacity() > 0) {
+                enqueuePlan();
               }
-              void tick();
+              if (plannedQueue.length > 0 || (!plannerFinished && remainingPlanCapacity() > 0)) {
+                void tick();
+              }
             }
           }
         };
@@ -654,7 +665,8 @@
         await Promise.all(workers);
         await coveragePromise;
         stopped = true;
-        statusText.textContent = 'Durchlauf beendet';
+        statusText.textContent =
+          completed + failed >= maxTiles ? 'Zielanzahl erreicht' : 'Durchlauf beendet';
       } catch (error) {
         if ((error && error.name === 'AbortError') || stopRequested) {
           statusText.textContent = 'Abgebrochen';
