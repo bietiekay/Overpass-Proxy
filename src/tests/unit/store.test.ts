@@ -147,4 +147,41 @@ describe('TileStore', () => {
     expect(restoredStore.countCachedAmenityTypes()).toBe(2);
     expect(restoredStore.countCachedAmenities()).toBe(2);
   });
+
+  it('does not delete newer refresh locks when the token changes mid-refresh', async () => {
+    const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 60, swrSeconds: 1 });
+    const lockKey = `${tileKey(tile.hash, 'toilets')}:lock`;
+
+    await store.withRefreshLock(tile, 'toilets', async () => {
+      await redis.del(lockKey);
+      await redis.set(lockKey, 'new-token', 'PX', 1_000);
+    });
+
+    expect(await redis.get(lockKey)).toBe('new-token');
+  });
+
+  it('notifies miss-lock waiters immediately when the handler fails', async () => {
+    const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 60, swrSeconds: 1 });
+
+    const failing = store.withMissLock(
+      tile,
+      'toilets',
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        throw new Error('upstream failure');
+      },
+      200
+    );
+
+    const start = Date.now();
+    const waiter = store.withMissLock(tile, 'toilets', async () => {}, 200);
+
+    const [first, second] = await Promise.allSettled([failing, waiter]);
+    const durationMs = Date.now() - start;
+
+    expect(first.status).toBe('rejected');
+    expect(second.status).toBe('fulfilled');
+    expect(second.value).toBe('waited');
+    expect(durationMs).toBeLessThan(150);
+  });
 });

@@ -23,6 +23,18 @@ describe('tilesForBoundingBox', () => {
     expect(precisions).toEqual(new Set([2]));
     expect(tiles.length).toBeGreaterThan(1);
   });
+
+  it('throws for invalid bounding boxes', () => {
+    expect(() =>
+      tilesForBoundingBox({ south: 2, west: 1, north: 1, east: 2 }, 5)
+    ).toThrow(/Invalid bounding box/);
+    expect(() =>
+      tilesForBoundingBox(
+        { south: Number.NEGATIVE_INFINITY, west: 0, north: 1, east: 1 },
+        5
+      )
+    ).toThrow(/Invalid bounding box/);
+  });
 });
 
 describe('mergeGeohashes', () => {

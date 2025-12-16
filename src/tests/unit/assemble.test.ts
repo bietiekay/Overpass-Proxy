@@ -8,21 +8,25 @@ const sample = {
   osm3s: {},
   elements: [
     { type: 'node', id: 1, lat: 1, lon: 1, tags: { amenity: 'cafe' } },
-    { type: 'way', id: 2, nodes: [1, 2] }
+    { type: 'node', id: 2, lat: 2, lon: 2, tags: { amenity: 'bar' } },
+    { type: 'way', id: 3, nodes: [1] },
+    { type: 'way', id: 4, nodes: [2, 99] },
+    { type: 'relation', id: 5, members: [{ type: 'node', ref: 1, role: 'outer' }] },
+    { type: 'relation', id: 6, members: [{ type: 'node', ref: 2, role: 'outer' }] }
   ]
 };
 
 describe('combineResponses', () => {
   it('deduplicates elements', () => {
     const result = combineResponses([sample, sample], { south: 0, west: 0, north: 2, east: 2 });
-    expect(result.elements).toHaveLength(2);
+    expect(result.elements).toHaveLength(6);
   });
 
-  it('filters nodes outside of the requested bounding box', () => {
+  it('filters elements outside of the requested bounding box, including ways and relations', () => {
     const result = combineResponses([sample], { south: 1.5, west: 1.5, north: 3, east: 3 });
 
-    expect(result.elements).toHaveLength(1);
-    expect(result.elements[0]).toEqual(sample.elements[1]);
+    const ids = result.elements.map((element) => element.id);
+    expect(ids).toEqual([2, 4, 6]);
   });
 
   it('returns cloned elements when within the bounding box', () => {
@@ -34,7 +38,7 @@ describe('combineResponses', () => {
     expect(node).not.toBe(sample.elements[0]);
     expect(node?.tags).not.toBe(sample.elements[0].tags);
 
-    expect(way).toEqual(sample.elements[1]);
-    expect(way?.nodes).not.toBe(sample.elements[1].nodes);
+    expect(way).toEqual(sample.elements[2]);
+    expect(way?.nodes).not.toBe(sample.elements[2].nodes);
   });
 });
