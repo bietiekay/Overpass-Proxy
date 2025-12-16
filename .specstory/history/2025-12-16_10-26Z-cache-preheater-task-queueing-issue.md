@@ -600,7 +600,62 @@ _**Agent (model gpt-5.1-codex-max, mode Agent)**_
 <think><details><summary>Thought Process</summary>
 **Preparing to commit changes**
 
-I'm going to check the git status to review changes before crafting a commit message and proposing a commit command</details></think>
+I'm going to check the git status to review changes before crafting a commit message and proposing a commit command.</details></think>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/Overpass-Proxy && git status -sb</summary>
+
+```bash
+cd /home/bietiekay/code/Overpass-Proxy && git status -sb
+```
+
+```
+## master...origin/master
+ M public/cache-preheater.html
+?? .specstory/history/2025-12-16_10-26Z-cache-preheater-task-queueing-issue.md
+
+```
+</details>
+</tool-use>
+
+---
+
+<think><details><summary>Thought Process</summary>
+**Committing cache preheater fix**
+
+I'm staging only the updated HTML file and committing with a message focused on improving cache preheater priority and planning, excluding the untracked specstory file as likely auto-generated.</details></think>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /home/bietiekay/code/Overpass-Proxy && git add public/cache-preheater.html && git commit -m "Improve cache preheater planning and stale handling"</summary>
+
+```bash
+cd /home/bietiekay/code/Overpass-Proxy && git add public/cache-preheater.html && git commit -m "Improve cache preheater planning and stale handling"
+```
+
+```
+[master 3ffd2a6] Improve cache preheater planning and stale handling
+ 1 file changed, 81 insertions(+), 41 deletions(-)
+
+```
+</details>
+</tool-use>
+
+---
+
+Changes committed.
+
+What changed:
+- Preheater now separates fresh vs stale coverage, prioritizing uncached tiles and only queuing stale refreshes after missing work is exhausted.
+- Added logic to avoid duplicate stale requests, respect total capacity, and keep workers alive with lightweight waits when queues temporarily empty.
+- Fixed planner initialization to use the right cache set, eliminating the livelog “cached is not defined” error.
+
+Commit: `Improve cache preheater planning and stale handling`
+
+Note: Untracked `.specstory/history/...cache-preheater-task-queueing-issue.md` remains in the working tree.
 
 ---
 
