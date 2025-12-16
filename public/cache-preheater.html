@@ -177,10 +177,8 @@
         </div>
       </div>
       <p style="color:var(--muted); margin-top:0.75rem;">
-        Der Ablauf lädt zuerst die Cache-Belegung, baut daraus ein Raster aus Bounding-Boxen mit der gewünschten Maximalgröße
-        (statt Geohashes) und feuert dann gezielt Overpass-Queries, um nur nicht belegte Land-Flächen zu erwärmen –
-        automatisch über alle Kontinente hinweg und bei Bedarf mit weiteren Unterteilungen auf kleinere Boxen, um Lücken zu
-        schließen, ohne große Flächen mehrfach anfragen zu müssen.
+        Der Ablauf lädt zuerst die Cache-Belegung, berechnet fehlende Land-Kacheln und feuert dann gezielt Overpass-Queries, um nur nicht belegte Bereiche zu erwärmen –
+        und iteriert dabei automatisch über alle Landflächen des Planeten in der gewählten Genauigkeit.
       </p>
     </section>
 
@@ -595,6 +593,7 @@
       const baseUrl = proxyUrlInput.value.trim();
       const amenity = amenityInput.value.trim() || 'toilets';
       const targetPrecision = Number(targetPrecisionInput.value);
+      const maxPrecision = Math.min(7, targetPrecision + 1);
       const concurrency = Number(concurrencyInput.value);
       const timeoutMs = Number(timeoutInput.value) * 1000;
       const queueTarget = Math.max(concurrency * 4, 64);
@@ -633,10 +632,7 @@
         let inFlight = 0;
         const queueBudget = () =>
           Math.max(0, queueTarget - (plannedQueue.length + staleQueue.length + inFlight));
-        const cachedTileCount = () => {
-          const maxPrecision = planner.getMaxPrecision();
-          return cachedAny.get(maxPrecision)?.size ?? cachedAny.get(targetPrecision)?.size ?? 0;
-        };
+        const cachedTileCount = () => cachedAny.get(targetPrecision)?.size ?? 0;
 
         const refreshStats = () => {
           const counts = planner.getCounts();
