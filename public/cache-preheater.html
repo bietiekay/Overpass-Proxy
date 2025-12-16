@@ -574,7 +574,13 @@
             const hash = plannedQueue.shift();
             if (!hash) continue;
             const normalized = hash.slice(0, targetPrecision);
-            if (cached.has(normalized)) continue;
+            if (cached.has(normalized)) {
+              if (plannedSet.delete(normalized)) {
+                plannedCount = Math.max(0, plannedCount - 1);
+                refreshStats();
+              }
+              continue;
+            }
             return hash;
           }
           return null;
