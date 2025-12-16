@@ -260,6 +260,8 @@
       }
     };
 
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
     const loadLandGeometry = async (signal) => {
       if (landGeometry) return landGeometry;
 
@@ -531,23 +533,29 @@
       const signal = abortController.signal;
 
       try {
-        const cached = new Set();
+        const cachedAny = new Set();
+        const cachedFresh = new Set();
+        const cachedStale = new Set();
         let coverageEntries = 0;
         coverageLabel.textContent = 'Cache-Statistik wird geladen…';
         coverageBar.style.width = '0%';
         updateCoverageBar(coverageEntries);
 
         statusText.textContent = 'Starte Planung und Vorwärmung…';
-        const planner = await createLandPlanner(targetPrecision, cached, signal);
+        const planner = await createLandPlanner(targetPrecision, cachedAny, signal);
         const plannedQueue = [];
+        const staleQueue = [];
         const plannedSet = new Set();
+        const stalePlannedSet = new Set();
+        const staleCandidates = new Set();
         let plannerFinished = false;
+        let coverageFinished = false;
         let plannedCount = 0;
         let completed = 0;
         let failed = 0;
         let inFlight = 0;
         const remainingPlanCapacity = () =>
-          Math.max(0, maxTiles - (completed + failed + inFlight + plannedQueue.length));
+          Math.max(0, maxTiles - (completed + failed + inFlight + plannedQueue.length + staleQueue.length));
 
         const refreshStats = () => {
           const counts = planner.getCounts();
@@ -577,7 +585,7 @@
             const hash = plannedQueue.shift();
             if (!hash) continue;
             const normalized = hash.slice(0, targetPrecision);
-            if (cached.has(normalized)) {
+            if (cachedAny.has(normalized)) {
               if (plannedSet.delete(normalized)) {
                 plannedCount = Math.max(0, plannedCount - 1);
                 refreshStats();
@@ -594,7 +602,17 @@
           (entry) => {
             const normalized = entry.geohash.slice(0, targetPrecision);
             if (normalized.length === 0) return;
-            cached.add(normalized);
+            const hasFresh = (entry.entries ?? 0) > 0 || (entry.amenityItems ?? 0) > 0;
+            const hasStale = (entry.staleEntries ?? 0) > 0 || (entry.staleAmenityItems ?? 0) > 0;
+            if (hasFresh) {
+              cachedAny.add(normalized);
+              cachedFresh.add(normalized);
+            }
+            if (hasStale) {
+              cachedAny.add(normalized);
+              cachedStale.add(normalized);
+              staleCandidates.add(normalized);
+            }
             planner.markCached(normalized);
             coverageEntries += 1;
             updateCoverageBar(coverageEntries);
@@ -604,12 +622,25 @@
           },
           signal
         ).then(() => {
+          coverageFinished = true;
           coverageBar.style.width = '100%';
           updateCoverageBar(coverageEntries, 'fertig');
           enqueuePlan();
-          cachedCountEl.textContent = cached.size.toLocaleString();
-          log(`Geladene Cache-Kacheln: ${cached.size.toLocaleString()}`);
+          cachedCountEl.textContent = cachedAny.size.toLocaleString();
+          log(`Geladene Cache-Kacheln: ${cachedAny.size.toLocaleString()}`);
         });
+
+        const fillStaleQueue = () => {
+          if (!coverageFinished) return;
+          const capacity = remainingPlanCapacity();
+          if (capacity <= 0) return;
+          for (const hash of staleCandidates) {
+            if (stalePlannedSet.has(hash)) continue;
+            stalePlannedSet.add(hash);
+            staleQueue.push(hash);
+            if (staleQueue.length >= capacity) break;
+          }
+        };
 
         enqueuePlan();
         refreshStats();
@@ -617,45 +648,54 @@
         let stopped = false;
 
         const tick = async () => {
-          if (stopped || stopRequested || signal.aborted) return;
-          if (completed + failed >= maxTiles) return;
-          if (plannedQueue.length === 0 && remainingPlanCapacity() > 0) {
-            enqueuePlan();
-          }
-          const hash = takeNextHash();
-          if (!hash) {
-            if (!plannerFinished && remainingPlanCapacity() > 0) {
-              enqueuePlan();
-              if (plannedQueue.length > 0) {
-                return tick();
-              }
+          while (true) {
+            if (stopped || stopRequested || signal.aborted) return;
+            if (completed + failed >= maxTiles) return;
+
+            const missingDepleted = plannerFinished && plannedQueue.length === 0;
+            if (missingDepleted && staleQueue.length === 0) {
+              fillStaleQueue();
             }
-            return;
-          }
 
-          inFlight += 1;
-          inFlightEl.textContent = inFlight.toString();
-
-          try {
-            await sendPreheatRequest({ baseUrl, amenity, hash, timeoutMs, signal });
-            completed += 1;
-            requestsDoneEl.textContent = completed.toLocaleString();
-            log(`Kachel ${hash} erwärmt`);
-          } catch (error) {
-            failed += 1;
-            requestsFailedEl.textContent = failed.toLocaleString();
-            log(`Fehler für ${hash}: ${error.message || error}`);
-          } finally {
-            inFlight -= 1;
-            inFlightEl.textContent = inFlight.toString();
-            updateProgress(preheatBar, preheatLabel, completed + failed, maxTiles, 'Prewarming');
-            if (!stopped && completed + failed < maxTiles) {
-              if (plannedQueue.length < concurrency && remainingPlanCapacity() > 0) {
+            if (plannedQueue.length === 0 && staleQueue.length === 0) {
+              if (!plannerFinished && remainingPlanCapacity() > 0) {
                 enqueuePlan();
               }
-              if (plannedQueue.length > 0 || (!plannerFinished && remainingPlanCapacity() > 0)) {
-                void tick();
+              if (plannedQueue.length === 0 && staleQueue.length === 0) {
+                if ((plannerFinished && coverageFinished) || remainingPlanCapacity() === 0) return;
+                await wait(50);
+                continue;
               }
+            }
+
+            let hash = takeNextHash();
+            let isStaleJob = false;
+            if (!hash && staleQueue.length > 0 && (plannerFinished || coverageFinished)) {
+              hash = staleQueue.shift() ?? null;
+              isStaleJob = Boolean(hash);
+            }
+            if (!hash) {
+              if (plannerFinished || remainingPlanCapacity() === 0) return;
+              await wait(20);
+              continue;
+            }
+
+            inFlight += 1;
+            inFlightEl.textContent = inFlight.toString();
+
+            try {
+              await sendPreheatRequest({ baseUrl, amenity, hash, timeoutMs, signal });
+              completed += 1;
+              requestsDoneEl.textContent = completed.toLocaleString();
+              log(isStaleJob ? `Stale-Kachel ${hash} erneuert` : `Kachel ${hash} erwärmt`);
+            } catch (error) {
+              failed += 1;
+              requestsFailedEl.textContent = failed.toLocaleString();
+              log(`Fehler für ${hash}: ${error.message || error}`);
+            } finally {
+              inFlight -= 1;
+              inFlightEl.textContent = inFlight.toString();
+              updateProgress(preheatBar, preheatLabel, completed + failed, maxTiles, 'Prewarming');
             }
           }
         };
