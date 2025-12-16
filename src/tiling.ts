@@ -1,6 +1,7 @@
 import ngeohash from 'ngeohash';
 
 import type { BoundingBox } from './bbox.js';
+import { isValidBoundingBox } from './bbox.js';
 
 export interface TileInfo {
   hash: string;
@@ -69,6 +70,9 @@ export const boundsForHash = (hash: string): BoundingBox => {
 };
 
 export const tilesForBoundingBox = (bbox: BoundingBox, precision: number): TileInfo[] => {
+  if (!isValidBoundingBox(bbox.south, bbox.west, bbox.north, bbox.east)) {
+    throw new Error('Invalid bounding box coordinates');
+  }
   const hashes = ngeohash.bboxes(bbox.south, bbox.west, bbox.north, bbox.east, precision);
   const unique = new Set(hashes);
   // Keep the configured precision to avoid mixing fresh writes with stale child tiles in coverage stats.

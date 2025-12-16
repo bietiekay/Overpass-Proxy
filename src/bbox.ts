@@ -7,6 +7,13 @@ export interface BoundingBox {
 
 const numberPattern = /-?\d+(?:\.\d+)?/g;
 
+export const isValidBoundingBox = (south: number, west: number, north: number, east: number): boolean => {
+  if (![south, west, north, east].every((value) => Number.isFinite(value))) {
+    return false;
+  }
+  return south < north && west < east;
+};
+
 const normaliseTuple = (tuple: string): BoundingBox | null => {
   const matches = tuple.match(numberPattern);
   if (!matches || matches.length !== 4) {
@@ -14,7 +21,7 @@ const normaliseTuple = (tuple: string): BoundingBox | null => {
   }
 
   const [south, west, north, east] = matches.map((value) => Number(value));
-  if ([south, west, north, east].some((value) => Number.isNaN(value))) {
+  if (!isValidBoundingBox(south, west, north, east)) {
     return null;
   }
 

@@ -90,6 +90,7 @@ class TilePresenceCache {
       stale: false
     };
     this.getAmenityEntries(amenity).set(tileHash, entry);
+    this.notify(amenity, tileHash);
   }
 
   public get(amenity: string, tileHash: string): PresenceEntry | undefined {
@@ -551,7 +552,8 @@ export class TileStore {
   public async withRefreshLock(tile: TileInfo, amenity: string, handler: () => Promise<void>): Promise<void> {
     const keyAmenity = amenityKey(amenity);
     const lockKey = `${tileKey(tile.hash, keyAmenity)}:lock`;
-    const acquired = await this.redis.set(lockKey, '1', 'PX', this.options.swrSeconds * 1000, 'NX');
+    const token = Math.random().toString(36).slice(2);
+    const acquired = await this.redis.set(lockKey, token, 'PX', this.options.swrSeconds * 1000, 'NX');
     if (!acquired) {
       logger.debug({ tile: tile.hash, amenity: keyAmenity }, 'redis refresh lock skipped');
       return;
@@ -561,8 +563,13 @@ export class TileStore {
     try {
       await handler();
     } finally {
-      await this.redis.del(lockKey);
-      logger.debug({ tile: tile.hash, amenity: keyAmenity }, 'redis refresh lock released');
+      const current = await this.redis.get(lockKey);
+      if (current === token) {
+        await this.redis.del(lockKey);
+        logger.debug({ tile: tile.hash, amenity: keyAmenity }, 'redis refresh lock released');
+      } else {
+        logger.debug({ tile: tile.hash, amenity: keyAmenity }, 'redis refresh lock release skipped (token mismatch)');
+      }
     }
   }
 
@@ -590,6 +597,9 @@ export class TileStore {
     try {
       await handler();
       return 'fetched';
+    } catch (error) {
+      this.presence.markMissing(keyAmenity, tile.hash);
+      throw error;
     } finally {
       await this.redis.del(inflightKey);
     }
@@ -597,18 +607,61 @@ export class TileStore {
 }
 
 export const filterElementsByBbox = (elements: OverpassElement[], bbox: BoundingBox): OverpassElement[] => {
+  const nodeLocations = new Map<number, { lat: number; lon: number }>();
+  const wayNodes = new Map<number, number[]>();
+
+  const isWithin = (lat: number, lon: number): boolean =>
+    lat >= bbox.south && lat <= bbox.north && lon >= bbox.west && lon <= bbox.east;
+
+  for (const element of elements) {
+    if (element.type === 'node' && typeof element.lat === 'number' && typeof element.lon === 'number') {
+      nodeLocations.set(element.id, { lat: element.lat, lon: element.lon });
+    } else if (element.type === 'way' && Array.isArray(element.nodes)) {
+      wayNodes.set(element.id, element.nodes);
+    }
+  }
+
+  const wayIntersects = (nodeIds: number[] | undefined): boolean => {
+    if (!nodeIds || nodeIds.length === 0) {
+      return false;
+    }
+    return nodeIds.some((nodeId) => {
+      const coords = nodeLocations.get(nodeId);
+      return coords ? isWithin(coords.lat, coords.lon) : false;
+    });
+  };
+
+  const relationIntersects = (members: OverpassElement['members']): boolean => {
+    if (!members || members.length === 0) {
+      return false;
+    }
+    return members.some((member) => {
+      if (member.type === 'node') {
+        const coords = nodeLocations.get(member.ref);
+        return coords ? isWithin(coords.lat, coords.lon) : false;
+      }
+      if (member.type === 'way') {
+        const nodes = wayNodes.get(member.ref);
+        return wayIntersects(nodes);
+      }
+      return false;
+    });
+  };
+
   return elements.filter((element) => {
     if (element.type === 'node') {
       if (typeof element.lat !== 'number' || typeof element.lon !== 'number') {
         return false;
       }
+      return isWithin(element.lat, element.lon);
+    }
 
-      return (
-        element.lat >= bbox.south &&
-        element.lat <= bbox.north &&
-        element.lon >= bbox.west &&
-        element.lon <= bbox.east
-      );
+    if (element.type === 'way') {
+      return wayIntersects(element.nodes);
+    }
+
+    if (element.type === 'relation') {
+      return relationIntersects(element.members);
     }
 
     return true;
