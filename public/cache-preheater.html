@@ -321,12 +321,19 @@
         [bounds.west, bounds.north],
         [bounds.west, bounds.south],
         [bounds.east, bounds.north],
-        [bounds.east, bounds.south]
+        [bounds.east, bounds.south],
+        [bounds.west, midLat],
+        [bounds.east, midLat],
+        [midLon, bounds.north],
+        [midLon, bounds.south]
       ];
     };
 
     const isLandHash = (hash) => {
       if (!landGeometry) return false;
+      // Allow very coarse cells to be subdivided even if sampling is unsure; otherwise
+      // we risk skipping narrow land bands (e.g. high latitudes) entirely.
+      if (hash.length <= 2) return true;
       const bounds = geohashBounds(hash);
       const points = samplePoints(bounds);
       return points.some((point) => geoContains(landGeometry, point));
@@ -434,7 +441,7 @@
 
     const createLandPlanner = async (targetPrecision, cached, signal) => {
       await loadLandGeometry(signal);
-      const seeds = ngeohash.bboxes(-85, -180, 85, 180, 2);
+      const seeds = ngeohash.bboxes(-90, -180, 90, 180, 2);
       const queue = [...seeds];
       let candidates = 0;
       const missingSet = new Set();
