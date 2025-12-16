@@ -241,7 +241,6 @@
 
     proxyUrlInput.value = window.location.origin;
 
-    const base32 = '0123456789bcdefghjkmnpqrstuvwxyz';
     let landGeometry = null;
     let abortController = null;
     let stopRequested = false;
@@ -313,14 +312,13 @@
       throw new Error('Konnte keine Land-Geometrie laden');
     };
 
-    const geohashBounds = (hash) => {
-      const [south, west, north, east] = ngeohash.decode_bbox(hash);
-      return { south, west, north, east };
-    };
-
     const samplePoints = (bounds) => {
       const midLat = (bounds.north + bounds.south) / 2;
       const midLon = (bounds.east + bounds.west) / 2;
+      const quarterLat = bounds.south + (bounds.north - bounds.south) * 0.25;
+      const threeQuarterLat = bounds.south + (bounds.north - bounds.south) * 0.75;
+      const quarterLon = bounds.west + (bounds.east - bounds.west) * 0.25;
+      const threeQuarterLon = bounds.west + (bounds.east - bounds.west) * 0.75;
       return [
         [midLon, midLat],
         [bounds.west, bounds.north],
@@ -330,18 +328,22 @@
         [bounds.west, midLat],
         [bounds.east, midLat],
         [midLon, bounds.north],
-        [midLon, bounds.south]
+        [midLon, bounds.south],
+        [quarterLon, quarterLat],
+        [quarterLon, threeQuarterLat],
+        [threeQuarterLon, quarterLat],
+        [threeQuarterLon, threeQuarterLat]
       ];
     };
 
-    const isLandHash = (hash) => {
+    const bboxSize = (bounds) => ({
+      height: bounds.north - bounds.south,
+      width: bounds.east - bounds.west
+    });
+
+    const isLandBounds = (bounds) => {
       if (!landGeometry) return false;
-      // Allow very coarse cells to be subdivided even if sampling is unsure; otherwise
-      // we risk skipping narrow land bands (e.g. high latitudes) entirely.
-      if (hash.length <= 2) return true;
-      const bounds = geohashBounds(hash);
-      const points = samplePoints(bounds);
-      return points.some((point) => geoContains(landGeometry, point));
+      return samplePoints(bounds).some((point) => geoContains(landGeometry, point));
     };
 
     const updateProgress = (bar, label, value, total, prefix) => {
@@ -444,41 +446,36 @@
       }
     };
 
-    const createLandPlanner = async (initialPrecision, maxPrecision, cachedByPrecision, signal) => {
-      await loadLandGeometry(signal);
-      const seeds = ngeohash.bboxes(-90, -180, 90, 180, 2);
-      const queue = [...seeds];
-      let candidates = 0;
-      let activePrecision = initialPrecision;
-      const missingSet = new Set();
-      const landByPrecision = new Map();
-      const landSeen = new Set();
-      const cacheKey = (precision, hash) => precisionKey(precision, hash);
-      const cachedAtPrecision = (precision, hash) =>
-        cachedByPrecision.get(precision)?.has(hash) ?? false;
-      const promotePrecision = () => {
-        if (activePrecision >= maxPrecision) {
-          return false;
-        }
-        const landBuckets = landByPrecision.get(activePrecision);
-        if (!landBuckets || landBuckets.size === 0) {
-          return false;
-        }
-        const next = [];
-        for (const parent of landBuckets) {
-          for (const char of base32) {
-            next.push(`${parent}${char}`);
-          }
-        }
-        activePrecision += 1;
-        queue.push(...next);
-        return true;
-      };
+    const geohashCellSize = (precision) => {
+      const [south, west, north, east] = ngeohash.decode_bbox('u'.repeat(Math.max(1, precision)));
+      return { height: north - south, width: east - west };
+    };
 
-      const planBatch = (maxPlan, iterationLimit = 2000) => {
+    const boundingKey = (bounds, precision) => {
+      const lat = (bounds.north + bounds.south) / 2;
+      const lon = (bounds.east + bounds.west) / 2;
+      return ngeohash.encode(lat, lon, precision);
+    };
+
+    const createLandPlanner = async (targetPrecision, cachedByPrecision, signal) => {
+      await loadLandGeometry(signal);
+      const maxPrecision = Math.min(6, targetPrecision + 2);
+      const sizeForPrecision = new Map();
+      const getSize = (precision) => {
+        if (!sizeForPrecision.has(precision)) {
+          sizeForPrecision.set(precision, geohashCellSize(precision));
+        }
+        return sizeForPrecision.get(precision);
+      };
+      const queue = [{ south: -90, west: -180, north: 90, east: 180, precision: targetPrecision }];
+      let candidates = 0;
+      const missingSet = new Set();
+      const landSeen = new Set();
+      let activePrecision = targetPrecision;
+
+      const planBatch = (maxPlan, iterationLimit = 4000) => {
         const planned = [];
         let iterations = 0;
-        let promoted = false;
         let exhausted = false;
 
         while (planned.length < maxPlan && iterations < iterationLimit) {
@@ -487,41 +484,58 @@
             throw new DOMException('Aborted', 'AbortError');
           }
 
-          if (queue.length === 0) {
-            if (!promotePrecision()) {
-              exhausted = true;
-              break;
-            }
-            promoted = true;
-            continue;
+          const bounds = queue.pop();
+          if (!bounds) {
+            exhausted = true;
+            break;
           }
 
-          const hash = queue.pop();
-          if (!hash) continue;
+          if (!isLandBounds(bounds)) continue;
 
-          if (!isLandHash(hash)) continue;
+          const { height, width } = bboxSize(bounds);
+          const { height: maxHeight, width: maxWidth } = getSize(bounds.precision);
+          const key = boundingKey(bounds, bounds.precision);
+          const compositeKey = precisionKey(bounds.precision, key);
+          const cachedHere = cachedByPrecision.get(bounds.precision)?.has(key);
 
-          if (hash.length >= activePrecision) {
-            const normalized = hash.slice(0, activePrecision);
-            ensureSet(landByPrecision, activePrecision).add(normalized);
-            const key = cacheKey(activePrecision, normalized);
-            if (!landSeen.has(key)) {
-              landSeen.add(key);
+          if (height <= maxHeight && width <= maxWidth) {
+            const canGoSmaller = bounds.precision < maxPrecision && !cachedHere;
+            if (canGoSmaller) {
+              const midLat = (bounds.north + bounds.south) / 2;
+              const midLon = (bounds.east + bounds.west) / 2;
+              queue.push(
+                { south: bounds.south, west: bounds.west, north: midLat, east: midLon, precision: bounds.precision + 1 },
+                { south: bounds.south, west: midLon, north: midLat, east: bounds.east, precision: bounds.precision + 1 },
+                { south: midLat, west: bounds.west, north: bounds.north, east: midLon, precision: bounds.precision + 1 },
+                { south: midLat, west: midLon, north: bounds.north, east: bounds.east, precision: bounds.precision + 1 }
+              );
+              continue;
+            }
+
+            if (!landSeen.has(compositeKey)) {
+              landSeen.add(compositeKey);
               candidates += 1;
             }
-            if (!cachedAtPrecision(activePrecision, normalized)) {
-              missingSet.add(key);
-              planned.push({ hash, precision: activePrecision, normalized });
+            if (!cachedHere) {
+              missingSet.add(compositeKey);
+              planned.push({ bounds, precision: bounds.precision, normalized: key });
+              activePrecision = Math.max(activePrecision, bounds.precision);
             }
             continue;
           }
 
-          for (const char of base32) {
-            queue.push(`${hash}${char}`);
-          }
+          const midLat = (bounds.north + bounds.south) / 2;
+          const midLon = (bounds.east + bounds.west) / 2;
+          const nextPrecision = Math.min(maxPrecision, bounds.precision + 1);
+          queue.push(
+            { south: bounds.south, west: bounds.west, north: midLat, east: midLon, precision: nextPrecision },
+            { south: bounds.south, west: midLon, north: midLat, east: bounds.east, precision: nextPrecision },
+            { south: midLat, west: bounds.west, north: bounds.north, east: midLon, precision: nextPrecision },
+            { south: midLat, west: midLon, north: bounds.north, east: bounds.east, precision: nextPrecision }
+          );
         }
 
-        const done = exhausted || (queue.length === 0 && activePrecision >= maxPrecision);
+        const done = exhausted && queue.length === 0;
 
         return {
           planned,
@@ -529,12 +543,12 @@
           missingCount: missingSet.size,
           done,
           activePrecision,
-          promoted
+          promoted: false
         };
       };
 
       const markCached = (precision, normalized) => {
-        missingSet.delete(cacheKey(precision, normalized));
+        missingSet.delete(precisionKey(precision, normalized));
       };
 
       return {
@@ -546,9 +560,8 @@
       };
     };
 
-    const sendPreheatRequest = async ({ baseUrl, amenity, hash, timeoutMs, signal }) => {
-      const { south, west, north, east } = geohashBounds(hash);
-      const bbox = `${south},${west},${north},${east}`;
+    const sendPreheatRequest = async ({ baseUrl, amenity, bounds, timeoutMs, signal }) => {
+      const bbox = `${bounds.south},${bounds.west},${bounds.north},${bounds.east}`;
       const query = `[out:json][timeout:120];(node["amenity"="${amenity}"](${bbox});way["amenity"="${amenity}"](${bbox});relation["amenity"="${amenity}"](${bbox}););out body meta;>;out skel qt;`;
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -606,7 +619,7 @@
         updateCoverageBar(coverageEntries);
 
         statusText.textContent = 'Starte Planung und Vorwärmung…';
-        const planner = await createLandPlanner(targetPrecision, maxPrecision, cachedAny, signal);
+        const planner = await createLandPlanner(targetPrecision, cachedAny, signal);
         const plannedQueue = [];
         const staleQueue = [];
         const plannedSet = new Set();
@@ -639,7 +652,7 @@
         const enqueuePlan = () => {
           const capacity = queueBudget();
           if (plannerFinished || capacity <= 0) return;
-          const { planned, done, promoted } = planner.planBatch(capacity, 4000);
+          const { planned, done } = planner.planBatch(capacity, 4000);
           plannerFinished = done;
 
           for (const job of planned) {
@@ -648,9 +661,6 @@
             plannedSet.add(planKey);
             plannedQueue.push(job);
             plannedCount += 1;
-          }
-          if (promoted) {
-            statusText.textContent = `Keine fehlenden Kacheln auf Präzision ${planner.getActivePrecision() - 1}, verfeinere auf ${planner.getActivePrecision()} …`;
           }
           refreshStats();
         };
@@ -679,15 +689,13 @@
             if (maxCachePrecision === 0) return;
             const hasFresh = (entry.entries ?? 0) > 0 || (entry.amenityItems ?? 0) > 0;
             const hasStale = (entry.staleEntries ?? 0) > 0 || (entry.staleAmenityItems ?? 0) > 0;
-            for (let precision = targetPrecision; precision <= maxCachePrecision; precision += 1) {
-              const normalized = entry.geohash.slice(0, precision);
-              ensureSet(cachedAny, precision).add(normalized);
-              if (hasStale) {
-                ensureSet(staleCandidatesByPrecision, precision).add(normalized);
-              }
-              if (hasFresh || hasStale) {
-                planner.markCached(precision, normalized);
-              }
+            const normalized = entry.geohash.slice(0, maxCachePrecision);
+            ensureSet(cachedAny, maxCachePrecision).add(normalized);
+            if (hasStale) {
+              ensureSet(staleCandidatesByPrecision, maxCachePrecision).add(normalized);
+            }
+            if (hasFresh || hasStale) {
+              planner.markCached(maxCachePrecision, normalized);
             }
             coverageEntries += 1;
             updateCoverageBar(coverageEntries);
@@ -711,15 +719,17 @@
           if (!coverageFinished) return;
           const capacity = queueBudget();
           if (capacity <= 0) return;
-          const activePrecision = planner.getActivePrecision();
-          const candidates = staleCandidatesByPrecision.get(activePrecision);
-          if (!candidates) return;
-          for (const hash of candidates) {
-            const key = precisionKey(activePrecision, hash);
-            if (stalePlannedSet.has(key)) continue;
-            stalePlannedSet.add(key);
-            staleQueue.push({ hash, precision: activePrecision, normalized: hash });
-            if (staleQueue.length >= capacity) break;
+          const orderedPrecisions = Array.from(staleCandidatesByPrecision.keys()).sort((a, b) => a - b);
+          for (const activePrecision of orderedPrecisions) {
+            const candidates = staleCandidatesByPrecision.get(activePrecision);
+            if (!candidates) continue;
+            for (const hash of candidates) {
+              const key = precisionKey(activePrecision, hash);
+              if (stalePlannedSet.has(key)) continue;
+              stalePlannedSet.add(key);
+              staleQueue.push({ hash, precision: activePrecision, normalized: hash });
+              if (staleQueue.length >= capacity) return;
+            }
           }
         };
 
@@ -773,19 +783,19 @@
             inFlightEl.textContent = inFlight.toString();
 
             try {
-              await sendPreheatRequest({ baseUrl, amenity, hash: job.hash, timeoutMs, signal });
+              await sendPreheatRequest({ baseUrl, amenity, bounds: job.bounds, timeoutMs, signal });
               completed += 1;
               planner.markCached(job.precision, job.normalized);
               requestsDoneEl.textContent = completed.toLocaleString();
               log(
                 isStaleJob
-                  ? `Stale-Kachel ${job.hash} (Präzision ${job.precision}) erneuert`
-                  : `Kachel ${job.hash} (Präzision ${job.precision}) erwärmt`
+                  ? `Stale-Kachel ${job.normalized} (Präzision ${job.precision}) erneuert`
+                  : `Kachel ${job.normalized} (Präzision ${job.precision}) erwärmt`
               );
             } catch (error) {
               failed += 1;
               requestsFailedEl.textContent = failed.toLocaleString();
-              log(`Fehler für ${job.hash}: ${error.message || error}`);
+              log(`Fehler für ${job.normalized}: ${error.message || error}`);
             } finally {
               inFlight -= 1;
               inFlightEl.textContent = inFlight.toString();
