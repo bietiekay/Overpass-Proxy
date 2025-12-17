@@ -25,6 +25,7 @@ export interface AppConfig {
   upstreamOrigin: string;
   upstreamReferer: string;
   serveStaleFromCache: boolean;
+  singleInstanceRedisCache: boolean;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -103,6 +104,7 @@ export const loadConfig = (): AppConfig => {
     trustProxy: toBoolean(env.TRUST_PROXY, false),
     upstreamOrigin: env.UPSTREAM_ORIGIN ?? 'https://overpass-turbo.eu',
     upstreamReferer: env.UPSTREAM_REFERER ?? 'https://overpass-turbo.eu/',
-    serveStaleFromCache: toBoolean(env.SERVE_STALE_FROM_CACHE, true)
+    serveStaleFromCache: toBoolean(env.SERVE_STALE_FROM_CACHE, true),
+    singleInstanceRedisCache: toBoolean(env.SINGLE_INSTANCE_REDIS_CACHE, true)
   };
 };

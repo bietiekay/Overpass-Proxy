@@ -14,6 +14,12 @@ interface PresenceEntry {
   stale: boolean;
 }
 
+interface CoverageBuildResult {
+  coverage: CacheCoverageEntry[];
+  amenityTileCounts: Map<string, number>;
+  amenityItemCounts: Map<string, number>;
+}
+
 export interface CacheCoverageEntry {
   geohash: string;
   entries: number;
@@ -333,6 +339,8 @@ export interface OverpassTilePayload {
 export interface TileStoreOptions {
   ttlSeconds: number;
   swrSeconds: number;
+  singleInstanceRedisCache?: boolean;
+  coverageCacheTtlMs?: number;
 }
 
 const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
@@ -340,9 +348,21 @@ const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
 export class TileStore {
   private readonly presence: TilePresenceCache;
 
+  private readonly useRedisAsMemoryCache: boolean;
+
+  private readonly coverageCacheTtlMs: number;
+
+  private coverageCacheExpiresAt = 0;
+
+  private coverageCache: CoverageBuildResult | null = null;
+
+  private coverageWarmPromise: Promise<CoverageBuildResult> | null = null;
+
   constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {
     const missingTtl = Math.max(250, Math.min(2000, options.swrSeconds * 1000));
     this.presence = new TilePresenceCache(missingTtl);
+    this.useRedisAsMemoryCache = options.singleInstanceRedisCache ?? true;
+    this.coverageCacheTtlMs = Math.max(5_000, options.coverageCacheTtlMs ?? 10_000);
   }
 
   public async restorePresence(): Promise<void> {
@@ -394,25 +414,194 @@ export class TileStore {
     return { amenity, hash: hashParts.join(':') };
   }
 
+  private async buildCoverageFromRedis(): Promise<CoverageBuildResult> {
+    const coverage = new Map<string, CacheCoverageEntry>();
+    const amenityTileCounts = new Map<string, number>();
+    const amenityItemCounts = new Map<string, number>();
+
+    let cursor = '0';
+    const now = Date.now();
+
+    do {
+      const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', 'tile:*', 'COUNT', 200);
+      const values = keys.length > 0 ? await this.redis.mget(keys) : [];
+
+      keys.forEach((key, index) => {
+        const parsed = this.parseTileKey(key);
+        const raw = values[index];
+
+        if (!parsed || !raw) {
+          return;
+        }
+
+        try {
+          const payload = JSON.parse(raw) as OverpassTilePayload;
+          const amenityCount = countAmenitiesInResponse(payload.response);
+          const stale = payload.expiresAt < now;
+
+          const current =
+            coverage.get(parsed.hash) ??
+            ({
+              geohash: parsed.hash,
+              entries: 0,
+              amenityItems: 0,
+              staleEntries: 0,
+              staleAmenityItems: 0
+            } as CacheCoverageEntry);
+
+          if (stale) {
+            current.staleEntries += 1;
+            current.staleAmenityItems += amenityCount;
+          } else {
+            current.entries += 1;
+            current.amenityItems += amenityCount;
+          }
+
+          coverage.set(parsed.hash, current);
+
+          const amenity = amenityKey(parsed.amenity);
+          amenityTileCounts.set(amenity, (amenityTileCounts.get(amenity) ?? 0) + 1);
+          amenityItemCounts.set(amenity, (amenityItemCounts.get(amenity) ?? 0) + amenityCount);
+
+          if (this.useRedisAsMemoryCache) {
+            this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, amenityCount, stale);
+          }
+        } catch (error) {
+          logger.warn({ err: error, key }, 'failed to include tile in coverage build');
+        }
+      });
+
+      cursor = nextCursor;
+    } while (cursor !== '0');
+
+    return {
+      coverage: [...coverage.values()],
+      amenityTileCounts,
+      amenityItemCounts
+    };
+  }
+
+  private getCachedCoverage(): CoverageBuildResult | null {
+    if (!this.useRedisAsMemoryCache) {
+      return null;
+    }
+
+    const now = Date.now();
+    if (this.coverageCache && now < this.coverageCacheExpiresAt) {
+      return this.coverageCache;
+    }
+
+    if (!this.coverageWarmPromise) {
+      this.coverageWarmPromise = this.buildCoverageFromRedis()
+        .then((result) => {
+          this.coverageCache = result;
+          this.coverageCacheExpiresAt = Date.now() + this.coverageCacheTtlMs;
+          return result;
+        })
+        .catch((error) => {
+          logger.warn({ err: error }, 'failed to warm coverage from redis');
+          return this.coverageCache ?? null;
+        })
+        .finally(() => {
+          this.coverageWarmPromise = null;
+        });
+    }
+
+    return this.coverageCache;
+  }
+
+  public async warmCoverageFromRedis(force = false): Promise<CoverageBuildResult> {
+    if (!this.useRedisAsMemoryCache && !force) {
+      return {
+        coverage: this.presence.getCoverage(),
+        amenityTileCounts: new Map(),
+        amenityItemCounts: new Map()
+      };
+    }
+
+    const cached = this.getCachedCoverage();
+    if (cached && !force) {
+      return cached;
+    }
+
+    if (!this.coverageWarmPromise || force) {
+      this.coverageWarmPromise = this.buildCoverageFromRedis()
+        .then((result) => {
+          this.coverageCache = result;
+          this.coverageCacheExpiresAt = Date.now() + this.coverageCacheTtlMs;
+          return result;
+        })
+        .catch((error) => {
+          logger.warn({ err: error }, 'failed to warm coverage from redis');
+          if (this.coverageCache) {
+            return this.coverageCache;
+          }
+          throw error;
+        })
+        .finally(() => {
+          this.coverageWarmPromise = null;
+        });
+    }
+
+    return this.coverageWarmPromise;
+  }
+
   public countCachedTiles(amenity: string): number {
     const amenitySuffix = amenityKey(amenity);
+    const cached = this.getCachedCoverage();
+    if (cached) {
+      return cached.amenityTileCounts.get(amenitySuffix) ?? 0;
+    }
     return this.presence.countPresent(amenitySuffix);
   }
 
   public countCachedAmenities(): number {
+    const cached = this.getCachedCoverage();
+    if (cached) {
+      let total = 0;
+      for (const value of cached.amenityItemCounts.values()) {
+        total += value;
+      }
+      return total;
+    }
+
     return this.presence.countAmenityItems();
   }
 
   public countCachedAmenityTypes(): number {
+    const cached = this.getCachedCoverage();
+    if (cached) {
+      return cached.amenityTileCounts.size;
+    }
+
     return this.presence.countPresentAmenities();
   }
 
   public countTotalCachedTiles(): number {
+    const cached = this.getCachedCoverage();
+    if (cached) {
+      return cached.coverage.reduce((sum, entry) => sum + entry.entries + entry.staleEntries, 0);
+    }
+
     return this.presence.countAllPresent();
   }
 
-  public getCacheCoverage(): CacheCoverageEntry[] {
-    return this.presence.getCoverage();
+  public async getCacheCoverage(): Promise<CacheCoverageEntry[]> {
+    if (!this.useRedisAsMemoryCache) {
+      return this.presence.getCoverage();
+    }
+
+    const cached = this.getCachedCoverage();
+    if (cached) {
+      return cached.coverage;
+    }
+
+    const result = await this.warmCoverageFromRedis();
+    return result.coverage;
+  }
+
+  public async warmCacheCoverage(): Promise<void> {
+    await this.warmCoverageFromRedis();
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {

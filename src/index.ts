@@ -118,10 +118,13 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   const store = new TileStore(redis, {
     ttlSeconds: config.cacheTtlSeconds,
-    swrSeconds: config.swrSeconds
+    swrSeconds: config.swrSeconds,
+    singleInstanceRedisCache: config.singleInstanceRedisCache
   });
 
-  await store.restorePresence();
+  if (!config.singleInstanceRedisCache) {
+    await store.restorePresence();
+  }
 
   const statisticsStorage = new RedisStatisticsStorage(redis);
   const upstreamMetrics = await createUpstreamMetricsProvider(config, redis);
