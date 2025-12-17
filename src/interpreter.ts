@@ -18,7 +18,6 @@ import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
 import {
-  CacheCoverageOverflowError,
   RequestStatistics,
   type CacheCoverageSnapshot,
   type CacheStatus,
@@ -380,37 +379,16 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics/cacheCoverage', async (request, reply) => {
-    const { minPrecision, precision } = request.query as {
-      minPrecision?: string;
-      precision?: string;
-    };
-    const parsedMinPrecision = minPrecision ? Number.parseInt(minPrecision, 10) : undefined;
+    const { limit, precision } = request.query as { limit?: string; precision?: string };
+    const parsedLimit = limit ? Number.parseInt(limit, 10) : undefined;
     const parsedPrecision = precision ? Number.parseInt(precision, 10) : undefined;
-    const selectedMinPrecision = Number.isFinite(parsedMinPrecision)
-      ? parsedMinPrecision
-      : Number.isFinite(parsedPrecision)
-        ? parsedPrecision
-        : undefined;
 
-    try {
-      const snapshot = await deps.stats.getCacheCoverageSnapshot(undefined, {
-        minPrecision: selectedMinPrecision
-      });
-      reply.header('Content-Type', 'application/json');
-      reply.send(snapshot);
-    } catch (error) {
-      if (error instanceof CacheCoverageOverflowError) {
-        reply.code(413);
-        reply.send({
-          error: 'Cache coverage payload too large',
-          entryCount: error.entryCount,
-          maxEntries: error.maxEntries,
-          hint: 'Try requesting a lower minPrecision or precision to coarsen the geohashes'
-        });
-        return;
-      }
-      throw error;
-    }
+    const snapshot = await deps.stats.getCacheCoverageSnapshot(undefined, {
+      limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+      precision: Number.isFinite(parsedPrecision) ? parsedPrecision : undefined
+    });
+    reply.header('Content-Type', 'application/json');
+    reply.send(snapshot);
   });
 
   const transparentEndpoints = ['/api/status', '/api/timestamp', '/api/timestamp/*', '/api/kill_my_queries'];

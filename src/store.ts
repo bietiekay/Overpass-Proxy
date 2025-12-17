@@ -1,7 +1,6 @@
 import type { Redis } from 'ioredis';
 
 import type { BoundingBox } from './bbox.js';
-import type { CacheCoverageOptions } from './stats.js';
 import { logger } from './logger.js';
 import type { TileInfo } from './tiling.js';
 import { tileKey } from './tiling.js';
@@ -15,12 +14,6 @@ interface PresenceEntry {
   stale: boolean;
 }
 
-interface CoverageBuildResult {
-  coverage: CacheCoverageEntry[];
-  amenityTileCounts: Map<string, number>;
-  amenityItemCounts: Map<string, number>;
-}
-
 export interface CacheCoverageEntry {
   geohash: string;
   entries: number;
@@ -30,17 +23,6 @@ export interface CacheCoverageEntry {
 }
 
 type PresenceListener = () => void;
-
-const DEFAULT_COVERAGE_PRECISION = 5;
-const MAX_COVERAGE_PRECISION = 7;
-
-const clampCoveragePrecision = (precision?: number): number => {
-  if (typeof precision !== 'number' || !Number.isFinite(precision)) {
-    return DEFAULT_COVERAGE_PRECISION;
-  }
-  const safe = Math.max(1, Math.floor(precision));
-  return Math.min(safe, MAX_COVERAGE_PRECISION);
-};
 
 class TilePresenceCache {
   private readonly entries = new Map<string, Map<string, PresenceEntry>>();
@@ -351,9 +333,6 @@ export interface OverpassTilePayload {
 export interface TileStoreOptions {
   ttlSeconds: number;
   swrSeconds: number;
-  singleInstanceRedisCache?: boolean;
-  coverageCacheTtlMs?: number;
-  coveragePrecision?: number;
 }
 
 const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
@@ -361,28 +340,9 @@ const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
 export class TileStore {
   private readonly presence: TilePresenceCache;
 
-  private readonly useRedisAsMemoryCache: boolean;
-
-  private readonly coveragePrecision: number;
-
-  private readonly coverageCacheTtlMs: number;
-
-  private coverageCacheExpiresAt = 0;
-
-  private coverageCache: CoverageBuildResult | null = null;
-
-  private coverageCachePrecision = 0;
-
-  private coverageWarmPromise: Promise<CoverageBuildResult> | null = null;
-
-  private coverageWarmPrecision = 0;
-
   constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {
     const missingTtl = Math.max(250, Math.min(2000, options.swrSeconds * 1000));
     this.presence = new TilePresenceCache(missingTtl);
-    this.useRedisAsMemoryCache = options.singleInstanceRedisCache ?? true;
-    this.coveragePrecision = clampCoveragePrecision(options.coveragePrecision);
-    this.coverageCacheTtlMs = Math.max(5_000, options.coverageCacheTtlMs ?? 10_000);
   }
 
   public async restorePresence(): Promise<void> {
@@ -393,47 +353,6 @@ export class TileStore {
       await this.restoreTileKeys(keys);
       cursor = nextCursor;
     } while (cursor !== '0');
-  }
-
-  private addCoverageEntry(
-    coverage: Map<string, CacheCoverageEntry>,
-    geohash: string,
-    targetPrecision: number,
-    entry: { amenityCount: number; stale: boolean }
-  ): void {
-    const precision = Math.max(1, targetPrecision);
-    const key = geohash.slice(0, precision);
-    const existing =
-      coverage.get(key) ??
-      ({ geohash: key, entries: 0, amenityItems: 0, staleEntries: 0, staleAmenityItems: 0 } as CacheCoverageEntry);
-
-    if (entry.stale) {
-      existing.staleEntries += 1;
-      existing.staleAmenityItems += entry.amenityCount;
-    } else {
-      existing.entries += 1;
-      existing.amenityItems += entry.amenityCount;
-    }
-
-    coverage.set(key, existing);
-  }
-
-  private aggregateCoverage(entries: CacheCoverageEntry[], targetPrecision: number): CacheCoverageEntry[] {
-    const coverage = new Map<string, CacheCoverageEntry>();
-    for (const entry of entries) {
-      if (!entry?.geohash) continue;
-      const key = entry.geohash.slice(0, Math.max(1, targetPrecision));
-      const existing =
-        coverage.get(key) ??
-        ({ geohash: key, entries: 0, amenityItems: 0, staleEntries: 0, staleAmenityItems: 0 } as CacheCoverageEntry);
-
-      existing.entries += entry.entries ?? 0;
-      existing.amenityItems += entry.amenityItems ?? 0;
-      existing.staleEntries += entry.staleEntries ?? 0;
-      existing.staleAmenityItems += entry.staleAmenityItems ?? 0;
-      coverage.set(key, existing);
-    }
-    return [...coverage.values()];
   }
 
   private async restoreTileKeys(keys: string[]): Promise<void> {
@@ -475,181 +394,25 @@ export class TileStore {
     return { amenity, hash: hashParts.join(':') };
   }
 
-  private async buildCoverageFromRedis(targetPrecision: number): Promise<CoverageBuildResult> {
-    const coverage = new Map<string, CacheCoverageEntry>();
-    const amenityTileCounts = new Map<string, number>();
-    const amenityItemCounts = new Map<string, number>();
-
-    let cursor = '0';
-    const now = Date.now();
-
-    do {
-      const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', 'tile:*', 'COUNT', 200);
-      const values = keys.length > 0 ? await this.redis.mget(keys) : [];
-
-      keys.forEach((key, index) => {
-        const parsed = this.parseTileKey(key);
-        const raw = values[index];
-
-        if (!parsed || !raw) {
-          return;
-        }
-
-        try {
-          const payload = JSON.parse(raw) as OverpassTilePayload;
-          const amenityCount = countAmenitiesInResponse(payload.response);
-          const stale = payload.expiresAt < now;
-
-          this.addCoverageEntry(coverage, parsed.hash, targetPrecision, { amenityCount, stale });
-
-          const amenity = amenityKey(parsed.amenity);
-          amenityTileCounts.set(amenity, (amenityTileCounts.get(amenity) ?? 0) + 1);
-          amenityItemCounts.set(amenity, (amenityItemCounts.get(amenity) ?? 0) + amenityCount);
-
-          if (this.useRedisAsMemoryCache) {
-            this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, amenityCount, stale);
-          }
-        } catch (error) {
-          logger.warn({ err: error, key }, 'failed to include tile in coverage build');
-        }
-      });
-
-      cursor = nextCursor;
-    } while (cursor !== '0');
-
-    return {
-      coverage: [...coverage.values()],
-      amenityTileCounts,
-      amenityItemCounts
-    };
-  }
-
-  private getCachedCoverage(targetPrecision = this.coveragePrecision, allowExpired = false): CoverageBuildResult | null {
-    if (!this.useRedisAsMemoryCache) {
-      return null;
-    }
-
-    if (
-      this.coverageCache &&
-      this.coverageCachePrecision === targetPrecision &&
-      (allowExpired || Date.now() < this.coverageCacheExpiresAt)
-    ) {
-      return this.coverageCache;
-    }
-
-    return null;
-  }
-
-  public async warmCoverageFromRedis(
-    force = false,
-    targetPrecision = this.coveragePrecision
-  ): Promise<CoverageBuildResult> {
-    const precision = clampCoveragePrecision(targetPrecision);
-    if (!this.useRedisAsMemoryCache && !force) {
-      return {
-        coverage: this.aggregateCoverage(this.presence.getCoverage(), precision),
-        amenityTileCounts: new Map(),
-        amenityItemCounts: new Map()
-      };
-    }
-
-    const cached = this.getCachedCoverage(precision);
-    if (cached && !force) {
-      return cached;
-    }
-
-    if (!this.coverageWarmPromise || force || this.coverageWarmPrecision !== precision) {
-      this.coverageWarmPrecision = precision;
-      this.coverageWarmPromise = this.buildCoverageFromRedis(precision)
-        .then((result) => {
-          this.coverageCache = result;
-          this.coverageCachePrecision = precision;
-          this.coverageCacheExpiresAt = Date.now() + this.coverageCacheTtlMs;
-          return result;
-        })
-        .catch((error) => {
-          logger.warn({ err: error }, 'failed to warm coverage from redis');
-          if (this.coverageCache && this.coverageCachePrecision === precision) {
-            return this.coverageCache;
-          }
-          throw error;
-        })
-        .finally(() => {
-          this.coverageWarmPromise = null;
-        });
-    }
-
-    return this.coverageWarmPromise;
-  }
-
   public countCachedTiles(amenity: string): number {
     const amenitySuffix = amenityKey(amenity);
-    const cached = this.getCachedCoverage();
-    if (cached) {
-      return cached.amenityTileCounts.get(amenitySuffix) ?? 0;
-    }
     return this.presence.countPresent(amenitySuffix);
   }
 
   public countCachedAmenities(): number {
-    const cached = this.getCachedCoverage();
-    if (cached) {
-      let total = 0;
-      for (const value of cached.amenityItemCounts.values()) {
-        total += value;
-      }
-      return total;
-    }
-
     return this.presence.countAmenityItems();
   }
 
   public countCachedAmenityTypes(): number {
-    const cached = this.getCachedCoverage();
-    if (cached) {
-      return cached.amenityTileCounts.size;
-    }
-
     return this.presence.countPresentAmenities();
   }
 
   public countTotalCachedTiles(): number {
-    const cached = this.getCachedCoverage();
-    if (cached) {
-      return cached.coverage.reduce((sum, entry) => sum + entry.entries + entry.staleEntries, 0);
-    }
-
     return this.presence.countAllPresent();
   }
 
-  public async getCacheCoverage(options: CacheCoverageOptions = {}): Promise<CacheCoverageEntry[]> {
-    const targetPrecision = clampCoveragePrecision(options.maxPrecision ?? this.coveragePrecision);
-
-    if (!this.useRedisAsMemoryCache) {
-      return this.aggregateCoverage(this.presence.getCoverage(), targetPrecision);
-    }
-
-    const cached = this.getCachedCoverage(targetPrecision);
-    if (cached) {
-      if (Date.now() >= this.coverageCacheExpiresAt) {
-        void this.warmCoverageFromRedis(false, targetPrecision);
-      }
-      return cached.coverage;
-    }
-
-    const warmPromise = this.warmCoverageFromRedis(false, targetPrecision);
-    const stale = this.getCachedCoverage(targetPrecision, true);
-    if (stale) {
-      void warmPromise;
-      return stale.coverage;
-    }
-
-    const result = await warmPromise;
-    return result.coverage;
-  }
-
-  public async warmCacheCoverage(): Promise<void> {
-    await this.warmCoverageFromRedis();
+  public getCacheCoverage(): CacheCoverageEntry[] {
+    return this.presence.getCoverage();
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {

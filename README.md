@@ -55,7 +55,6 @@ Environment variables are read at startup. Defaults are shown below:
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
 | `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
-| `SINGLE_INSTANCE_REDIS_CACHE` | `true` | Skip eager cache presence restoration when only one proxy instance writes to Redis; lazily rebuild coverage from Redis when statistics are requested |
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
@@ -142,7 +141,7 @@ docker-compose up --build
 
 This starts the proxy along with Redis and a mock Overpass service used for integration tests.
 
-The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, and per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. Cache coverage responses are pre-aggregated to a capped geohash precision (default 5, never above 7) and optimised server-side by merging complete geohash sibling sets so every covered area is returned without truncation; the payload may mix geohash precisions. Clients can prevent over-coarsening with `?minPrecision=<length>` (or the legacy `precision` parameter), within the server-side cap. Responses report the min/max precision observed along with whether optimisation was applied. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, and per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. Cache coverage responses are capped to 50k entries by default (with a hard ceiling of 250k) and will automatically coarsen geohash precision to avoid truncation when possible; you can also force a precision with `?precision=<length>`. Responses indicate the applied precision and whether truncation was necessary. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
 #### What the statistics include and how to use them
 

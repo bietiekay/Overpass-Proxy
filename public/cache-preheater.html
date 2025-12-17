@@ -358,15 +358,92 @@
       coverageLabel.textContent = `Cache-Einträge gelesen: ${entries.toLocaleString()} (${suffix})`;
     };
 
-    const loadCacheCoverageSnapshot = async (baseUrl, signal) => {
+    const streamCacheCoverage = async (baseUrl, onEntry, signal) => {
       const response = await fetch(`${baseUrl.replace(/\/?$/, '')}/api/statistics/cacheCoverage`, {
         cache: 'no-store',
         signal
       });
-      if (!response.ok) {
+      if (!response.ok || !response.body) {
         throw new Error('Konnte Cache-Statistik nicht laden');
       }
-      return response.json();
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let inArray = false;
+      let depth = 0;
+      let inString = false;
+      let itemBuffer = '';
+
+      while (true) {
+        if (signal?.aborted) {
+          throw new DOMException('Aborted', 'AbortError');
+        }
+
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        for (let i = 0; i < buffer.length; i += 1) {
+          const char = buffer[i];
+
+          if (!inArray) {
+            if (buffer.startsWith('{') && buffer.includes('"cacheCoverage"')) {
+              const idx = buffer.indexOf('[');
+              if (idx !== -1) {
+                inArray = true;
+                buffer = buffer.slice(idx + 1);
+                i = -1;
+              }
+            }
+            continue;
+          }
+
+          if (!inString && char === '"') {
+            inString = true;
+            itemBuffer += char;
+            continue;
+          } else if (inString) {
+            itemBuffer += char;
+            if (char === '"' && buffer[i - 1] !== '\\') {
+              inString = false;
+            }
+            continue;
+          }
+
+          if (char === '{') {
+            depth += 1;
+            itemBuffer += char;
+            continue;
+          }
+
+          if (char === '}' && depth > 0) {
+            depth -= 1;
+            itemBuffer += char;
+            if (depth === 0) {
+              try {
+                const entry = JSON.parse(itemBuffer);
+                onEntry(entry);
+              } catch (error) {
+                console.warn('Fehler beim Parsen', error);
+              }
+              itemBuffer = '';
+            }
+            continue;
+          }
+
+          if (depth > 0) {
+            itemBuffer += char;
+            continue;
+          }
+
+          if (char === ']') {
+            return;
+          }
+        }
+
+        buffer = inArray ? '' : buffer;
+      }
     };
 
     const geohashCellSize = (precision) => {
@@ -605,20 +682,14 @@
           return null;
         };
 
-        const coveragePromise = loadCacheCoverageSnapshot(baseUrl, signal).then((snapshot) => {
-          const entries = snapshot?.cacheCoverage ?? [];
-          const snapshotMaxPrecision = Math.min(
-            planner.getMaxPrecision(),
-            snapshot?.maxPrecision ?? planner.getMaxPrecision()
-          );
-
-          for (const entry of entries) {
-            const geohash = entry?.geohash ?? '';
-            const maxCachePrecision = Math.min(snapshotMaxPrecision, geohash.length);
-            if (maxCachePrecision === 0) continue;
+        const coveragePromise = streamCacheCoverage(
+          baseUrl,
+          (entry) => {
+            const maxCachePrecision = Math.min(planner.getMaxPrecision(), entry.geohash.length);
+            if (maxCachePrecision === 0) return;
             const hasFresh = (entry.entries ?? 0) > 0 || (entry.amenityItems ?? 0) > 0;
             const hasStale = (entry.staleEntries ?? 0) > 0 || (entry.staleAmenityItems ?? 0) > 0;
-            const normalized = geohash.slice(0, maxCachePrecision);
+            const normalized = entry.geohash.slice(0, maxCachePrecision);
             ensureSet(cachedAny, maxCachePrecision).add(normalized);
             if (hasStale) {
               ensureSet(staleCandidatesByPrecision, maxCachePrecision).add(normalized);
@@ -627,11 +698,13 @@
               planner.markCached(maxCachePrecision, normalized);
             }
             coverageEntries += 1;
-            if (coverageEntries % 500 === 0) {
-              updateCoverageBar(coverageEntries);
+            updateCoverageBar(coverageEntries);
+            if (queueBudget() > 0) {
+              enqueuePlan();
             }
-          }
-
+          },
+          signal
+        ).then(() => {
           coverageFinished = true;
           coverageBar.style.width = '100%';
           updateCoverageBar(coverageEntries, 'fertig');

@@ -9,23 +9,12 @@ import { startOfDayMs, startOfMonthMs, startOfWeekMs } from './time.js';
 
 export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
 
-export class CacheCoverageOverflowError extends Error {
-  constructor(
-    public readonly entryCount: number,
-    public readonly maxEntries: number
-  ) {
-    super(`cache coverage snapshot has ${entryCount.toLocaleString()} entries, exceeding the limit`);
-    this.name = 'CacheCoverageOverflowError';
-  }
-}
-
 export interface CacheMetricsProvider {
   countCachedTiles(amenity: string): number;
   countCachedAmenities(): number;
   countCachedAmenityTypes(): number;
   countTotalCachedTiles(): number;
-  getCacheCoverage(options?: CacheCoverageOptions): Promise<CacheCoverageEntry[]>;
-  warmCacheCoverage?: () => Promise<void>;
+  getCacheCoverage(): CacheCoverageEntry[];
 }
 
 interface AmenityStatsInternal {
@@ -85,9 +74,8 @@ export interface StatisticsSnapshot {
 export interface CacheCoverageSnapshot {
   generatedAt: string;
   cacheCoverage: CacheCoverageEntry[];
-  optimised: boolean;
-  minPrecision: number;
-  maxPrecision: number;
+  truncated: boolean;
+  appliedPrecision?: number;
 }
 
 export interface GeohashCoverageSnapshot {
@@ -123,12 +111,8 @@ export interface UpstreamMetricsProvider {
 }
 
 export interface CacheCoverageOptions {
-  minPrecision?: number;
-  maxPrecision?: number;
-}
-
-export interface RequestStatisticsOptions {
-  maxCacheCoverageEntries?: number;
+  limit?: number;
+  precision?: number;
 }
 
 interface RecordRequestOptions {
@@ -163,26 +147,24 @@ const geohashForBoundingBox = (bbox: BoundingBox): string | null => {
 
 const zeroCacheStatus = (): Record<CacheStatus, number> => ({ HIT: 0, MISS: 0, STALE: 0 });
 
-const BASE32_SYMBOLS = 32;
+const DEFAULT_CACHE_COVERAGE_LIMIT = 50_000;
+const MAX_CACHE_COVERAGE_LIMIT = 250_000;
 
-const sanitiseMinPrecision = (precision?: number): number => {
-  if (typeof precision !== 'number' || !Number.isFinite(precision)) {
-    return 1;
+const sanitiseLimit = (limit?: number): number => {
+  if (!Number.isFinite(limit) || limit === undefined) {
+    return DEFAULT_CACHE_COVERAGE_LIMIT;
+  }
+  const safeLimit = Math.max(1, Math.floor(limit));
+  return Math.min(safeLimit, MAX_CACHE_COVERAGE_LIMIT);
+};
+
+const sanitisePrecision = (precision?: number): number | undefined => {
+  if (!Number.isFinite(precision)) {
+    return undefined;
   }
   const safePrecision = Math.max(1, Math.floor(precision));
   return Math.min(safePrecision, 12);
 };
-
-const clampCoveragePrecision = (precision: number, { min = 1, max = 12 }: { min?: number; max?: number } = {}): number => {
-  if (!Number.isFinite(precision)) {
-    return min;
-  }
-  return Math.max(min, Math.min(Math.floor(precision), max));
-};
-
-const DEFAULT_CACHE_COVERAGE_PRECISION = 5;
-const MAX_CACHE_COVERAGE_PRECISION = 7;
-const DEFAULT_MAX_CACHE_COVERAGE_ENTRIES = 1_000_000;
 
 const sortCacheCoverage = (a: CacheCoverageEntry, b: CacheCoverageEntry): number => {
   const totalA = a.entries + a.staleEntries;
@@ -190,104 +172,42 @@ const sortCacheCoverage = (a: CacheCoverageEntry, b: CacheCoverageEntry): number
   return totalB - totalA || a.geohash.localeCompare(b.geohash);
 };
 
-const mergeCoverageEntries = (geohash: string, entries: CacheCoverageEntry[]): CacheCoverageEntry => {
-  const base: CacheCoverageEntry = {
-    geohash,
-    entries: 0,
-    amenityItems: 0,
-    staleEntries: 0,
-    staleAmenityItems: 0
-  };
-
-  for (const entry of entries) {
-    base.entries += entry.entries;
-    base.amenityItems += entry.amenityItems;
-    base.staleEntries += entry.staleEntries;
-    base.staleAmenityItems += entry.staleAmenityItems;
-  }
-
-  return base;
-};
-
-const optimiseCacheCoverage = (
+const aggregateCacheCoverage = (
   coverage: CacheCoverageEntry[],
-  minPrecision: number
+  precision: number
 ): CacheCoverageEntry[] => {
-  if (!coverage.length) {
-    return [];
-  }
-
-  const byLength = new Map<number, Map<string, CacheCoverageEntry>>();
-
-  const addToLengthBucket = (entry: CacheCoverageEntry): void => {
-    const length = entry.geohash.length;
-    const bucket = byLength.get(length) ?? new Map<string, CacheCoverageEntry>();
-    const existing = bucket.get(entry.geohash);
-    if (existing) {
-      bucket.set(entry.geohash, mergeCoverageEntries(entry.geohash, [existing, entry]));
-    } else {
-      bucket.set(entry.geohash, { ...entry });
-    }
-    byLength.set(length, bucket);
-  };
+  const aggregated = new Map<string, CacheCoverageEntry>();
 
   for (const entry of coverage) {
-    if (!entry?.geohash) continue;
-    addToLengthBucket(entry);
+    const geohash = entry.geohash.slice(0, Math.min(entry.geohash.length, precision));
+    const existing =
+      aggregated.get(geohash) ??
+      ({
+        geohash,
+        entries: 0,
+        amenityItems: 0,
+        staleEntries: 0,
+        staleAmenityItems: 0
+      } as CacheCoverageEntry);
+
+    existing.entries += entry.entries;
+    existing.amenityItems += entry.amenityItems;
+    existing.staleEntries += entry.staleEntries;
+    existing.staleAmenityItems += entry.staleAmenityItems;
+
+    aggregated.set(geohash, existing);
   }
 
-  const maxPrecision = Math.max(...byLength.keys(), minPrecision);
-
-  for (let length = maxPrecision; length > minPrecision; length -= 1) {
-    const current = byLength.get(length);
-    if (!current?.size) {
-      continue;
-    }
-
-    const parents = byLength.get(length - 1) ?? new Map<string, CacheCoverageEntry>();
-    const childrenByParent = new Map<string, CacheCoverageEntry[]>();
-
-    for (const entry of current.values()) {
-      const parent = entry.geohash.slice(0, length - 1);
-      const children = childrenByParent.get(parent) ?? [];
-      children.push(entry);
-      childrenByParent.set(parent, children);
-    }
-
-    for (const [parent, children] of childrenByParent) {
-      if (children.length === BASE32_SYMBOLS) {
-        const merged = mergeCoverageEntries(parent, children);
-        for (const child of children) {
-          current.delete(child.geohash);
-        }
-        const existingParent = parents.get(parent);
-        if (existingParent) {
-          parents.set(parent, mergeCoverageEntries(parent, [existingParent, merged]));
-        } else {
-          parents.set(parent, merged);
-        }
-      }
-    }
-
-    if (parents.size > 0) {
-      byLength.set(length - 1, parents);
-    }
-  }
-
-  const optimised: CacheCoverageEntry[] = [];
-  for (const bucket of byLength.values()) {
-    for (const entry of bucket.values()) {
-      optimised.push(entry);
-    }
-  }
-
-  optimised.sort(sortCacheCoverage);
-
-  return optimised;
+  return [...aggregated.values()];
 };
 
-const maxGeohashLength = (coverage: CacheCoverageEntry[]): number =>
-  coverage.reduce((max, entry) => Math.max(max, entry.geohash?.length ?? 0), 0);
+const maxGeohashLength = (coverage: CacheCoverageEntry[]): number => {
+  let maxLength = 0;
+  for (const entry of coverage) {
+    maxLength = Math.max(maxLength, entry.geohash.length);
+  }
+  return maxLength;
+};
 
 const calculateHitRate = (
   cacheStatus: Record<CacheStatus, number>,
@@ -379,17 +299,15 @@ export class RequestStatistics {
   private constructor(
     private readonly cacheMetrics: CacheMetricsProvider,
     private readonly storage: StatisticsStorage,
-    private readonly upstreamMetrics?: UpstreamMetricsProvider,
-    private readonly options: RequestStatisticsOptions = {}
+    private readonly upstreamMetrics?: UpstreamMetricsProvider
   ) {}
 
   public static async create(
     cacheMetrics: CacheMetricsProvider,
     storage: StatisticsStorage,
-    upstreamMetrics?: UpstreamMetricsProvider,
-    options?: RequestStatisticsOptions
+    upstreamMetrics?: UpstreamMetricsProvider
   ): Promise<RequestStatistics> {
-    const stats = new RequestStatistics(cacheMetrics, storage, upstreamMetrics, options);
+    const stats = new RequestStatistics(cacheMetrics, storage, upstreamMetrics);
     await stats.restore();
     return stats;
   }
@@ -528,10 +446,6 @@ export class RequestStatistics {
     return this.runExclusive(async () => {
       this.refreshPeriodCounters(now);
 
-      if (this.cacheMetrics.warmCacheCoverage) {
-        await this.cacheMetrics.warmCacheCoverage();
-      }
-
       const generatedAt = new Date(now).toISOString();
       const dayStartIso = new Date(this.dayStart).toISOString();
       const weekStartIso = new Date(this.weekStart).toISOString();
@@ -625,32 +539,34 @@ export class RequestStatistics {
     options: CacheCoverageOptions = {}
   ): Promise<CacheCoverageSnapshot> {
     const generatedAt = new Date(now).toISOString();
-    const requestedMinPrecision = sanitiseMinPrecision(options.minPrecision);
-    const targetPrecision = clampCoveragePrecision(
-      options.maxPrecision ?? Math.max(DEFAULT_CACHE_COVERAGE_PRECISION, requestedMinPrecision),
-      { min: 1, max: MAX_CACHE_COVERAGE_PRECISION }
-    );
-    const optimisationMinPrecision = Math.min(requestedMinPrecision, targetPrecision);
-    const rawCoverage = await this.cacheMetrics.getCacheCoverage({ maxPrecision: targetPrecision });
-    const cacheCoverage = optimiseCacheCoverage(rawCoverage, optimisationMinPrecision);
-    const maxCacheCoverageEntries =
-      this.options.maxCacheCoverageEntries ?? DEFAULT_MAX_CACHE_COVERAGE_ENTRIES;
-    if (cacheCoverage.length > maxCacheCoverageEntries) {
-      throw new CacheCoverageOverflowError(cacheCoverage.length, maxCacheCoverageEntries);
-    }
-    const observedMaxPrecision = maxGeohashLength(cacheCoverage);
-    const maxPrecision =
-      cacheCoverage.length > 0
-        ? Math.max(observedMaxPrecision, optimisationMinPrecision)
-        : optimisationMinPrecision;
+    const limit = sanitiseLimit(options.limit);
+    const precision = sanitisePrecision(options.precision);
 
-    return {
-      generatedAt,
-      cacheCoverage,
-      optimised: true,
-      minPrecision: optimisationMinPrecision,
-      maxPrecision
-    };
+    const rawCoverage = this.cacheMetrics.getCacheCoverage();
+    const startingPrecision = precision ?? Math.max(1, maxGeohashLength(rawCoverage));
+    let appliedPrecision = precision;
+
+    let aggregatedCoverage =
+      precision !== undefined
+        ? aggregateCacheCoverage(rawCoverage, precision)
+        : [...rawCoverage];
+
+    if (aggregatedCoverage.length > limit && precision === undefined) {
+      let candidatePrecision = Math.min(startingPrecision, 12);
+
+      while (candidatePrecision > 1 && aggregatedCoverage.length > limit) {
+        candidatePrecision -= 1;
+        aggregatedCoverage = aggregateCacheCoverage(rawCoverage, candidatePrecision);
+        appliedPrecision = candidatePrecision;
+      }
+    }
+
+    aggregatedCoverage.sort(sortCacheCoverage);
+
+    const truncated = aggregatedCoverage.length > limit;
+    const cacheCoverage = truncated ? aggregatedCoverage.slice(0, limit) : aggregatedCoverage;
+
+    return { generatedAt, cacheCoverage, truncated, appliedPrecision };
   }
 
   private async persist(): Promise<void> {

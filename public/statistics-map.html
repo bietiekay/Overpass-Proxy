@@ -580,7 +580,6 @@
     const settingsSave = document.getElementById('settings-save');
     let latestSnapshot = null;
     let latestCacheCoverage = [];
-    let latestCacheCoverageMeta = null;
     let latestGeohashCoverage = [];
     const geohashBoundsCache = new Map();
     const upstreamPanelStorageKey = 'overpass-proxy.upstreams-panel.visible';
@@ -702,34 +701,6 @@
     };
 
     const approxEqual = (a, b, epsilon = 1e-10) => Math.abs(a - b) <= epsilon;
-
-    const geohashPrecisionRange = (entries) => {
-      const lengths = (entries ?? [])
-        .map((entry) => entry?.geohash?.length ?? 0)
-        .filter((value) => Number.isFinite(value) && value > 0);
-      if (!lengths.length) {
-        return { min: 0, max: 0 };
-      }
-      return { min: Math.min(...lengths), max: Math.max(...lengths) };
-    };
-
-    const buildCacheCoverageMeta = (entries, snapshotMeta = {}) => {
-      const range = geohashPrecisionRange(entries);
-      if (!range.max) {
-        return null;
-      }
-      const minPrecision = Number.isFinite(snapshotMeta.minPrecision)
-        ? snapshotMeta.minPrecision
-        : range.min;
-      const maxPrecision = Number.isFinite(snapshotMeta.maxPrecision)
-        ? snapshotMeta.maxPrecision
-        : range.max;
-      return {
-        minPrecision,
-        maxPrecision,
-        optimised: Boolean(snapshotMeta.optimised)
-      };
-    };
 
     const BASE32_SYMBOLS = 32;
 
@@ -1167,11 +1138,7 @@
       };
     };
 
-    const renderOverlay = async (
-      entries,
-      description,
-      { reuseProgress = false, skipGeohashMerge = false, statusDetail } = {}
-    ) => {
+    const renderOverlay = async (entries, description, { reuseProgress = false } = {}) => {
       const managesProgress = !reuseProgress;
 
       if (managesProgress) {
@@ -1184,15 +1151,10 @@
         clearOverlay();
         const condensed = condenseEntries(entries);
         await updateProgress(0.15, 'Condensing entries…');
-        const geohashOptimised = skipGeohashMerge
-          ? condensed
-          : mergeGeohashEntries(condensed, { minPrecision: 1 });
-        await updateProgress(
-          skipGeohashMerge ? 0.2 : 0.25,
-          skipGeohashMerge ? 'Using optimised geohashes…' : 'Merging geohashes…'
-        );
+        const geohashOptimised = mergeGeohashEntries(condensed, { minPrecision: 1 });
+        await updateProgress(0.25, 'Merging geohashes…');
         const normalised = normaliseEntries(geohashOptimised);
-        await updateProgress(skipGeohashMerge ? 0.3 : 0.35, 'Decoding geohashes…');
+        await updateProgress(0.35, 'Decoding geohashes…');
         const { tiles, failedGeohashes } = await buildMergedTiles(normalised.entries, normalised.max, updateProgress);
 
         for (const tile of tiles) {
@@ -1217,10 +1179,9 @@
           tiles.length === normalised.entries.length
             ? `${tiles.length} tiles.`
             : `${tiles.length} merged tiles (from ${normalised.entries.length}).`;
-        const baseStatus = failedGeohashes > 0
+        statusEl.textContent = failedGeohashes > 0
           ? `${description} visualised for ${tiles.length} tiles (geohash decoding unavailable for some entries).`
           : `${description} visualised for ${mergedText}`;
-        statusEl.textContent = statusDetail ? `${baseStatus} ${statusDetail}` : baseStatus;
       } finally {
         if (managesProgress) {
           await hideProgress('Ready');
@@ -1394,23 +1355,7 @@
           latestCacheCoverage?.length > 0
             ? latestCacheCoverage
             : demoSnapshot.cacheCoverage ?? [];
-        const cacheMeta = latestCacheCoverageMeta ?? buildCacheCoverageMeta(cacheCoverageData);
-        const precisionRange =
-          cacheMeta && cacheMeta.minPrecision
-            ? cacheMeta.minPrecision === cacheMeta.maxPrecision
-              ? `${cacheMeta.minPrecision}`
-              : `${cacheMeta.minPrecision}-${cacheMeta.maxPrecision}`
-            : null;
-        const cacheStatusDetail = precisionRange
-          ? `(geohash precision ${precisionRange}${cacheMeta?.optimised ? ', optimised server-side' : ''})`
-          : cacheMeta?.optimised
-            ? '(optimised server-side)'
-            : undefined;
-        await renderOverlay(buildCacheCoverageEntries(cacheCoverageData), 'Cache status', {
-          reuseProgress,
-          skipGeohashMerge: cacheMeta?.optimised,
-          statusDetail: cacheStatusDetail
-        });
+        await renderOverlay(buildCacheCoverageEntries(cacheCoverageData), 'Cache status', { reuseProgress });
       } else {
         await renderOverlay(buildRequestEntries(coverageData), 'Requests', { reuseProgress });
       }
@@ -1428,7 +1373,6 @@
         console.error('Failed to load live statistics, falling back to demo data.', error);
         latestSnapshot = demoSnapshot;
         latestCacheCoverage = demoSnapshot.cacheCoverage ?? [];
-        latestCacheCoverageMeta = buildCacheCoverageMeta(latestCacheCoverage, demoSnapshot);
         latestGeohashCoverage = demoGeohashCoverage;
         statusEl.textContent = 'Using demo data (live fetch failed).';
         renderUpstreams(demoSnapshot);
@@ -1441,13 +1385,11 @@
         if (!response.ok) throw new Error('Request failed');
         const snapshot = await response.json();
         latestCacheCoverage = snapshot.cacheCoverage ?? [];
-        latestCacheCoverageMeta = buildCacheCoverageMeta(latestCacheCoverage, snapshot);
       } catch (error) {
         console.error('Failed to load cache coverage data, falling back to demo data.', error);
         if (!latestCacheCoverage?.length) {
           latestCacheCoverage = demoSnapshot.cacheCoverage ?? [];
         }
-        latestCacheCoverageMeta = buildCacheCoverageMeta(latestCacheCoverage);
       }
     };
 

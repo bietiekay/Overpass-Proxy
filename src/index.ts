@@ -26,37 +26,16 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   const cachePreheaterPath = resolve(process.cwd(), 'public', 'cache-preheater.html');
 
   // Simple CORS handling for browser clients
-  const applyCorsHeaders = (request: FastifyRequest, reply: FastifyReply) => {
-    const origin = request.headers.origin ?? '*';
-    reply.header('Access-Control-Allow-Origin', origin === 'null' ? '*' : origin);
-    reply.header('Vary', 'Origin');
+  app.addHook('onSend', async (_request, reply, payload) => {
+    // Allow public access; adjust if you need to restrict origins
+    reply.header('Access-Control-Allow-Origin', '*');
     reply.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     reply.header(
       'Access-Control-Allow-Headers',
       'Content-Type, Accept, X-Requested-With, If-None-Match'
     );
     reply.header('Access-Control-Max-Age', '600');
-  };
-
-  app.addHook('onRequest', async (request, reply) => {
-    applyCorsHeaders(request, reply);
-  });
-
-  app.addHook('onSend', async (request, reply, payload) => {
-    applyCorsHeaders(request, reply);
     return payload;
-  });
-
-  app.addHook('onError', async (request, reply) => {
-    applyCorsHeaders(request, reply);
-  });
-
-  // Preflight requests
-  app.addHook('preHandler', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (request.method !== 'OPTIONS') return;
-    applyCorsHeaders(request, reply);
-    reply.code(204);
-    return reply.send();
   });
 
   app.get('/statistics-map', async (_request, reply) => {
@@ -69,6 +48,12 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     const html = await readFile(cachePreheaterPath, 'utf8');
     reply.header('Content-Type', 'text/html; charset=utf-8');
     reply.send(html);
+  });
+
+  // Preflight requests
+  app.options('*', async (_request: FastifyRequest, reply: FastifyReply) => {
+    reply.code(204);
+    reply.send();
   });
 
   const summariseBody = (body: unknown): { kind: string; size: number; preview?: string } => {
@@ -118,13 +103,10 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   const store = new TileStore(redis, {
     ttlSeconds: config.cacheTtlSeconds,
-    swrSeconds: config.swrSeconds,
-    singleInstanceRedisCache: config.singleInstanceRedisCache
+    swrSeconds: config.swrSeconds
   });
 
-  if (!config.singleInstanceRedisCache) {
-    await store.restorePresence();
-  }
+  await store.restorePresence();
 
   const statisticsStorage = new RedisStatisticsStorage(redis);
   const upstreamMetrics = await createUpstreamMetricsProvider(config, redis);
