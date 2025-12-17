@@ -379,13 +379,20 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics/cacheCoverage', async (request, reply) => {
-    const { limit, precision } = request.query as { limit?: string; precision?: string };
-    const parsedLimit = limit ? Number.parseInt(limit, 10) : undefined;
+    const { minPrecision, precision } = request.query as {
+      minPrecision?: string;
+      precision?: string;
+    };
+    const parsedMinPrecision = minPrecision ? Number.parseInt(minPrecision, 10) : undefined;
     const parsedPrecision = precision ? Number.parseInt(precision, 10) : undefined;
+    const selectedMinPrecision = Number.isFinite(parsedMinPrecision)
+      ? parsedMinPrecision
+      : Number.isFinite(parsedPrecision)
+        ? parsedPrecision
+        : undefined;
 
     const snapshot = await deps.stats.getCacheCoverageSnapshot(undefined, {
-      limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
-      precision: Number.isFinite(parsedPrecision) ? parsedPrecision : undefined
+      minPrecision: selectedMinPrecision
     });
     reply.header('Content-Type', 'application/json');
     reply.send(snapshot);

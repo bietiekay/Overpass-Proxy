@@ -8,6 +8,8 @@ import {
   RequestStatistics
 } from '../../stats.js';
 
+const BASE32_SYMBOLS = 32;
+
 class InMemoryStatisticsStorage implements StatisticsStorage {
   private state: PersistedStatisticsState | null = null;
 
@@ -240,11 +242,14 @@ describe('RequestStatistics', () => {
     expect(snapshot.cacheCoverage[0]?.geohash).toBe('u33d0');
     expect(snapshot.cacheCoverage[0]?.entries).toBe(3);
     expect(snapshot.cacheCoverage[1]?.geohash).toBe('u0qj0');
-    expect(snapshot.truncated).toBe(false);
+    expect(snapshot.optimised).toBe(true);
+    expect(snapshot.minPrecision).toBe(1);
+    expect(snapshot.maxPrecision).toBe(5);
   });
 
-  it('auto-aggregates cache coverage snapshots to avoid truncation', async () => {
+  it('merges geohash coverage to parents when all children are present', async () => {
     const storage = new InMemoryStatisticsStorage();
+    const base32 = '0123456789bcdefghjkmnpqrstuvwxyz';
     const stats = await RequestStatistics.create(
       {
         countCachedTiles: () => 0,
@@ -252,10 +257,49 @@ describe('RequestStatistics', () => {
         countCachedAmenityTypes: () => 0,
         countTotalCachedTiles: () => 0,
         getCacheCoverage: () =>
-          Array.from({ length: 5 }).map((_, index) => ({
-            geohash: `u0qj${index}`,
-            entries: index,
-            amenityItems: index * 2,
+          [...base32].map((symbol, index) => ({
+            geohash: `u0qj${symbol}`,
+            entries: index + 1,
+            amenityItems: (index + 1) * 2,
+            staleEntries: index % 2,
+            staleAmenityItems: index % 2 ? index + 1 : 0
+          }))
+      },
+      storage
+    );
+
+    const snapshot = await stats.getCacheCoverageSnapshot(new Date('2024-01-01T00:00:00Z').getTime());
+
+    expect(snapshot.cacheCoverage).toHaveLength(1);
+    expect(snapshot.cacheCoverage[0]).toEqual({
+      geohash: 'u0qj',
+      entries: expect.any(Number),
+      amenityItems: expect.any(Number),
+      staleEntries: expect.any(Number),
+      staleAmenityItems: expect.any(Number)
+    });
+    expect(snapshot.cacheCoverage[0]?.entries).toBe(528);
+    expect(snapshot.cacheCoverage[0]?.amenityItems).toBe(1056);
+    expect(snapshot.cacheCoverage[0]?.staleEntries).toBe(16);
+    expect(snapshot.cacheCoverage[0]?.staleAmenityItems).toBe(272);
+    expect(snapshot.minPrecision).toBe(1);
+    expect(snapshot.maxPrecision).toBe(4);
+  });
+
+  it('respects a minimum precision when optimising cache coverage', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    const base32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () =>
+          [...base32].map((symbol, index) => ({
+            geohash: `u0qj${symbol}`,
+            entries: index + 1,
+            amenityItems: (index + 1) * 2,
             staleEntries: 0,
             staleAmenityItems: 0
           }))
@@ -264,44 +308,12 @@ describe('RequestStatistics', () => {
     );
 
     const snapshot = await stats.getCacheCoverageSnapshot(new Date('2024-01-01T00:00:00Z').getTime(), {
-      limit: 3
+      minPrecision: 5
     });
 
-    expect(snapshot.cacheCoverage).toHaveLength(1);
-    expect(snapshot.truncated).toBe(false);
-    expect(snapshot.appliedPrecision).toBe(4);
-  });
-
-  it('aggregates cache coverage to the requested precision', async () => {
-    const storage = new InMemoryStatisticsStorage();
-    const stats = await RequestStatistics.create(
-      {
-        countCachedTiles: () => 0,
-        countCachedAmenities: () => 0,
-        countCachedAmenityTypes: () => 0,
-        countTotalCachedTiles: () => 0,
-        getCacheCoverage: () => [
-          { geohash: 'u0qj012', entries: 1, amenityItems: 2, staleEntries: 0, staleAmenityItems: 0 },
-          { geohash: 'u0qj045', entries: 3, amenityItems: 5, staleEntries: 2, staleAmenityItems: 4 }
-        ]
-      },
-      storage
-    );
-
-    const snapshot = await stats.getCacheCoverageSnapshot(new Date('2024-01-01T00:00:00Z').getTime(), {
-      precision: 4
-    });
-
-    expect(snapshot.cacheCoverage).toHaveLength(1);
-    expect(snapshot.cacheCoverage[0]).toEqual({
-      geohash: 'u0qj',
-      entries: 4,
-      amenityItems: 7,
-      staleEntries: 2,
-      staleAmenityItems: 4
-    });
-    expect(snapshot.truncated).toBe(false);
-    expect(snapshot.appliedPrecision).toBe(4);
+    expect(snapshot.cacheCoverage).toHaveLength(BASE32_SYMBOLS);
+    expect(snapshot.minPrecision).toBe(5);
+    expect(snapshot.maxPrecision).toBe(5);
   });
 
   it('exposes geohash coverage snapshots separately', async () => {
