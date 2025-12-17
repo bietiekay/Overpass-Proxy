@@ -18,6 +18,7 @@ import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
 import {
+  CacheCoverageOverflowError,
   RequestStatistics,
   type CacheCoverageSnapshot,
   type CacheStatus,
@@ -391,11 +392,25 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
         ? parsedPrecision
         : undefined;
 
-    const snapshot = await deps.stats.getCacheCoverageSnapshot(undefined, {
-      minPrecision: selectedMinPrecision
-    });
-    reply.header('Content-Type', 'application/json');
-    reply.send(snapshot);
+    try {
+      const snapshot = await deps.stats.getCacheCoverageSnapshot(undefined, {
+        minPrecision: selectedMinPrecision
+      });
+      reply.header('Content-Type', 'application/json');
+      reply.send(snapshot);
+    } catch (error) {
+      if (error instanceof CacheCoverageOverflowError) {
+        reply.code(413);
+        reply.send({
+          error: 'Cache coverage payload too large',
+          entryCount: error.entryCount,
+          maxEntries: error.maxEntries,
+          hint: 'Try requesting a lower minPrecision or precision to coarsen the geohashes'
+        });
+        return;
+      }
+      throw error;
+    }
   });
 
   const transparentEndpoints = ['/api/status', '/api/timestamp', '/api/timestamp/*', '/api/kill_my_queries'];

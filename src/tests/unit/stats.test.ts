@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { BoundingBox } from '../../bbox.js';
 import { tilesForBoundingBox } from '../../tiling.js';
 import {
+  CacheCoverageOverflowError,
   type PersistedStatisticsState,
   type StatisticsStorage,
   RequestStatistics
@@ -314,6 +315,33 @@ describe('RequestStatistics', () => {
     expect(snapshot.cacheCoverage).toHaveLength(BASE32_SYMBOLS);
     expect(snapshot.minPrecision).toBe(5);
     expect(snapshot.maxPrecision).toBe(5);
+  });
+
+  it('rejects oversized cache coverage snapshots', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () =>
+          Array.from({ length: 11 }, (_value, index) => ({
+            geohash: `u0qj${index.toString(32)}`,
+            entries: 1,
+            amenityItems: 1,
+            staleEntries: 0,
+            staleAmenityItems: 0
+          }))
+      },
+      storage,
+      undefined,
+      { maxCacheCoverageEntries: 10 }
+    );
+
+    await expect(
+      stats.getCacheCoverageSnapshot(new Date('2024-01-01T00:00:00Z').getTime(), { minPrecision: 5 })
+    ).rejects.toBeInstanceOf(CacheCoverageOverflowError);
   });
 
   it('exposes geohash coverage snapshots separately', async () => {
