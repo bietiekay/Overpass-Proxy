@@ -74,8 +74,9 @@ export interface StatisticsSnapshot {
 export interface CacheCoverageSnapshot {
   generatedAt: string;
   cacheCoverage: CacheCoverageEntry[];
-  truncated: boolean;
-  appliedPrecision?: number;
+  optimised: boolean;
+  minPrecision: number;
+  maxPrecision: number;
 }
 
 export interface GeohashCoverageSnapshot {
@@ -111,8 +112,7 @@ export interface UpstreamMetricsProvider {
 }
 
 export interface CacheCoverageOptions {
-  limit?: number;
-  precision?: number;
+  minPrecision?: number;
 }
 
 interface RecordRequestOptions {
@@ -147,20 +147,11 @@ const geohashForBoundingBox = (bbox: BoundingBox): string | null => {
 
 const zeroCacheStatus = (): Record<CacheStatus, number> => ({ HIT: 0, MISS: 0, STALE: 0 });
 
-const DEFAULT_CACHE_COVERAGE_LIMIT = 50_000;
-const MAX_CACHE_COVERAGE_LIMIT = 250_000;
+const BASE32_SYMBOLS = 32;
 
-const sanitiseLimit = (limit?: number): number => {
-  if (!Number.isFinite(limit) || limit === undefined) {
-    return DEFAULT_CACHE_COVERAGE_LIMIT;
-  }
-  const safeLimit = Math.max(1, Math.floor(limit));
-  return Math.min(safeLimit, MAX_CACHE_COVERAGE_LIMIT);
-};
-
-const sanitisePrecision = (precision?: number): number | undefined => {
+const sanitiseMinPrecision = (precision?: number): number => {
   if (!Number.isFinite(precision)) {
-    return undefined;
+    return 1;
   }
   const safePrecision = Math.max(1, Math.floor(precision));
   return Math.min(safePrecision, 12);
@@ -172,42 +163,104 @@ const sortCacheCoverage = (a: CacheCoverageEntry, b: CacheCoverageEntry): number
   return totalB - totalA || a.geohash.localeCompare(b.geohash);
 };
 
-const aggregateCacheCoverage = (
+const mergeCoverageEntries = (geohash: string, entries: CacheCoverageEntry[]): CacheCoverageEntry => {
+  const base: CacheCoverageEntry = {
+    geohash,
+    entries: 0,
+    amenityItems: 0,
+    staleEntries: 0,
+    staleAmenityItems: 0
+  };
+
+  for (const entry of entries) {
+    base.entries += entry.entries;
+    base.amenityItems += entry.amenityItems;
+    base.staleEntries += entry.staleEntries;
+    base.staleAmenityItems += entry.staleAmenityItems;
+  }
+
+  return base;
+};
+
+const optimiseCacheCoverage = (
   coverage: CacheCoverageEntry[],
-  precision: number
+  minPrecision: number
 ): CacheCoverageEntry[] => {
-  const aggregated = new Map<string, CacheCoverageEntry>();
-
-  for (const entry of coverage) {
-    const geohash = entry.geohash.slice(0, Math.min(entry.geohash.length, precision));
-    const existing =
-      aggregated.get(geohash) ??
-      ({
-        geohash,
-        entries: 0,
-        amenityItems: 0,
-        staleEntries: 0,
-        staleAmenityItems: 0
-      } as CacheCoverageEntry);
-
-    existing.entries += entry.entries;
-    existing.amenityItems += entry.amenityItems;
-    existing.staleEntries += entry.staleEntries;
-    existing.staleAmenityItems += entry.staleAmenityItems;
-
-    aggregated.set(geohash, existing);
+  if (!coverage.length) {
+    return [];
   }
 
-  return [...aggregated.values()];
+  const byLength = new Map<number, Map<string, CacheCoverageEntry>>();
+
+  const addToLengthBucket = (entry: CacheCoverageEntry): void => {
+    const length = entry.geohash.length;
+    const bucket = byLength.get(length) ?? new Map<string, CacheCoverageEntry>();
+    const existing = bucket.get(entry.geohash);
+    if (existing) {
+      bucket.set(entry.geohash, mergeCoverageEntries(entry.geohash, [existing, entry]));
+    } else {
+      bucket.set(entry.geohash, { ...entry });
+    }
+    byLength.set(length, bucket);
+  };
+
+  for (const entry of coverage) {
+    if (!entry?.geohash) continue;
+    addToLengthBucket(entry);
+  }
+
+  const maxPrecision = Math.max(...byLength.keys(), minPrecision);
+
+  for (let length = maxPrecision; length > minPrecision; length -= 1) {
+    const current = byLength.get(length);
+    if (!current?.size) {
+      continue;
+    }
+
+    const parents = byLength.get(length - 1) ?? new Map<string, CacheCoverageEntry>();
+    const childrenByParent = new Map<string, CacheCoverageEntry[]>();
+
+    for (const entry of current.values()) {
+      const parent = entry.geohash.slice(0, length - 1);
+      const children = childrenByParent.get(parent) ?? [];
+      children.push(entry);
+      childrenByParent.set(parent, children);
+    }
+
+    for (const [parent, children] of childrenByParent) {
+      if (children.length === BASE32_SYMBOLS) {
+        const merged = mergeCoverageEntries(parent, children);
+        for (const child of children) {
+          current.delete(child.geohash);
+        }
+        const existingParent = parents.get(parent);
+        if (existingParent) {
+          parents.set(parent, mergeCoverageEntries(parent, [existingParent, merged]));
+        } else {
+          parents.set(parent, merged);
+        }
+      }
+    }
+
+    if (parents.size > 0) {
+      byLength.set(length - 1, parents);
+    }
+  }
+
+  const optimised: CacheCoverageEntry[] = [];
+  for (const bucket of byLength.values()) {
+    for (const entry of bucket.values()) {
+      optimised.push(entry);
+    }
+  }
+
+  optimised.sort(sortCacheCoverage);
+
+  return optimised;
 };
 
-const maxGeohashLength = (coverage: CacheCoverageEntry[]): number => {
-  let maxLength = 0;
-  for (const entry of coverage) {
-    maxLength = Math.max(maxLength, entry.geohash.length);
-  }
-  return maxLength;
-};
+const maxGeohashLength = (coverage: CacheCoverageEntry[]): number =>
+  coverage.reduce((max, entry) => Math.max(max, entry.geohash?.length ?? 0), 0);
 
 const calculateHitRate = (
   cacheStatus: Record<CacheStatus, number>,
@@ -539,34 +592,18 @@ export class RequestStatistics {
     options: CacheCoverageOptions = {}
   ): Promise<CacheCoverageSnapshot> {
     const generatedAt = new Date(now).toISOString();
-    const limit = sanitiseLimit(options.limit);
-    const precision = sanitisePrecision(options.precision);
-
+    const minPrecision = sanitiseMinPrecision(options.minPrecision);
     const rawCoverage = this.cacheMetrics.getCacheCoverage();
-    const startingPrecision = precision ?? Math.max(1, maxGeohashLength(rawCoverage));
-    let appliedPrecision = precision;
+    const cacheCoverage = optimiseCacheCoverage(rawCoverage, minPrecision);
+    const maxPrecision = Math.max(minPrecision, maxGeohashLength(cacheCoverage));
 
-    let aggregatedCoverage =
-      precision !== undefined
-        ? aggregateCacheCoverage(rawCoverage, precision)
-        : [...rawCoverage];
-
-    if (aggregatedCoverage.length > limit && precision === undefined) {
-      let candidatePrecision = Math.min(startingPrecision, 12);
-
-      while (candidatePrecision > 1 && aggregatedCoverage.length > limit) {
-        candidatePrecision -= 1;
-        aggregatedCoverage = aggregateCacheCoverage(rawCoverage, candidatePrecision);
-        appliedPrecision = candidatePrecision;
-      }
-    }
-
-    aggregatedCoverage.sort(sortCacheCoverage);
-
-    const truncated = aggregatedCoverage.length > limit;
-    const cacheCoverage = truncated ? aggregatedCoverage.slice(0, limit) : aggregatedCoverage;
-
-    return { generatedAt, cacheCoverage, truncated, appliedPrecision };
+    return {
+      generatedAt,
+      cacheCoverage,
+      optimised: true,
+      minPrecision,
+      maxPrecision
+    };
   }
 
   private async persist(): Promise<void> {
