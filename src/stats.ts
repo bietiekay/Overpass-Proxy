@@ -14,7 +14,7 @@ export interface CacheMetricsProvider {
   countCachedAmenities(): number;
   countCachedAmenityTypes(): number;
   countTotalCachedTiles(): number;
-  getCacheCoverage(): Promise<CacheCoverageEntry[]>;
+  getCacheCoverage(options?: CacheCoverageOptions): Promise<CacheCoverageEntry[]>;
   warmCacheCoverage?: () => Promise<void>;
 }
 
@@ -114,6 +114,7 @@ export interface UpstreamMetricsProvider {
 
 export interface CacheCoverageOptions {
   minPrecision?: number;
+  maxPrecision?: number;
 }
 
 interface RecordRequestOptions {
@@ -157,6 +158,16 @@ const sanitiseMinPrecision = (precision?: number): number => {
   const safePrecision = Math.max(1, Math.floor(precision));
   return Math.min(safePrecision, 12);
 };
+
+const clampCoveragePrecision = (precision: number, { min = 1, max = 12 }: { min?: number; max?: number } = {}): number => {
+  if (!Number.isFinite(precision)) {
+    return min;
+  }
+  return Math.max(min, Math.min(Math.floor(precision), max));
+};
+
+const DEFAULT_CACHE_COVERAGE_PRECISION = 5;
+const MAX_CACHE_COVERAGE_PRECISION = 7;
 
 const sortCacheCoverage = (a: CacheCoverageEntry, b: CacheCoverageEntry): number => {
   const totalA = a.entries + a.staleEntries;
@@ -597,16 +608,25 @@ export class RequestStatistics {
     options: CacheCoverageOptions = {}
   ): Promise<CacheCoverageSnapshot> {
     const generatedAt = new Date(now).toISOString();
-    const minPrecision = sanitiseMinPrecision(options.minPrecision);
-    const rawCoverage = await this.cacheMetrics.getCacheCoverage();
-    const cacheCoverage = optimiseCacheCoverage(rawCoverage, minPrecision);
-    const maxPrecision = Math.max(minPrecision, maxGeohashLength(cacheCoverage));
+    const requestedMinPrecision = sanitiseMinPrecision(options.minPrecision);
+    const targetPrecision = clampCoveragePrecision(
+      options.maxPrecision ?? Math.max(DEFAULT_CACHE_COVERAGE_PRECISION, requestedMinPrecision),
+      { min: 1, max: MAX_CACHE_COVERAGE_PRECISION }
+    );
+    const optimisationMinPrecision = Math.min(requestedMinPrecision, targetPrecision);
+    const rawCoverage = await this.cacheMetrics.getCacheCoverage({ maxPrecision: targetPrecision });
+    const cacheCoverage = optimiseCacheCoverage(rawCoverage, optimisationMinPrecision);
+    const observedMaxPrecision = maxGeohashLength(cacheCoverage);
+    const maxPrecision =
+      cacheCoverage.length > 0
+        ? Math.max(observedMaxPrecision, optimisationMinPrecision)
+        : optimisationMinPrecision;
 
     return {
       generatedAt,
       cacheCoverage,
       optimised: true,
-      minPrecision,
+      minPrecision: optimisationMinPrecision,
       maxPrecision
     };
   }
