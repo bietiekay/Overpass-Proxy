@@ -378,15 +378,8 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
     reply.send(snapshot);
   });
 
-  app.get('/api/statistics/cacheCoverage', async (request, reply) => {
-    const { limit, precision } = request.query as { limit?: string; precision?: string };
-    const parsedLimit = limit ? Number.parseInt(limit, 10) : undefined;
-    const parsedPrecision = precision ? Number.parseInt(precision, 10) : undefined;
-
-    const snapshot = await deps.stats.getCacheCoverageSnapshot(undefined, {
-      limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
-      precision: Number.isFinite(parsedPrecision) ? parsedPrecision : undefined
-    });
+  app.get('/api/statistics/cacheCoverage', async (_request, reply) => {
+    const snapshot = await deps.stats.getCacheCoverageSnapshot();
     reply.header('Content-Type', 'application/json');
     reply.send(snapshot);
   });

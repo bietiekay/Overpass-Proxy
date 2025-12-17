@@ -240,68 +240,6 @@ describe('RequestStatistics', () => {
     expect(snapshot.cacheCoverage[0]?.geohash).toBe('u33d0');
     expect(snapshot.cacheCoverage[0]?.entries).toBe(3);
     expect(snapshot.cacheCoverage[1]?.geohash).toBe('u0qj0');
-    expect(snapshot.truncated).toBe(false);
-  });
-
-  it('auto-aggregates cache coverage snapshots to avoid truncation', async () => {
-    const storage = new InMemoryStatisticsStorage();
-    const stats = await RequestStatistics.create(
-      {
-        countCachedTiles: () => 0,
-        countCachedAmenities: () => 0,
-        countCachedAmenityTypes: () => 0,
-        countTotalCachedTiles: () => 0,
-        getCacheCoverage: () =>
-          Array.from({ length: 5 }).map((_, index) => ({
-            geohash: `u0qj${index}`,
-            entries: index,
-            amenityItems: index * 2,
-            staleEntries: 0,
-            staleAmenityItems: 0
-          }))
-      },
-      storage
-    );
-
-    const snapshot = await stats.getCacheCoverageSnapshot(new Date('2024-01-01T00:00:00Z').getTime(), {
-      limit: 3
-    });
-
-    expect(snapshot.cacheCoverage).toHaveLength(1);
-    expect(snapshot.truncated).toBe(false);
-    expect(snapshot.appliedPrecision).toBe(4);
-  });
-
-  it('aggregates cache coverage to the requested precision', async () => {
-    const storage = new InMemoryStatisticsStorage();
-    const stats = await RequestStatistics.create(
-      {
-        countCachedTiles: () => 0,
-        countCachedAmenities: () => 0,
-        countCachedAmenityTypes: () => 0,
-        countTotalCachedTiles: () => 0,
-        getCacheCoverage: () => [
-          { geohash: 'u0qj012', entries: 1, amenityItems: 2, staleEntries: 0, staleAmenityItems: 0 },
-          { geohash: 'u0qj045', entries: 3, amenityItems: 5, staleEntries: 2, staleAmenityItems: 4 }
-        ]
-      },
-      storage
-    );
-
-    const snapshot = await stats.getCacheCoverageSnapshot(new Date('2024-01-01T00:00:00Z').getTime(), {
-      precision: 4
-    });
-
-    expect(snapshot.cacheCoverage).toHaveLength(1);
-    expect(snapshot.cacheCoverage[0]).toEqual({
-      geohash: 'u0qj',
-      entries: 4,
-      amenityItems: 7,
-      staleEntries: 2,
-      staleAmenityItems: 4
-    });
-    expect(snapshot.truncated).toBe(false);
-    expect(snapshot.appliedPrecision).toBe(4);
   });
 
   it('exposes geohash coverage snapshots separately', async () => {
