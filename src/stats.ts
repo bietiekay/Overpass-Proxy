@@ -9,6 +9,16 @@ import { startOfDayMs, startOfMonthMs, startOfWeekMs } from './time.js';
 
 export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
 
+export class CacheCoverageOverflowError extends Error {
+  constructor(
+    public readonly entryCount: number,
+    public readonly maxEntries: number
+  ) {
+    super(`cache coverage snapshot has ${entryCount.toLocaleString()} entries, exceeding the limit`);
+    this.name = 'CacheCoverageOverflowError';
+  }
+}
+
 export interface CacheMetricsProvider {
   countCachedTiles(amenity: string): number;
   countCachedAmenities(): number;
@@ -117,6 +127,10 @@ export interface CacheCoverageOptions {
   maxPrecision?: number;
 }
 
+export interface RequestStatisticsOptions {
+  maxCacheCoverageEntries?: number;
+}
+
 interface RecordRequestOptions {
   amenity: string;
   clientIp: string;
@@ -168,6 +182,7 @@ const clampCoveragePrecision = (precision: number, { min = 1, max = 12 }: { min?
 
 const DEFAULT_CACHE_COVERAGE_PRECISION = 5;
 const MAX_CACHE_COVERAGE_PRECISION = 7;
+const DEFAULT_MAX_CACHE_COVERAGE_ENTRIES = 1_000_000;
 
 const sortCacheCoverage = (a: CacheCoverageEntry, b: CacheCoverageEntry): number => {
   const totalA = a.entries + a.staleEntries;
@@ -364,15 +379,17 @@ export class RequestStatistics {
   private constructor(
     private readonly cacheMetrics: CacheMetricsProvider,
     private readonly storage: StatisticsStorage,
-    private readonly upstreamMetrics?: UpstreamMetricsProvider
+    private readonly upstreamMetrics?: UpstreamMetricsProvider,
+    private readonly options: RequestStatisticsOptions = {}
   ) {}
 
   public static async create(
     cacheMetrics: CacheMetricsProvider,
     storage: StatisticsStorage,
-    upstreamMetrics?: UpstreamMetricsProvider
+    upstreamMetrics?: UpstreamMetricsProvider,
+    options?: RequestStatisticsOptions
   ): Promise<RequestStatistics> {
-    const stats = new RequestStatistics(cacheMetrics, storage, upstreamMetrics);
+    const stats = new RequestStatistics(cacheMetrics, storage, upstreamMetrics, options);
     await stats.restore();
     return stats;
   }
@@ -616,6 +633,11 @@ export class RequestStatistics {
     const optimisationMinPrecision = Math.min(requestedMinPrecision, targetPrecision);
     const rawCoverage = await this.cacheMetrics.getCacheCoverage({ maxPrecision: targetPrecision });
     const cacheCoverage = optimiseCacheCoverage(rawCoverage, optimisationMinPrecision);
+    const maxCacheCoverageEntries =
+      this.options.maxCacheCoverageEntries ?? DEFAULT_MAX_CACHE_COVERAGE_ENTRIES;
+    if (cacheCoverage.length > maxCacheCoverageEntries) {
+      throw new CacheCoverageOverflowError(cacheCoverage.length, maxCacheCoverageEntries);
+    }
     const observedMaxPrecision = maxGeohashLength(cacheCoverage);
     const maxPrecision =
       cacheCoverage.length > 0
