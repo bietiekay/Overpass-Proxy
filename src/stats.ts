@@ -166,7 +166,7 @@ const zeroCacheStatus = (): Record<CacheStatus, number> => ({ HIT: 0, MISS: 0, S
 const BASE32_SYMBOLS = 32;
 
 const sanitiseMinPrecision = (precision?: number): number => {
-  if (!Number.isFinite(precision)) {
+  if (typeof precision !== 'number' || !Number.isFinite(precision)) {
     return 1;
   }
   const safePrecision = Math.max(1, Math.floor(precision));

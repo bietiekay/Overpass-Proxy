@@ -35,7 +35,7 @@ const DEFAULT_COVERAGE_PRECISION = 5;
 const MAX_COVERAGE_PRECISION = 7;
 
 const clampCoveragePrecision = (precision?: number): number => {
-  if (!Number.isFinite(precision)) {
+  if (typeof precision !== 'number' || !Number.isFinite(precision)) {
     return DEFAULT_COVERAGE_PRECISION;
   }
   const safe = Math.max(1, Math.floor(precision));
