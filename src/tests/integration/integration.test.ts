@@ -524,6 +524,44 @@ describe('integration', () => {
     expect(Array.isArray(response.body.geohashCoverage[0]?.geohashCoverage)).toBe(true);
   });
 
+  it('adds CORS headers to API responses', async () => {
+    await redisClient?.flushall();
+
+    const response = await request(baseUrl)
+      .get('/api/statistics')
+      .set('Origin', 'null')
+      .expect(200);
+
+    expect(response.headers['access-control-allow-origin']).toBe('*');
+    expect(response.headers.vary).toContain('Origin');
+    expect(response.headers['access-control-allow-methods']).toContain('GET');
+  });
+
+  it('responds to CORS preflight requests', async () => {
+    await redisClient?.flushall();
+
+    const response = await request(baseUrl)
+      .options('/api/statistics/cacheCoverage')
+      .set('Origin', 'https://example.com')
+      .set('Access-Control-Request-Method', 'GET')
+      .set('Access-Control-Request-Headers', 'Content-Type')
+      .expect(204);
+
+    expect(response.headers['access-control-allow-origin']).toBe('https://example.com');
+    expect(response.headers['access-control-allow-methods']).toContain('GET');
+    expect(response.headers['access-control-allow-headers']).toContain('Content-Type');
+  });
+
+  it('keeps CORS headers on error responses', async () => {
+    const response = await request(baseUrl)
+      .get('/api/non-existent-endpoint')
+      .set('Origin', 'https://example.com')
+      .expect(404);
+
+    expect(response.headers['access-control-allow-origin']).toBe('https://example.com');
+    expect(response.headers.vary).toContain('Origin');
+  });
+
   it('does not include cache coverage in the aggregated statistics payload', async () => {
     await redisClient?.flushall();
 
