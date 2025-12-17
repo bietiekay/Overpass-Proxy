@@ -14,7 +14,8 @@ export interface CacheMetricsProvider {
   countCachedAmenities(): number;
   countCachedAmenityTypes(): number;
   countTotalCachedTiles(): number;
-  getCacheCoverage(): CacheCoverageEntry[];
+  getCacheCoverage(): Promise<CacheCoverageEntry[]>;
+  warmCacheCoverage?: () => Promise<void>;
 }
 
 interface AmenityStatsInternal {
@@ -499,6 +500,10 @@ export class RequestStatistics {
     return this.runExclusive(async () => {
       this.refreshPeriodCounters(now);
 
+      if (this.cacheMetrics.warmCacheCoverage) {
+        await this.cacheMetrics.warmCacheCoverage();
+      }
+
       const generatedAt = new Date(now).toISOString();
       const dayStartIso = new Date(this.dayStart).toISOString();
       const weekStartIso = new Date(this.weekStart).toISOString();
@@ -593,7 +598,7 @@ export class RequestStatistics {
   ): Promise<CacheCoverageSnapshot> {
     const generatedAt = new Date(now).toISOString();
     const minPrecision = sanitiseMinPrecision(options.minPrecision);
-    const rawCoverage = this.cacheMetrics.getCacheCoverage();
+    const rawCoverage = await this.cacheMetrics.getCacheCoverage();
     const cacheCoverage = optimiseCacheCoverage(rawCoverage, minPrecision);
     const maxPrecision = Math.max(minPrecision, maxGeohashLength(cacheCoverage));
 

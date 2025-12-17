@@ -55,6 +55,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
 | `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
+| `SINGLE_INSTANCE_REDIS_CACHE` | `true` | Skip eager cache presence restoration when only one proxy instance writes to Redis; lazily rebuild coverage from Redis when statistics are requested |
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
