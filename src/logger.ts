@@ -58,7 +58,7 @@ const resolveLogMethod = (log: Logger): LogFn => {
     return () => {};
   }
 
-  const candidate = (log as Record<string, unknown>)[log.level];
+  const candidate = (log as unknown as Record<string, unknown>)[log.level];
   if (typeof candidate === 'function') {
     return (candidate as LogFn).bind(log);
   }
