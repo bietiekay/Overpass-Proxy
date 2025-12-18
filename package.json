@@ -15,8 +15,7 @@
     "test:ci": "cross-env USE_DOCKER=0 vitest run --coverage"
   },
   "engines": {
-    "node": ">=20",
-    "npm": ">=11.7.0"
+    "node": ">=20"
   },
   "dependencies": {
     "@fastify/formbody": "^8.0.2",
