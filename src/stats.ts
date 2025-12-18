@@ -4,7 +4,7 @@ import { setImmediate as setImmediateCallback } from 'node:timers';
 
 import type { BoundingBox } from './bbox.js';
 import { logger } from './logger.js';
-import type { CacheCoverageEntry } from './store.js';
+import type { CacheCoverageEntry, CacheCoverageOptions } from './store.js';
 import type { TileInfo } from './tiling.js';
 import { startOfDayMs, startOfMonthMs, startOfWeekMs } from './time.js';
 
@@ -15,7 +15,7 @@ export interface CacheMetricsProvider {
   countCachedAmenities(): number;
   countCachedAmenityTypes(): number;
   countTotalCachedTiles(): number;
-  getCacheCoverage(): CacheCoverageEntry[];
+  getCacheCoverage(options?: CacheCoverageOptions): CacheCoverageEntry[];
 }
 
 interface AmenityStatsInternal {
@@ -120,9 +120,70 @@ export interface UpstreamMetricsProvider {
 const DEFAULT_COVERAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_COVERAGE_CACHE_TTL_MS = 30 * 60 * 1000;
 const COVERAGE_YIELD_INTERVAL = 250;
+const DEFAULT_CACHE_COVERAGE_MAX_ENTRIES = 25000;
+const DEFAULT_GEOHASH_COVERAGE_MAX_ENTRIES = 10000;
+const COMPACTION_THRESHOLD_MULTIPLIER = 1.25;
 
 const yieldToEventLoop = async (): Promise<void> =>
   new Promise((resolve) => setImmediateCallback(resolve));
+
+const normaliseLimit = (value: number | undefined, fallback: number): number =>
+  Math.max(1, value ?? fallback);
+
+const reduceGeohashPrecision = (geohash: string): string =>
+  geohash.length > 1 ? geohash.slice(0, -1) : geohash;
+
+type GeohashMerge<T> = (existing: T | undefined, incoming: T, geohash: string) => T;
+
+const compactGeohashMap = <T>(
+  entries: Map<string, T>,
+  targetSize: number,
+  combine: GeohashMerge<T>
+): Map<string, T> => {
+  if (!Number.isFinite(targetSize) || targetSize <= 0 || entries.size <= targetSize) {
+    return entries;
+  }
+
+  let current = entries;
+
+  while (current.size > targetSize) {
+    const next = new Map<string, T>();
+    let changed = false;
+
+    for (const [geohash, value] of current) {
+      const targetHash = reduceGeohashPrecision(geohash);
+      const merged = combine(next.get(targetHash), value, targetHash);
+      next.set(targetHash, merged);
+      changed = changed || targetHash !== geohash;
+    }
+
+    if (!changed) {
+      break;
+    }
+
+    current = next;
+  }
+
+  return current;
+};
+
+const mergeCacheCoverageEntry = (
+  existing: CacheCoverageEntry | undefined,
+  incoming: CacheCoverageEntry,
+  geohash = incoming.geohash
+): CacheCoverageEntry => ({
+  geohash,
+  entries: (existing?.entries ?? 0) + incoming.entries,
+  amenityItems: (existing?.amenityItems ?? 0) + incoming.amenityItems,
+  staleEntries: (existing?.staleEntries ?? 0) + incoming.staleEntries,
+  staleAmenityItems: (existing?.staleAmenityItems ?? 0) + incoming.staleAmenityItems
+});
+
+const mergeCacheCoverageForHash: GeohashMerge<CacheCoverageEntry> = (existing, incoming, geohash) =>
+  mergeCacheCoverageEntry(existing, { ...incoming, geohash }, geohash);
+
+const mergeGeohashCount: GeohashMerge<number> = (existing, incoming) =>
+  (existing ?? 0) + incoming;
 
 interface SnapshotCacheStoreEntry {
   value: string;
@@ -355,6 +416,8 @@ export interface RequestStatisticsOptions {
   redis?: Redis;
   coverageRefreshIntervalMs?: number;
   coverageCacheTtlMs?: number;
+  maxCacheCoverageEntries?: number;
+  maxGeohashCoverageEntries?: number;
 }
 
 export class RedisStatisticsStorage implements StatisticsStorage {
@@ -412,6 +475,14 @@ export class RequestStatistics {
 
   private readonly statisticsCache: SnapshotCache<StatisticsSnapshot>;
 
+  private readonly maxCacheCoverageEntries: number;
+
+  private readonly cacheCoverageCompactionThreshold: number;
+
+  private readonly maxGeohashCoverageEntries: number;
+
+  private readonly geohashCoverageCompactionThreshold: number;
+
   private revision = 0;
 
   private snapshotRevision = 0;
@@ -424,6 +495,33 @@ export class RequestStatistics {
   ) {
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
+
+    this.maxCacheCoverageEntries = normaliseLimit(
+      options.maxCacheCoverageEntries,
+      DEFAULT_CACHE_COVERAGE_MAX_ENTRIES
+    );
+    this.cacheCoverageCompactionThreshold = Math.floor(
+      this.maxCacheCoverageEntries * COMPACTION_THRESHOLD_MULTIPLIER
+    );
+    this.maxGeohashCoverageEntries = normaliseLimit(
+      options.maxGeohashCoverageEntries,
+      DEFAULT_GEOHASH_COVERAGE_MAX_ENTRIES
+    );
+    this.geohashCoverageCompactionThreshold = Math.floor(
+      this.maxGeohashCoverageEntries * COMPACTION_THRESHOLD_MULTIPLIER
+    );
+
+    logger.info(
+      {
+        refreshIntervalMs,
+        cacheTtlMs,
+        maxCacheCoverageEntries: this.maxCacheCoverageEntries,
+        cacheCoverageCompactionThreshold: this.cacheCoverageCompactionThreshold,
+        maxGeohashCoverageEntries: this.maxGeohashCoverageEntries,
+        geohashCoverageCompactionThreshold: this.geohashCoverageCompactionThreshold
+      },
+      'initialised statistics coverage settings'
+    );
 
     this.snapshotStore = new SnapshotCacheStore(options.redis);
     this.cacheCoverageCache = new SnapshotCache(
@@ -738,11 +836,52 @@ export class RequestStatistics {
     }
   }
 
+  private async aggregateCacheCoverage(
+    entries: Iterable<CacheCoverageEntry>
+  ): Promise<CacheCoverageEntry[]> {
+    let coverage = new Map<string, CacheCoverageEntry>();
+    let processed = 0;
+
+    for (const entry of entries) {
+      coverage.set(entry.geohash, mergeCacheCoverageEntry(coverage.get(entry.geohash), entry));
+      processed += 1;
+
+      if (coverage.size > this.cacheCoverageCompactionThreshold) {
+        coverage = compactGeohashMap(coverage, this.maxCacheCoverageEntries, mergeCacheCoverageForHash);
+      }
+
+      if (processed % COVERAGE_YIELD_INTERVAL === 0) {
+        await yieldToEventLoop();
+      }
+    }
+
+    coverage = compactGeohashMap(coverage, this.maxCacheCoverageEntries, mergeCacheCoverageForHash);
+
+    return [...coverage.values()].sort(
+      (a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash)
+    );
+  }
+
+  private compactGeohashCounts(counts: Map<string, number>): Map<string, number> {
+    return compactGeohashMap(counts, this.maxGeohashCoverageEntries, mergeGeohashCount);
+  }
+
   private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
+    const start = Date.now();
     const generatedAt = new Date(now).toISOString();
-    const cacheCoverage = this.cacheMetrics
-      .getCacheCoverage()
-      .sort((a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash));
+    const coverageEntries = this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
+    const cacheCoverage = await this.aggregateCacheCoverage(coverageEntries);
+
+    logger.info(
+      {
+        inputEntries: coverageEntries.length,
+        outputEntries: cacheCoverage.length,
+        maxEntries: this.maxCacheCoverageEntries,
+        compactionThreshold: this.cacheCoverageCompactionThreshold,
+        durationMs: Date.now() - start
+      },
+      'cache coverage snapshot built'
+    );
 
     return { generatedAt, cacheCoverage };
   }
@@ -758,9 +897,22 @@ export class RequestStatistics {
   }
 
   private async buildGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
+    const start = Date.now();
     const amenityState = await this.captureGeohashCoverageState(now);
     const { amenityCoverage } = await this.buildGeohashCoverage(amenityState);
     const generatedAt = new Date(now).toISOString();
+
+    logger.info(
+      {
+        amenityCount: amenityState.length,
+        outputEntries: amenityCoverage.reduce((total, entry) => total + entry.geohashCoverage.length, 0),
+        maxEntries: this.maxGeohashCoverageEntries,
+        compactionThreshold: this.geohashCoverageCompactionThreshold,
+        durationMs: Date.now() - start
+      },
+      'geohash coverage snapshot built'
+    );
+
     return { generatedAt, geohashCoverage: amenityCoverage };
   }
 
@@ -771,14 +923,30 @@ export class RequestStatistics {
     globalGeohashCounts: Map<string, number>;
   }> {
     const amenityCoverageWithCounts: Array<AmenityGeohashCoverage & { requests: number }> = [];
-    const globalGeohashCounts = new Map<string, number>();
+    let globalGeohashCounts = new Map<string, number>();
 
     let amenityCounter = 0;
     for (const stats of amenityState) {
       const geohashCoverage: GeohashCoverageEntry[] = [];
 
       let coverageCounter = 0;
+      let amenityCounts = new Map<string, number>();
       for (const [hash, count] of stats.geohashCounts) {
+        amenityCounts.set(hash, (amenityCounts.get(hash) ?? 0) + count);
+
+        coverageCounter += 1;
+        if (amenityCounts.size > this.geohashCoverageCompactionThreshold) {
+          amenityCounts = this.compactGeohashCounts(amenityCounts);
+        }
+
+        if (coverageCounter % COVERAGE_YIELD_INTERVAL === 0) {
+          await yieldToEventLoop();
+        }
+      }
+
+      amenityCounts = this.compactGeohashCounts(amenityCounts);
+
+      for (const [hash, count] of amenityCounts) {
         const percentage = stats.requests > 0 ? (count / stats.requests) * 100 : 0;
         geohashCoverage.push({
           geohash: hash,
@@ -786,14 +954,13 @@ export class RequestStatistics {
           requests: count
         });
         globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
-
-        coverageCounter += 1;
-        if (coverageCounter % COVERAGE_YIELD_INTERVAL === 0) {
-          await yieldToEventLoop();
-        }
       }
 
       geohashCoverage.sort((a, b) => b.requests - a.requests);
+
+      if (globalGeohashCounts.size > this.geohashCoverageCompactionThreshold) {
+        globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
+      }
 
       amenityCoverageWithCounts.push({
         amenity: stats.amenity,
@@ -806,6 +973,8 @@ export class RequestStatistics {
         await yieldToEventLoop();
       }
     }
+
+    globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
 
     amenityCoverageWithCounts.sort(
       (a, b) => b.requests - a.requests || a.amenity.localeCompare(b.amenity)

@@ -22,7 +22,61 @@ export interface CacheCoverageEntry {
   staleAmenityItems: number;
 }
 
+export interface CacheCoverageOptions {
+  maxEntries?: number;
+}
+
 type PresenceListener = () => void;
+
+const reduceGeohashPrecision = (geohash: string): string => (geohash.length > 1 ? geohash.slice(0, -1) : geohash);
+
+const mergeCoverageEntry = (
+  existing: CacheCoverageEntry | undefined,
+  incoming: CacheCoverageEntry
+): CacheCoverageEntry => {
+  if (!existing) {
+    return { ...incoming };
+  }
+
+  return {
+    geohash: incoming.geohash,
+    entries: existing.entries + incoming.entries,
+    amenityItems: existing.amenityItems + incoming.amenityItems,
+    staleEntries: existing.staleEntries + incoming.staleEntries,
+    staleAmenityItems: existing.staleAmenityItems + incoming.staleAmenityItems
+  };
+};
+
+const compactCoverageEntries = (
+  coverage: Map<string, CacheCoverageEntry>,
+  targetSize: number
+): Map<string, CacheCoverageEntry> => {
+  if (!Number.isFinite(targetSize) || targetSize <= 0 || coverage.size <= targetSize) {
+    return coverage;
+  }
+
+  let current = coverage;
+
+  while (current.size > targetSize) {
+    const next = new Map<string, CacheCoverageEntry>();
+    let changed = false;
+
+    for (const entry of current.values()) {
+      const targetGeohash = reduceGeohashPrecision(entry.geohash);
+      const merged = mergeCoverageEntry(next.get(targetGeohash), { ...entry, geohash: targetGeohash });
+      next.set(targetGeohash, merged);
+      changed = changed || targetGeohash !== entry.geohash;
+    }
+
+    if (!changed) {
+      break;
+    }
+
+    current = next;
+  }
+
+  return current;
+};
 
 class TilePresenceCache {
   private readonly entries = new Map<string, Map<string, PresenceEntry>>();
@@ -264,8 +318,14 @@ class TilePresenceCache {
     return this.defaultMissingTtlMs;
   }
 
-  public getCoverage(): CacheCoverageEntry[] {
-    const coverage = new Map<string, CacheCoverageEntry>();
+  public getCoverage(options: CacheCoverageOptions = {}): CacheCoverageEntry[] {
+    const targetSize = Math.max(1, options.maxEntries ?? 50000);
+    const compactionThreshold = !Number.isFinite(targetSize)
+      ? Number.POSITIVE_INFINITY
+      : Math.max(targetSize, Math.floor(targetSize * 1.2));
+
+    let coverage = new Map<string, CacheCoverageEntry>();
+    let processed = 0;
 
     for (const [amenity, entries] of this.entries) {
       for (const [tileHash, entry] of entries) {
@@ -274,25 +334,28 @@ class TilePresenceCache {
           continue;
         }
 
-        const existing =
-          coverage.get(tileHash) ??
-          ({ geohash: tileHash, entries: 0, amenityItems: 0, staleEntries: 0, staleAmenityItems: 0 } as CacheCoverageEntry);
+        const base: CacheCoverageEntry = {
+          geohash: tileHash,
+          entries: current.stale ? 0 : 1,
+          amenityItems: current.stale ? 0 : current.amenityCount,
+          staleEntries: current.stale ? 1 : 0,
+          staleAmenityItems: current.stale ? current.amenityCount : 0
+        };
 
-        if (current.stale) {
-          existing.staleEntries += 1;
-          existing.staleAmenityItems += current.amenityCount;
-        } else {
-          existing.entries += 1;
-          existing.amenityItems += current.amenityCount;
+        coverage.set(tileHash, mergeCoverageEntry(coverage.get(tileHash), base));
+
+        processed += 1;
+        if (coverage.size > compactionThreshold && processed % 50 === 0) {
+          coverage = compactCoverageEntries(coverage, targetSize);
         }
-
-        coverage.set(tileHash, existing);
       }
 
       if (entries.size === 0) {
         this.entries.delete(amenity);
       }
     }
+
+    coverage = compactCoverageEntries(coverage, targetSize);
 
     return [...coverage.values()];
   }
@@ -411,8 +474,8 @@ export class TileStore {
     return this.presence.countAllPresent();
   }
 
-  public getCacheCoverage(): CacheCoverageEntry[] {
-    return this.presence.getCoverage();
+  public getCacheCoverage(options?: CacheCoverageOptions): CacheCoverageEntry[] {
+    return this.presence.getCoverage(options);
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {
