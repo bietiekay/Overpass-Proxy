@@ -1,7 +1,7 @@
 import IORedis, { type Redis } from 'ioredis';
 import ngeohash from 'ngeohash';
 import { setImmediate as setImmediateCallback } from 'node:timers';
-import { Worker } from 'node:worker_threads';
+import { Worker, type WorkerOptions } from 'node:worker_threads';
 
 import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
@@ -1157,7 +1157,9 @@ export class StatisticsWorkerClient {
     this.refreshIntervalMs =
       options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     this.snapshotStore = new SnapshotCacheStore(options.redis);
-    this.useWorker = options.useWorker ?? options.redis instanceof IORedis;
+    this.useWorker =
+      options.useWorker ??
+      options.redis instanceof (IORedis as unknown as new (...args: never[]) => Redis);
 
     if (!this.useWorker) {
       this.worker = null;
@@ -1178,18 +1180,20 @@ export class StatisticsWorkerClient {
       const loaderPreamble = `import { register } from 'tsx/esm/api'; register(); await import(${JSON.stringify(
         workerScript.href
       )});`;
-      this.worker = new Worker(loaderPreamble, {
+      const workerOptions: WorkerOptions & { type: 'module'; eval: true } = {
         workerData,
         type: 'module',
         eval: true
-      });
+      };
+      this.worker = new Worker(loaderPreamble, workerOptions);
     } else {
       const execArgv = extension === 'ts' ? [...process.execArgv, '--import', 'tsx'] : undefined;
-      this.worker = new Worker(workerScript, {
+      const workerOptions: WorkerOptions & { type: 'module'; execArgv?: string[] } = {
         workerData,
         type: 'module',
         execArgv
-      });
+      };
+      this.worker = new Worker(workerScript, workerOptions);
     }
 
     this.worker.on('error', (error) => {
@@ -1272,6 +1276,10 @@ export class StatisticsWorkerClient {
     void this.readyPromise
       .then(() => {
         const command: StatsWorkerCommand = { type: 'record', payload };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
         this.worker.postMessage(command);
       })
       .catch((error) => {
@@ -1312,6 +1320,10 @@ export class StatisticsWorkerClient {
     void this.readyPromise
       .then(() => {
         const command: StatsWorkerCommand = { type: 'refresh', target };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
         this.worker.postMessage(command);
       })
       .catch((error) => {
@@ -1364,6 +1376,10 @@ export class StatisticsWorkerClient {
     void this.readyPromise
       .then(() => {
         const command: StatsWorkerCommand = { type: 'staleRefreshUpdate', overview };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
         this.worker.postMessage(command);
       })
       .catch((error) => {

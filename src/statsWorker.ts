@@ -96,7 +96,9 @@ const bootstrap = async (): Promise<void> => {
 
             await store
               .withRefreshLock(representative, amenity, async () => {
-                const response = await fetchTile(data.config, group.bounds, amenity, { redis });
+                const response = await fetchTile(data.config, group.bounds, amenity, {
+                  redis: redis ?? undefined
+                });
                 const entries = group.tiles.map((fine) => ({
                   tile: fine,
                   response: {
