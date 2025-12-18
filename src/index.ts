@@ -8,9 +8,7 @@ import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
 import { createLoggerOptions, createProgressLogger, logger } from './logger.js';
 import { TileStore } from './store.js';
-import { StaleRefreshQueue } from './staleRefreshQueue.js';
-import { RedisStatisticsStorage, RequestStatistics } from './stats.js';
-import { createUpstreamMetricsProvider } from './upstream.js';
+import { StatisticsWorkerClient } from './stats.js';
 
 export interface BuildServerOptions {
   configOverrides?: Partial<AppConfig>;
@@ -116,19 +114,15 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   await store.restorePresence();
   startupProgress('restoring cache presence');
 
-  const staleRefreshQueue = new StaleRefreshQueue();
-  const statisticsStorage = new RedisStatisticsStorage(redis);
-  const upstreamMetrics = await createUpstreamMetricsProvider(config, redis);
-  const statistics = await RequestStatistics.create(store, statisticsStorage, upstreamMetrics, {
-    redis,
-    staleRefreshQueue
-  });
+  const statistics = new StatisticsWorkerClient({ config, redis, redisUrl: config.redisUrl });
+  await statistics.ready();
   startupProgress('preparing statistics subsystem');
 
-  registerInterpreterRoutes(app, { config, redis, store, stats: statistics, staleRefreshQueue });
+  registerInterpreterRoutes(app, { config, redis, store, stats: statistics });
   startupProgress('registering interpreter routes');
 
   app.addHook('onClose', async () => {
+    await statistics.stop();
     if (!options.redisClient) {
       await redis.quit();
     }

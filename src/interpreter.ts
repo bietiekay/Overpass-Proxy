@@ -17,9 +17,8 @@ import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
-import { StaleRefreshQueue } from './staleRefreshQueue.js';
 import {
-  RequestStatistics,
+  StatisticsWorkerClient,
   type CacheCoverageSnapshot,
   type CacheStatus,
   type StatisticsSnapshot
@@ -29,8 +28,7 @@ interface InterpreterDeps {
   config: AppConfig;
   redis: Redis;
   store: TileStore;
-  stats: RequestStatistics;
-  staleRefreshQueue: StaleRefreshQueue;
+  stats: StatisticsWorkerClient;
 }
 
 type InterpreterRequest = FastifyRequest;
@@ -241,13 +239,11 @@ const handleCacheable = async (
   // reflect the latest attempted write.
   if (shouldDeferStaleRefresh) {
     queuedStaleRefresh = () => {
-      deps.staleRefreshQueue.enqueue(
-        async () => {
-          await refreshStaleTiles(false);
-          await recordStats();
-        },
-        { tileGroups: staleGroups.length, tiles: stale.length }
-      );
+      deps.stats.enqueueStaleRefreshTask({
+        amenity: normalisedAmenity,
+        groups: staleGroups,
+        statsPayload
+      });
     };
   } else {
     await refreshStaleTiles(true);
@@ -304,12 +300,16 @@ const handleCacheable = async (
     tileCount: tiles.length,
     tiles
   };
-  const recordStats = async () => {
-    await deps.stats.recordRequest(statsPayload);
+  const recordStats = () => {
+    deps.stats.recordRequest(statsPayload);
+    const pendingPosts = deps.stats.getPendingRecordPosts();
+    if (pendingPosts > 50) {
+      logger.warn({ pendingPosts }, 'statistics worker record backlog');
+    }
   };
 
   if (!shouldDeferStaleRefresh) {
-    await recordStats();
+    recordStats();
   }
 
   if (unresolvedTiles.length > 0 && missingFetchFailed) {
@@ -386,10 +386,25 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics', async (_request, reply) => {
-    const { cacheCoverage: _cacheCoverage, ...snapshot } = (await deps.stats.getSnapshot()) as
-      StatisticsSnapshot & Partial<CacheCoverageSnapshot>;
+    const { snapshot, pending } = await deps.stats.getStatisticsSnapshot();
     reply.header('Content-Type', 'application/json');
-    reply.send(snapshot);
+
+    if (!snapshot) {
+      reply.code(202);
+      reply.send({ pending: true });
+      return;
+    }
+
+    const { cacheCoverage: _cacheCoverage, ...withoutCacheCoverage } = snapshot as StatisticsSnapshot &
+      Partial<CacheCoverageSnapshot>;
+
+    if (pending) {
+      reply.code(202);
+      reply.send({ ...withoutCacheCoverage, pending: true });
+      return;
+    }
+
+    reply.send(withoutCacheCoverage);
   });
 
   app.get('/api/statistics/geohashCoverage', async (_request, reply) => {
