@@ -1,10 +1,12 @@
 import type Redis from 'ioredis';
 import request, { type Response } from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { extractBoundingBox } from '../../bbox.js';
 import { buildServer } from '../../index.js';
 import { tileKey, tilesForBoundingBox } from '../../tiling.js';
+import * as upstream from '../../upstream.js';
+import { RequestStatistics } from '../../stats.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 import { createMockOverpass } from './mock-overpass.js';
 import { createTestEnvironment } from './testcontainers.js';
@@ -255,6 +257,66 @@ describe('integration', () => {
 
       expect(hits.length).toBeGreaterThan(hitsAfterFirst);
     } finally {
+      await app.close();
+    }
+  });
+
+  it('returns stale cache immediately and queues refresh when configured', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+    const recordRequestSpy = vi.spyOn(RequestStatistics.prototype, 'recordRequest');
+    const originalFetchTile = upstream.fetchTile;
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5,
+        serveStaleFromCache: true
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    const fetchTileSpy = vi.spyOn(upstream, 'fetchTile').mockImplementation(async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return originalFetchTile(...args);
+    });
+
+    try {
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      recordRequestSpy.mockClear();
+
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      const start = Date.now();
+      const second = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+      const duration = Date.now() - start;
+
+      expect(second.headers['x-cache']).toBe('STALE');
+      expect(duration).toBeLessThan(200);
+      expect(recordRequestSpy).toHaveBeenCalledTimes(0);
+
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(fetchTileSpy).toHaveBeenCalled();
+      expect(recordRequestSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchTileSpy.mockRestore();
+      recordRequestSpy.mockRestore();
       await app.close();
     }
   });
