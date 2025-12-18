@@ -1034,6 +1034,11 @@ export class RequestStatistics {
           requests: count
         });
         globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
+
+        coverageCounter += 1;
+        if (coverageCounter % COVERAGE_YIELD_INTERVAL === 0) {
+          await yieldToEventLoop();
+        }
       }
 
       geohashCoverage.sort((a, b) => b.requests - a.requests);
