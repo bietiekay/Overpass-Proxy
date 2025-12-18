@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type Redis from 'ioredis';
 
 import { TileStore } from '../../store.js';
+import { logger } from '../../logger.js';
 import type { TileInfo } from '../../tiling.js';
 import { tileKey } from '../../tiling.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
@@ -146,6 +147,32 @@ describe('TileStore', () => {
     expect(restoredStore.countCachedTiles('drinking_water')).toBe(1);
     expect(restoredStore.countCachedAmenityTypes()).toBe(2);
     expect(restoredStore.countCachedAmenities()).toBe(2);
+  });
+
+  it('ignores lock and inflight keys when restoring presence', async () => {
+    const store = new TileStore(redis as unknown as Redis, {
+      ttlSeconds: 60,
+      swrSeconds: 30
+    });
+
+    await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 }, 'toilets');
+
+    await redis.set(`${tileKey(tile.hash, 'toilets')}:lock`, 'token');
+    await redis.set(`${tileKey(tile.hash, 'toilets')}:inflight`, '1');
+
+    const warnSpy = vi.spyOn(logger, 'warn');
+
+    const restoredStore = new TileStore(redis as unknown as Redis, {
+      ttlSeconds: 60,
+      swrSeconds: 30
+    });
+
+    await restoredStore.restorePresence();
+
+    expect(restoredStore.countCachedTiles('toilets')).toBe(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
   });
 
   it('does not delete newer refresh locks when the token changes mid-refresh', async () => {
