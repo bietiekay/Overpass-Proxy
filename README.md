@@ -141,7 +141,7 @@ docker-compose up --build
 
 This starts the proxy along with Redis and a mock Overpass service used for integration tests.
 
-The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, and geohash hotspots since the start of the current day. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, and per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, and per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
 #### What the statistics include and how to use them
 
@@ -206,4 +206,3 @@ Two static dashboards ship in `public/` to help operators observe coverage and p
   quota issues in real time. Use the dropdown to switch visualisations or the toggle to hide upstreams.
 - `public/cache-preheater.html` targets manual preload runs with live progress, error tracking, and memory-friendly batching so
   large geohash ranges can be warmed without exhausting the browser.
-

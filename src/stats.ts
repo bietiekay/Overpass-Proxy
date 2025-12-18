@@ -7,6 +7,10 @@ import { logger } from './logger.js';
 import type { CacheCoverageEntry, CacheCoverageOptions } from './store.js';
 import type { TileInfo } from './tiling.js';
 import { startOfDayMs, startOfMonthMs, startOfWeekMs } from './time.js';
+import type {
+  StaleRefreshQueueMetricsProvider,
+  StaleRefreshQueueOverview
+} from './staleRefreshQueue.js';
 
 export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
 
@@ -76,6 +80,7 @@ export interface StatisticsSnapshot {
   hotspots: Array<{ geohash: string; requests: number; share: number }>;
   amenities: AmenityStatistics[];
   upstreams: UpstreamStatisticsEntry[];
+  staleRefreshQueue?: StaleRefreshQueueOverview;
 }
 
 export interface CacheCoverageSnapshot {
@@ -418,6 +423,7 @@ export interface RequestStatisticsOptions {
   coverageCacheTtlMs?: number;
   maxCacheCoverageEntries?: number;
   maxGeohashCoverageEntries?: number;
+  staleRefreshQueue?: StaleRefreshQueueMetricsProvider;
 }
 
 export class RedisStatisticsStorage implements StatisticsStorage {
@@ -475,6 +481,8 @@ export class RequestStatistics {
 
   private readonly statisticsCache: SnapshotCache<StatisticsSnapshot>;
 
+  private readonly staleRefreshQueue?: StaleRefreshQueueMetricsProvider;
+
   private readonly maxCacheCoverageEntries: number;
 
   private readonly cacheCoverageCompactionThreshold: number;
@@ -493,6 +501,8 @@ export class RequestStatistics {
     private readonly upstreamMetrics?: UpstreamMetricsProvider,
     options: RequestStatisticsOptions = {}
   ) {
+    this.staleRefreshQueue = options.staleRefreshQueue;
+
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
 
@@ -548,6 +558,10 @@ export class RequestStatistics {
       refreshIntervalMs,
       'statistics'
     );
+
+    this.staleRefreshQueue?.onUpdate?.(() => {
+      this.statisticsCache.markDirty();
+    });
   }
 
   public static async create(
@@ -803,6 +817,7 @@ export class RequestStatistics {
       const cacheHitRate = calculateHitRate(this.cacheStatusCounts, this.totalRequests);
 
       const upstreams = this.upstreamMetrics?.describeUpstreams() ?? [];
+      const staleRefreshQueue = this.staleRefreshQueue?.describeQueue();
 
       return {
         generatedAt,
@@ -823,7 +838,8 @@ export class RequestStatistics {
         cacheStatus: { ...this.cacheStatusCounts },
         hotspots,
         amenities,
-        upstreams
+        upstreams,
+        staleRefreshQueue
       };
     });
   }

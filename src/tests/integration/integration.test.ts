@@ -566,6 +566,8 @@ describe('integration', () => {
     expect(response.headers['content-type']).toContain('application/json');
     const snapshot = response.body;
     expect(snapshot.totalRequests).toBeGreaterThanOrEqual(2);
+    expect(snapshot.staleRefreshQueue?.queuedRequests).toBeGreaterThanOrEqual(0);
+    expect(snapshot.staleRefreshQueue?.queuedTileGroups).toBeGreaterThanOrEqual(0);
     const amenityStats = snapshot.amenities.find((entry: any) => entry.amenity === 'toilets');
     expect(amenityStats).toBeDefined();
     expect(amenityStats.requests).toBeGreaterThanOrEqual(2);
@@ -626,6 +628,59 @@ describe('integration', () => {
       expect(typeof entry.reason).toBe('string');
       expect(typeof entry.requestsToday).toBe('number');
       expect(typeof entry.dayStart).toBe('string');
+    }
+  });
+
+  it('reports the stale refresh queue overview in statistics', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+    const originalFetchTile = upstream.fetchTile;
+    const fetchTileSpy = vi.spyOn(upstream, 'fetchTile').mockImplementation(async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      return originalFetchTile(...args);
+    });
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5,
+        serveStaleFromCache: true
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const statsResponse = await request(url).get('/api/statistics').expect(200);
+      const queue = statsResponse.body.staleRefreshQueue;
+      expect(queue).toBeDefined();
+      const activeTileGroups = queue?.inFlight?.tileGroups ?? 0;
+      const queuedTileGroups = queue?.queuedTileGroups ?? 0;
+      expect(activeTileGroups + queuedTileGroups).toBeGreaterThan(0);
+      expect(queue?.inFlight || queue?.lastSettledAt).toBeTruthy();
+    } finally {
+      fetchTileSpy.mockRestore();
+      await app.close();
     }
   });
 

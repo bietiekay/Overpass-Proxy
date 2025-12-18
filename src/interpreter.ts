@@ -17,6 +17,7 @@ import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
 import { fetchTile, proxyTransparent } from './upstream.js';
+import { StaleRefreshQueue } from './staleRefreshQueue.js';
 import {
   RequestStatistics,
   type CacheCoverageSnapshot,
@@ -29,9 +30,8 @@ interface InterpreterDeps {
   redis: Redis;
   store: TileStore;
   stats: RequestStatistics;
+  staleRefreshQueue: StaleRefreshQueue;
 }
-
-let staleRefreshQueue: Promise<void> = Promise.resolve();
 
 type InterpreterRequest = FastifyRequest;
 
@@ -241,13 +241,13 @@ const handleCacheable = async (
   // reflect the latest attempted write.
   if (shouldDeferStaleRefresh) {
     queuedStaleRefresh = () => {
-      staleRefreshQueue = staleRefreshQueue
-        .catch(() => {})
-        .then(async () => {
+      deps.staleRefreshQueue.enqueue(
+        async () => {
           await refreshStaleTiles(false);
           await recordStats();
-        })
-        .catch((error) => logger.warn({ err: error }, 'failed to refresh stale tiles in background'));
+        },
+        { tileGroups: staleGroups.length, tiles: stale.length }
+      );
     };
   } else {
     await refreshStaleTiles(true);
