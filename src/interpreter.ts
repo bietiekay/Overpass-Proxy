@@ -300,8 +300,12 @@ const handleCacheable = async (
     tileCount: tiles.length,
     tiles
   };
+  let recordedStats = false;
   const recordStats = () => {
+    if (recordedStats) return;
+
     deps.stats.recordRequest(statsPayload);
+    recordedStats = true;
     const pendingPosts = deps.stats.getPendingRecordPosts();
     if (pendingPosts > 50) {
       logger.warn({ pendingPosts }, 'statistics worker record backlog');
@@ -313,6 +317,20 @@ const handleCacheable = async (
   }
 
   if (unresolvedTiles.length > 0 && missingFetchFailed) {
+    recordStats();
+    reply.code(503);
+    reply.header('Content-Type', 'application/json');
+    reply.header('X-Cache', cacheHeader);
+    if (fetchedAts.length > 0) {
+      const oldestFetchedAt = Math.min(...fetchedAts);
+      reply.header('X-Cache-Fetched-At', new Date(oldestFetchedAt).toISOString());
+    }
+    reply.send({ error: 'Requested area unavailable from cache' });
+    return;
+  }
+
+  if (unresolvedTiles.length > 0) {
+    recordStats();
     reply.code(503);
     reply.header('Content-Type', 'application/json');
     reply.header('X-Cache', cacheHeader);
@@ -329,6 +347,10 @@ const handleCacheable = async (
     bbox
   );
 
+  if (!shouldDeferStaleRefresh) {
+    recordStats();
+  }
+
   if (applyConditionalHeaders(request, reply, assembled)) {
     queuedStaleRefresh?.();
     return;
@@ -339,6 +361,9 @@ const handleCacheable = async (
   if (fetchedAts.length > 0) {
     const oldestFetchedAt = Math.min(...fetchedAts);
     reply.header('X-Cache-Fetched-At', new Date(oldestFetchedAt).toISOString());
+  }
+  if (!shouldDeferStaleRefresh) {
+    recordStats();
   }
   reply.send(assembled);
   queuedStaleRefresh?.();
