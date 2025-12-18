@@ -28,6 +28,13 @@ export interface CacheCoverageOptions {
 
 type PresenceListener = () => void;
 
+export interface RestorePresenceProgress {
+  batches: number;
+  cursor: string;
+  scannedKeys: number;
+  restoredTiles: number;
+}
+
 const reduceGeohashPrecision = (geohash: string): string => (geohash.length > 1 ? geohash.slice(0, -1) : geohash);
 
 const mergeCoverageEntry = (
@@ -408,22 +415,44 @@ export class TileStore {
     this.presence = new TilePresenceCache(missingTtl);
   }
 
-  public async restorePresence(): Promise<void> {
+  public async restorePresence(onProgress?: (progress: RestorePresenceProgress) => void): Promise<void> {
     let cursor = '0';
+    let batches = 0;
+    let scannedKeys = 0;
+    let restoredTiles = 0;
+
+    const reportProgress = () => {
+      if (!onProgress) {
+        return;
+      }
+
+      onProgress({
+        batches,
+        cursor,
+        scannedKeys,
+        restoredTiles
+      });
+    };
 
     do {
       const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', 'tile:*', 'COUNT', 100);
-      await this.restoreTileKeys(keys);
+      batches += 1;
+      scannedKeys += keys.length;
+      restoredTiles += await this.restoreTileKeys(keys);
       cursor = nextCursor;
+      if (batches === 1 || cursor === '0' || batches % 10 === 0) {
+        reportProgress();
+      }
     } while (cursor !== '0');
   }
 
-  private async restoreTileKeys(keys: string[]): Promise<void> {
+  private async restoreTileKeys(keys: string[]): Promise<number> {
     if (keys.length === 0) {
-      return;
+      return 0;
     }
 
     const values = await this.redis.mget(keys);
+    let restored = 0;
 
     keys.forEach((key, index) => {
       const parsed = this.parseTileKey(key);
@@ -438,10 +467,13 @@ export class TileStore {
         const amenityCount = countAmenitiesInResponse(payload.response);
         const isStale = payload.expiresAt < Date.now();
         this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, amenityCount, isStale);
+        restored += 1;
       } catch (error) {
         logger.warn({ err: error, key }, 'failed to restore tile presence from redis');
       }
     });
+
+    return restored;
   }
 
   private parseTileKey(key: string): { amenity: string; hash: string } | null {
