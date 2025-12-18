@@ -31,6 +31,8 @@ interface InterpreterDeps {
   stats: RequestStatistics;
 }
 
+let staleRefreshQueue: Promise<void> = Promise.resolve();
+
 type InterpreterRequest = FastifyRequest;
 
 const requestBodyToQuery = (request: InterpreterRequest): string | null => {
@@ -197,6 +199,8 @@ const handleCacheable = async (
   };
 
   const staleGroups = planTileFetches(stale, planOptions);
+  const shouldDeferStaleRefresh = deps.config.serveStaleFromCache && stale.length > 0 && missing.length === 0;
+  let queuedStaleRefresh: (() => void) | null = null;
   const refreshStaleTiles = async (updateResponses: boolean) => {
     for (const group of staleGroups) {
       const representative = group.tiles[0];
@@ -232,12 +236,19 @@ const handleCacheable = async (
   };
 
   // If the request can be entirely satisfied from cache, optionally prefer speed by returning stale
-  // data immediately and refreshing in the background. When cache coverage is incomplete—or when the
-  // feature is disabled—we await the refresh so responses reflect the latest attempted write.
-  if (deps.config.serveStaleFromCache && stale.length > 0 && missing.length === 0) {
-    void refreshStaleTiles(false).catch((error) =>
-      logger.warn({ err: error }, 'failed to refresh stale tiles in background')
-    );
+  // data immediately and refreshing in the background once the response has been delivered. When
+  // cache coverage is incomplete—or when the feature is disabled—we await the refresh so responses
+  // reflect the latest attempted write.
+  if (shouldDeferStaleRefresh) {
+    queuedStaleRefresh = () => {
+      staleRefreshQueue = staleRefreshQueue
+        .catch(() => {})
+        .then(async () => {
+          await refreshStaleTiles(false);
+          await recordStats();
+        })
+        .catch((error) => logger.warn({ err: error }, 'failed to refresh stale tiles in background'));
+    };
   } else {
     await refreshStaleTiles(true);
   }
@@ -285,14 +296,21 @@ const handleCacheable = async (
     cacheHeader = 'MISS';
   }
 
-  await deps.stats.recordRequest({
+  const statsPayload = {
     amenity: normalisedAmenity,
     clientIp: request.ip,
     bbox,
     cacheStatus: cacheHeader,
     tileCount: tiles.length,
     tiles
-  });
+  };
+  const recordStats = async () => {
+    await deps.stats.recordRequest(statsPayload);
+  };
+
+  if (!shouldDeferStaleRefresh) {
+    await recordStats();
+  }
 
   if (unresolvedTiles.length > 0 && missingFetchFailed) {
     reply.code(503);
@@ -312,6 +330,7 @@ const handleCacheable = async (
   );
 
   if (applyConditionalHeaders(request, reply, assembled)) {
+    queuedStaleRefresh?.();
     return;
   }
 
@@ -322,6 +341,7 @@ const handleCacheable = async (
     reply.header('X-Cache-Fetched-At', new Date(oldestFetchedAt).toISOString());
   }
   reply.send(assembled);
+  queuedStaleRefresh?.();
 };
 
 export const registerInterpreterRoutes = (app: FastifyInstance, deps: InterpreterDeps): void => {
