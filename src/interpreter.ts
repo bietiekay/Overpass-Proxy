@@ -375,12 +375,18 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   app.get('/api/statistics/geohashCoverage', async (_request, reply) => {
     const snapshot = await deps.stats.getGeohashCoverageSnapshot();
     reply.header('Content-Type', 'application/json');
+    if (snapshot.pending) {
+      reply.code(202);
+    }
     reply.send(snapshot);
   });
 
   app.get('/api/statistics/cacheCoverage', async (_request, reply) => {
     const snapshot = await deps.stats.getCacheCoverageSnapshot();
     reply.header('Content-Type', 'application/json');
+    if (snapshot.pending) {
+      reply.code(202);
+    }
     reply.send(snapshot);
   });
 

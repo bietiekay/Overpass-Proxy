@@ -87,6 +87,7 @@ describe('RequestStatistics', () => {
     expect(toilets?.cacheStatus.MISS).toBe(1);
     expect(toilets?.averageTilesPerRequest).toBe(10);
 
+    await stats.refreshCoverageCaches();
     const geohashSnapshot = await stats.getGeohashCoverageSnapshot(
       new Date('2024-01-01T13:00:00Z').getTime()
     );
@@ -235,11 +236,45 @@ describe('RequestStatistics', () => {
       storage
     );
 
-    const snapshot = await stats.getCacheCoverageSnapshot(new Date('2024-01-01T00:00:00Z').getTime());
+    const snapshotTime = new Date('2024-01-01T00:00:00Z').getTime();
+    await stats.refreshCoverageCaches(snapshotTime);
+    const snapshot = await stats.getCacheCoverageSnapshot(snapshotTime);
     expect(snapshot.generatedAt).toBe('2024-01-01T00:00:00.000Z');
     expect(snapshot.cacheCoverage[0]?.geohash).toBe('u33d0');
     expect(snapshot.cacheCoverage[0]?.entries).toBe(3);
     expect(snapshot.cacheCoverage[1]?.geohash).toBe('u0qj0');
+  });
+
+  it('caches statistics snapshots until marked dirty', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => []
+      },
+      storage
+    );
+
+    const firstSnapshot = await stats.getSnapshot(new Date('2024-01-01T10:00:00Z').getTime());
+    const secondSnapshot = await stats.getSnapshot(new Date('2024-01-01T10:01:00Z').getTime());
+
+    expect(secondSnapshot.generatedAt).toBe(firstSnapshot.generatedAt);
+
+    await stats.recordRequest({
+      amenity: 'toilets',
+      clientIp: '1.1.1.1',
+      bbox,
+      cacheStatus: 'HIT',
+      tileCount: 1,
+      timestamp: new Date('2024-01-01T11:00:00Z').getTime()
+    });
+
+    const refreshedSnapshot = await stats.getSnapshot(new Date('2024-01-01T11:01:00Z').getTime());
+    expect(refreshedSnapshot.generatedAt).not.toBe(firstSnapshot.generatedAt);
+    expect(refreshedSnapshot.totalRequests).toBe(firstSnapshot.totalRequests + 1);
   });
 
   it('exposes geohash coverage snapshots separately', async () => {
@@ -267,9 +302,9 @@ describe('RequestStatistics', () => {
       timestamp: new Date('2024-01-01T12:00:00Z').getTime()
     });
 
-    const snapshot = await stats.getGeohashCoverageSnapshot(
-      new Date('2024-01-01T13:00:00Z').getTime()
-    );
+    const snapshotTime = new Date('2024-01-01T13:00:00Z').getTime();
+    await stats.refreshCoverageCaches(snapshotTime);
+    const snapshot = await stats.getGeohashCoverageSnapshot(snapshotTime);
 
     expect(snapshot.generatedAt).toBe('2024-01-01T13:00:00.000Z');
     const toiletsCoverage = snapshot.geohashCoverage.find((entry) => entry.amenity === 'toilets');
