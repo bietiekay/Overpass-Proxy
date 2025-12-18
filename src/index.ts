@@ -7,9 +7,8 @@ import { resolve } from 'node:path';
 import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
 import { createLoggerOptions, createProgressLogger, logger } from './logger.js';
-import { TileStore } from './store.js';
-import { RedisStatisticsStorage, RequestStatistics } from './stats.js';
-import { createUpstreamMetricsProvider } from './upstream.js';
+import { TileStore, type RestorePresenceProgress } from './store.js';
+import { StatisticsWorkerClient } from './stats.js';
 
 export interface BuildServerOptions {
   configOverrides?: Partial<AppConfig>;
@@ -19,6 +18,7 @@ export interface BuildServerOptions {
 
 export const buildServer = async (options: BuildServerOptions = {}) => {
   const startupProgress = options.startupProgress ?? (() => {});
+  const startupLogger = logger.child({ phase: 'startup' });
   startupProgress('loading configuration');
   const baseConfig = loadConfig();
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
@@ -112,18 +112,31 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     swrSeconds: config.swrSeconds
   });
 
-  await store.restorePresence();
-  startupProgress('restoring cache presence');
+  const logRestoreProgress = (progress: RestorePresenceProgress) => {
+    startupLogger.info(
+      {
+        stage: 'restoring cache presence',
+        batches: progress.batches,
+        cursor: progress.cursor,
+        scannedKeys: progress.scannedKeys,
+        restoredTiles: progress.restoredTiles
+      },
+      'scanning Redis for cached tiles'
+    );
+  };
 
-  const statisticsStorage = new RedisStatisticsStorage(redis);
-  const upstreamMetrics = await createUpstreamMetricsProvider(config, redis);
-  const statistics = await RequestStatistics.create(store, statisticsStorage, upstreamMetrics, { redis });
+  startupProgress('restoring cache presence');
+  await store.restorePresence(logRestoreProgress);
+
   startupProgress('preparing statistics subsystem');
+  const statistics = new StatisticsWorkerClient({ config, redis, redisUrl: config.redisUrl });
+  await statistics.ready();
 
   registerInterpreterRoutes(app, { config, redis, store, stats: statistics });
   startupProgress('registering interpreter routes');
 
   app.addHook('onClose', async () => {
+    await statistics.stop();
     if (!options.redisClient) {
       await redis.quit();
     }

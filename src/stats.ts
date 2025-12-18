@@ -1,12 +1,20 @@
-import type { Redis } from 'ioredis';
+import IORedis, { type Redis } from 'ioredis';
 import ngeohash from 'ngeohash';
 import { setImmediate as setImmediateCallback } from 'node:timers';
+import { Worker, type WorkerOptions } from 'node:worker_threads';
 
 import type { BoundingBox } from './bbox.js';
+import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
-import type { CacheCoverageEntry } from './store.js';
+import type { CacheCoverageEntry, CacheCoverageOptions } from './store.js';
+import { TileStore } from './store.js';
 import type { TileInfo } from './tiling.js';
 import { startOfDayMs, startOfMonthMs, startOfWeekMs } from './time.js';
+import type {
+  StaleRefreshQueueMetricsProvider,
+  StaleRefreshQueueOverview
+} from './staleRefreshQueue.js';
+import { StaleRefreshQueue } from './staleRefreshQueue.js';
 
 export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
 
@@ -15,7 +23,7 @@ export interface CacheMetricsProvider {
   countCachedAmenities(): number;
   countCachedAmenityTypes(): number;
   countTotalCachedTiles(): number;
-  getCacheCoverage(): CacheCoverageEntry[];
+  getCacheCoverage(options?: CacheCoverageOptions): CacheCoverageEntry[];
 }
 
 interface AmenityStatsInternal {
@@ -76,6 +84,7 @@ export interface StatisticsSnapshot {
   hotspots: Array<{ geohash: string; requests: number; share: number }>;
   amenities: AmenityStatistics[];
   upstreams: UpstreamStatisticsEntry[];
+  staleRefreshQueue?: StaleRefreshQueueOverview;
 }
 
 export interface CacheCoverageSnapshot {
@@ -117,19 +126,84 @@ export interface UpstreamMetricsProvider {
   describeUpstreams(): UpstreamStatisticsEntry[];
 }
 
-const DEFAULT_COVERAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-const DEFAULT_COVERAGE_CACHE_TTL_MS = 30 * 60 * 1000;
-const COVERAGE_YIELD_INTERVAL = 250;
+export const DEFAULT_COVERAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+export const DEFAULT_COVERAGE_CACHE_TTL_MS = 30 * 60 * 1000;
+export const COVERAGE_YIELD_INTERVAL = 250;
+export const DEFAULT_CACHE_COVERAGE_MAX_ENTRIES = 25000;
+export const DEFAULT_GEOHASH_COVERAGE_MAX_ENTRIES = 10000;
+export const COMPACTION_THRESHOLD_MULTIPLIER = 1.25;
+
+export const STATISTICS_SNAPSHOT_KEY = 'statistics:snapshot';
+export const CACHE_COVERAGE_SNAPSHOT_KEY = 'statistics:cacheCoverageSnapshot';
+export const GEOHASH_COVERAGE_SNAPSHOT_KEY = 'statistics:geohashCoverageSnapshot';
 
 const yieldToEventLoop = async (): Promise<void> =>
   new Promise((resolve) => setImmediateCallback(resolve));
+
+const normaliseLimit = (value: number | undefined, fallback: number): number =>
+  Math.max(1, value ?? fallback);
+
+const reduceGeohashPrecision = (geohash: string): string =>
+  geohash.length > 1 ? geohash.slice(0, -1) : geohash;
+
+type GeohashMerge<T> = (existing: T | undefined, incoming: T, geohash: string) => T;
+
+const compactGeohashMap = <T>(
+  entries: Map<string, T>,
+  targetSize: number,
+  combine: GeohashMerge<T>
+): Map<string, T> => {
+  if (!Number.isFinite(targetSize) || targetSize <= 0 || entries.size <= targetSize) {
+    return entries;
+  }
+
+  let current = entries;
+
+  while (current.size > targetSize) {
+    const next = new Map<string, T>();
+    let changed = false;
+
+    for (const [geohash, value] of current) {
+      const targetHash = reduceGeohashPrecision(geohash);
+      const merged = combine(next.get(targetHash), value, targetHash);
+      next.set(targetHash, merged);
+      changed = changed || targetHash !== geohash;
+    }
+
+    if (!changed) {
+      break;
+    }
+
+    current = next;
+  }
+
+  return current;
+};
+
+const mergeCacheCoverageEntry = (
+  existing: CacheCoverageEntry | undefined,
+  incoming: CacheCoverageEntry,
+  geohash = incoming.geohash
+): CacheCoverageEntry => ({
+  geohash,
+  entries: (existing?.entries ?? 0) + incoming.entries,
+  amenityItems: (existing?.amenityItems ?? 0) + incoming.amenityItems,
+  staleEntries: (existing?.staleEntries ?? 0) + incoming.staleEntries,
+  staleAmenityItems: (existing?.staleAmenityItems ?? 0) + incoming.staleAmenityItems
+});
+
+const mergeCacheCoverageForHash: GeohashMerge<CacheCoverageEntry> = (existing, incoming, geohash) =>
+  mergeCacheCoverageEntry(existing, { ...incoming, geohash }, geohash);
+
+const mergeGeohashCount: GeohashMerge<number> = (existing, incoming) =>
+  (existing ?? 0) + incoming;
 
 interface SnapshotCacheStoreEntry {
   value: string;
   expiresAt: number;
 }
 
-class SnapshotCacheStore {
+export class SnapshotCacheStore {
   private readonly memory = new Map<string, SnapshotCacheStoreEntry>();
 
   constructor(private readonly redis?: Redis) {}
@@ -159,6 +233,62 @@ class SnapshotCacheStore {
     }
 
     this.memory.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+}
+
+export interface SnapshotReadOptions {
+  refreshIntervalMs?: number;
+}
+
+export const readCachedSnapshot = async <T extends { generatedAt: string }>(
+  store: SnapshotCacheStore,
+  key: string,
+  now = Date.now(),
+  options: SnapshotReadOptions = {}
+): Promise<{ snapshot: T | null; pending: boolean }> => {
+  const refreshIntervalMs = options.refreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
+  const raw = await store.get(key);
+  if (!raw) {
+    return { snapshot: null, pending: true };
+  }
+
+  try {
+    const snapshot = JSON.parse(raw) as T;
+    const generatedAt = Date.parse(snapshot.generatedAt);
+    const stale = !Number.isFinite(generatedAt) || now - generatedAt > refreshIntervalMs;
+    return { snapshot, pending: stale };
+  } catch (error) {
+    logger.warn({ err: error, key }, 'failed to parse cached snapshot');
+    return { snapshot: null, pending: true };
+  }
+};
+
+export class SharedStaleRefreshMetrics implements StaleRefreshQueueMetricsProvider {
+  private overview: StaleRefreshQueueOverview = {
+    queuedRequests: 0,
+    queuedTileGroups: 0,
+    queuedTiles: 0
+  };
+
+  private readonly listeners = new Set<() => void>();
+
+  describeQueue(): StaleRefreshQueueOverview {
+    return this.overview;
+  }
+
+  onUpdate(listener: () => void): void {
+    this.listeners.add(listener);
+  }
+
+  public update(overview: StaleRefreshQueueOverview): void {
+    this.overview = overview;
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch (error) {
+        logger.warn({ err: error }, 'stale refresh metrics listener failed');
+      }
+    }
   }
 }
 
@@ -279,7 +409,7 @@ class SnapshotCache<T extends { generatedAt: string }> {
   }
 }
 
-interface RecordRequestOptions {
+export interface RecordRequestOptions {
   amenity: string;
   clientIp: string;
   bbox: BoundingBox;
@@ -355,6 +485,9 @@ export interface RequestStatisticsOptions {
   redis?: Redis;
   coverageRefreshIntervalMs?: number;
   coverageCacheTtlMs?: number;
+  maxCacheCoverageEntries?: number;
+  maxGeohashCoverageEntries?: number;
+  staleRefreshQueue?: StaleRefreshQueueMetricsProvider;
 }
 
 export class RedisStatisticsStorage implements StatisticsStorage {
@@ -412,6 +545,16 @@ export class RequestStatistics {
 
   private readonly statisticsCache: SnapshotCache<StatisticsSnapshot>;
 
+  private readonly staleRefreshQueue?: StaleRefreshQueueMetricsProvider;
+
+  private readonly maxCacheCoverageEntries: number;
+
+  private readonly cacheCoverageCompactionThreshold: number;
+
+  private readonly maxGeohashCoverageEntries: number;
+
+  private readonly geohashCoverageCompactionThreshold: number;
+
   private revision = 0;
 
   private snapshotRevision = 0;
@@ -422,13 +565,42 @@ export class RequestStatistics {
     private readonly upstreamMetrics?: UpstreamMetricsProvider,
     options: RequestStatisticsOptions = {}
   ) {
+    this.staleRefreshQueue = options.staleRefreshQueue;
+
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
+
+    this.maxCacheCoverageEntries = normaliseLimit(
+      options.maxCacheCoverageEntries,
+      DEFAULT_CACHE_COVERAGE_MAX_ENTRIES
+    );
+    this.cacheCoverageCompactionThreshold = Math.floor(
+      this.maxCacheCoverageEntries * COMPACTION_THRESHOLD_MULTIPLIER
+    );
+    this.maxGeohashCoverageEntries = normaliseLimit(
+      options.maxGeohashCoverageEntries,
+      DEFAULT_GEOHASH_COVERAGE_MAX_ENTRIES
+    );
+    this.geohashCoverageCompactionThreshold = Math.floor(
+      this.maxGeohashCoverageEntries * COMPACTION_THRESHOLD_MULTIPLIER
+    );
+
+    logger.info(
+      {
+        refreshIntervalMs,
+        cacheTtlMs,
+        maxCacheCoverageEntries: this.maxCacheCoverageEntries,
+        cacheCoverageCompactionThreshold: this.cacheCoverageCompactionThreshold,
+        maxGeohashCoverageEntries: this.maxGeohashCoverageEntries,
+        geohashCoverageCompactionThreshold: this.geohashCoverageCompactionThreshold
+      },
+      'initialised statistics coverage settings'
+    );
 
     this.snapshotStore = new SnapshotCacheStore(options.redis);
     this.cacheCoverageCache = new SnapshotCache(
       this.snapshotStore,
-      'statistics:cacheCoverageSnapshot',
+      CACHE_COVERAGE_SNAPSHOT_KEY,
       () => this.buildCacheCoverageSnapshot(),
       cacheTtlMs,
       refreshIntervalMs,
@@ -436,7 +608,7 @@ export class RequestStatistics {
     );
     this.geohashCoverageCache = new SnapshotCache(
       this.snapshotStore,
-      'statistics:geohashCoverageSnapshot',
+      GEOHASH_COVERAGE_SNAPSHOT_KEY,
       () => this.buildGeohashCoverageSnapshot(),
       cacheTtlMs,
       refreshIntervalMs,
@@ -444,12 +616,16 @@ export class RequestStatistics {
     );
     this.statisticsCache = new SnapshotCache(
       this.snapshotStore,
-      'statistics:snapshot',
+      STATISTICS_SNAPSHOT_KEY,
       () => this.buildStatisticsSnapshot(),
       cacheTtlMs,
       refreshIntervalMs,
       'statistics'
     );
+
+    this.staleRefreshQueue?.onUpdate?.(() => {
+      this.statisticsCache.markDirty();
+    });
   }
 
   public static async create(
@@ -705,6 +881,7 @@ export class RequestStatistics {
       const cacheHitRate = calculateHitRate(this.cacheStatusCounts, this.totalRequests);
 
       const upstreams = this.upstreamMetrics?.describeUpstreams() ?? [];
+      const staleRefreshQueue = this.staleRefreshQueue?.describeQueue();
 
       return {
         generatedAt,
@@ -725,7 +902,8 @@ export class RequestStatistics {
         cacheStatus: { ...this.cacheStatusCounts },
         hotspots,
         amenities,
-        upstreams
+        upstreams,
+        staleRefreshQueue
       };
     });
   }
@@ -738,11 +916,52 @@ export class RequestStatistics {
     }
   }
 
+  private async aggregateCacheCoverage(
+    entries: Iterable<CacheCoverageEntry>
+  ): Promise<CacheCoverageEntry[]> {
+    let coverage = new Map<string, CacheCoverageEntry>();
+    let processed = 0;
+
+    for (const entry of entries) {
+      coverage.set(entry.geohash, mergeCacheCoverageEntry(coverage.get(entry.geohash), entry));
+      processed += 1;
+
+      if (coverage.size > this.cacheCoverageCompactionThreshold) {
+        coverage = compactGeohashMap(coverage, this.maxCacheCoverageEntries, mergeCacheCoverageForHash);
+      }
+
+      if (processed % COVERAGE_YIELD_INTERVAL === 0) {
+        await yieldToEventLoop();
+      }
+    }
+
+    coverage = compactGeohashMap(coverage, this.maxCacheCoverageEntries, mergeCacheCoverageForHash);
+
+    return [...coverage.values()].sort(
+      (a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash)
+    );
+  }
+
+  private compactGeohashCounts(counts: Map<string, number>): Map<string, number> {
+    return compactGeohashMap(counts, this.maxGeohashCoverageEntries, mergeGeohashCount);
+  }
+
   private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
+    const start = Date.now();
     const generatedAt = new Date(now).toISOString();
-    const cacheCoverage = this.cacheMetrics
-      .getCacheCoverage()
-      .sort((a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash));
+    const coverageEntries = this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
+    const cacheCoverage = await this.aggregateCacheCoverage(coverageEntries);
+
+    logger.info(
+      {
+        inputEntries: coverageEntries.length,
+        outputEntries: cacheCoverage.length,
+        maxEntries: this.maxCacheCoverageEntries,
+        compactionThreshold: this.cacheCoverageCompactionThreshold,
+        durationMs: Date.now() - start
+      },
+      'cache coverage snapshot built'
+    );
 
     return { generatedAt, cacheCoverage };
   }
@@ -758,9 +977,22 @@ export class RequestStatistics {
   }
 
   private async buildGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
+    const start = Date.now();
     const amenityState = await this.captureGeohashCoverageState(now);
     const { amenityCoverage } = await this.buildGeohashCoverage(amenityState);
     const generatedAt = new Date(now).toISOString();
+
+    logger.info(
+      {
+        amenityCount: amenityState.length,
+        outputEntries: amenityCoverage.reduce((total, entry) => total + entry.geohashCoverage.length, 0),
+        maxEntries: this.maxGeohashCoverageEntries,
+        compactionThreshold: this.geohashCoverageCompactionThreshold,
+        durationMs: Date.now() - start
+      },
+      'geohash coverage snapshot built'
+    );
+
     return { generatedAt, geohashCoverage: amenityCoverage };
   }
 
@@ -771,14 +1003,30 @@ export class RequestStatistics {
     globalGeohashCounts: Map<string, number>;
   }> {
     const amenityCoverageWithCounts: Array<AmenityGeohashCoverage & { requests: number }> = [];
-    const globalGeohashCounts = new Map<string, number>();
+    let globalGeohashCounts = new Map<string, number>();
 
     let amenityCounter = 0;
     for (const stats of amenityState) {
       const geohashCoverage: GeohashCoverageEntry[] = [];
 
       let coverageCounter = 0;
+      let amenityCounts = new Map<string, number>();
       for (const [hash, count] of stats.geohashCounts) {
+        amenityCounts.set(hash, (amenityCounts.get(hash) ?? 0) + count);
+
+        coverageCounter += 1;
+        if (amenityCounts.size > this.geohashCoverageCompactionThreshold) {
+          amenityCounts = this.compactGeohashCounts(amenityCounts);
+        }
+
+        if (coverageCounter % COVERAGE_YIELD_INTERVAL === 0) {
+          await yieldToEventLoop();
+        }
+      }
+
+      amenityCounts = this.compactGeohashCounts(amenityCounts);
+
+      for (const [hash, count] of amenityCounts) {
         const percentage = stats.requests > 0 ? (count / stats.requests) * 100 : 0;
         geohashCoverage.push({
           geohash: hash,
@@ -795,6 +1043,10 @@ export class RequestStatistics {
 
       geohashCoverage.sort((a, b) => b.requests - a.requests);
 
+      if (globalGeohashCounts.size > this.geohashCoverageCompactionThreshold) {
+        globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
+      }
+
       amenityCoverageWithCounts.push({
         amenity: stats.amenity,
         geohashCoverage,
@@ -806,6 +1058,8 @@ export class RequestStatistics {
         await yieldToEventLoop();
       }
     }
+
+    globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
 
     amenityCoverageWithCounts.sort(
       (a, b) => b.requests - a.requests || a.amenity.localeCompare(b.amenity)
@@ -838,5 +1092,423 @@ export class RequestStatistics {
         lastRequestAt: stats.lastRequestAt
       }))
     };
+  }
+}
+
+export type StatsWorkerCommand =
+  | { type: 'record'; payload: RecordRequestOptions }
+  | { type: 'refresh'; target: StatisticsRefreshTarget }
+  | { type: 'staleRefreshUpdate'; overview: StaleRefreshQueueOverview }
+  | {
+      type: 'staleRefreshTask';
+      amenity: string;
+      groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
+      statsPayload: RecordRequestOptions;
+    };
+
+export type StatsWorkerNotification = { type: 'ready' };
+
+export type StatisticsRefreshTarget =
+  | 'all'
+  | 'statistics'
+  | 'cacheCoverage'
+  | 'geohashCoverage';
+
+export interface StatisticsWorkerOptions {
+  config: AppConfig;
+  redis: Redis;
+  redisUrl: string;
+  coverageRefreshIntervalMs?: number;
+  coverageCacheTtlMs?: number;
+  maxCacheCoverageEntries?: number;
+  maxGeohashCoverageEntries?: number;
+  workerPath?: URL;
+  useWorker?: boolean;
+}
+
+export class StatisticsWorkerClient {
+  private readonly worker: Worker | null;
+
+  private readonly readyPromise: Promise<void>;
+
+  private readonly snapshotStore: SnapshotCacheStore;
+
+  private readonly refreshIntervalMs: number;
+
+  private readonly useWorker: boolean;
+
+  private inlineStatistics: RequestStatistics | null = null;
+
+  private inlineStaleRefreshMetrics: SharedStaleRefreshMetrics | null = null;
+
+  private inlineStaleRefreshQueue: StaleRefreshQueue | null = null;
+
+  private inlineStore: TileStore | null = null;
+
+  private readonly config: AppConfig;
+
+  private readonly redis: Redis;
+
+  private pendingRecordPosts = 0;
+
+  constructor(options: StatisticsWorkerOptions) {
+    const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
+    const workerScript =
+      options.workerPath ?? new URL(`./statsWorker.${extension}`, import.meta.url);
+
+    this.config = options.config;
+    this.redis = options.redis;
+
+    this.refreshIntervalMs =
+      options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
+    this.snapshotStore = new SnapshotCacheStore(options.redis);
+    this.useWorker =
+      options.useWorker ??
+      options.redis instanceof (IORedis as unknown as new (...args: never[]) => Redis);
+
+    if (!this.useWorker) {
+      this.worker = null;
+      this.readyPromise = this.startInline(options);
+      return;
+    }
+
+    const workerData = {
+      config: options.config,
+      redisUrl: options.redisUrl,
+      coverageRefreshIntervalMs: options.coverageRefreshIntervalMs,
+      coverageCacheTtlMs: options.coverageCacheTtlMs,
+      maxCacheCoverageEntries: options.maxCacheCoverageEntries,
+      maxGeohashCoverageEntries: options.maxGeohashCoverageEntries
+    };
+
+    if (extension === 'ts' && !options.workerPath) {
+      const loaderPreamble = `import { register } from 'tsx/esm/api'; register(); await import(${JSON.stringify(
+        workerScript.href
+      )});`;
+      const workerOptions: WorkerOptions & { type: 'module'; eval: true } = {
+        workerData,
+        type: 'module',
+        eval: true
+      };
+      this.worker = new Worker(loaderPreamble, workerOptions);
+    } else {
+      const execArgv = extension === 'ts' ? [...process.execArgv, '--import', 'tsx'] : undefined;
+      const workerOptions: WorkerOptions & { type: 'module'; execArgv?: string[] } = {
+        workerData,
+        type: 'module',
+        execArgv
+      };
+      this.worker = new Worker(workerScript, workerOptions);
+    }
+
+    this.worker.on('error', (error) => {
+      logger.error({ err: error }, 'statistics worker errored');
+    });
+
+    this.worker.on('exit', (code) => {
+      if (code !== 0) {
+        logger.error({ code }, 'statistics worker exited unexpectedly');
+      }
+    });
+
+    this.readyPromise = new Promise((resolve, reject) => {
+      const handleMessage = (message: StatsWorkerNotification) => {
+        if (message?.type === 'ready') {
+          resolve();
+        }
+      };
+
+      this.worker!.once('message', handleMessage);
+      this.worker!.once('error', (error) => reject(error));
+      this.worker!.once('exit', (code) => {
+        if (code !== 0) {
+          reject(new Error(`statistics worker exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  public ready(): Promise<void> {
+    return this.readyPromise;
+  }
+
+  private async startInline(options: StatisticsWorkerOptions): Promise<void> {
+    this.inlineStaleRefreshMetrics = new SharedStaleRefreshMetrics();
+    this.inlineStaleRefreshQueue = new StaleRefreshQueue();
+    const store = new TileStore(options.redis, {
+      ttlSeconds: options.config.cacheTtlSeconds,
+      swrSeconds: options.config.swrSeconds
+    });
+    this.inlineStore = store;
+
+    await store.restorePresence();
+    const { createUpstreamMetricsProvider } = await import('./upstream.js');
+    const upstreamMetrics = await createUpstreamMetricsProvider(options.config, options.redis);
+
+    this.inlineStatistics = await RequestStatistics.create(
+      store,
+      new RedisStatisticsStorage(options.redis),
+      upstreamMetrics,
+      {
+        redis: options.redis,
+        staleRefreshQueue: this.inlineStaleRefreshMetrics,
+        coverageRefreshIntervalMs: options.coverageRefreshIntervalMs,
+        coverageCacheTtlMs: options.coverageCacheTtlMs,
+        maxCacheCoverageEntries: options.maxCacheCoverageEntries,
+        maxGeohashCoverageEntries: options.maxGeohashCoverageEntries
+      }
+    );
+
+    this.inlineStaleRefreshQueue.onUpdate(() => {
+      const overview = this.inlineStaleRefreshQueue?.describeQueue();
+      if (overview) {
+        this.inlineStaleRefreshMetrics?.update(overview);
+      }
+    });
+  }
+
+  public recordRequest(payload: RecordRequestOptions): void {
+    if (!this.useWorker) {
+      void this.readyPromise
+        .then(() => this.inlineStatistics?.recordRequest(payload))
+        .catch((error) => {
+          logger.warn({ err: error }, 'failed to record request in inline statistics worker');
+        });
+      return;
+    }
+
+    this.pendingRecordPosts += 1;
+    void this.readyPromise
+      .then(() => {
+        const command: StatsWorkerCommand = { type: 'record', payload };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
+        this.worker.postMessage(command);
+      })
+      .catch((error) => {
+        logger.warn({ err: error }, 'failed to post record command to statistics worker');
+      })
+      .finally(() => {
+        this.pendingRecordPosts = Math.max(0, this.pendingRecordPosts - 1);
+      });
+  }
+
+  public refresh(target: StatisticsRefreshTarget = 'all'): void {
+    if (!this.useWorker) {
+      void this.readyPromise
+        .then(async () => {
+          if (!this.inlineStatistics) return;
+          switch (target) {
+            case 'statistics':
+              await this.inlineStatistics.getSnapshot();
+              return;
+            case 'cacheCoverage':
+            case 'geohashCoverage':
+              await this.inlineStatistics.refreshCoverageCaches();
+              return;
+            case 'all':
+            default:
+              await Promise.all([
+                this.inlineStatistics.getSnapshot(),
+                this.inlineStatistics.refreshCoverageCaches()
+              ]);
+          }
+        })
+        .catch((error) => {
+          logger.warn({ err: error }, 'failed to refresh inline statistics');
+        });
+      return;
+    }
+
+    void this.readyPromise
+      .then(() => {
+        const command: StatsWorkerCommand = { type: 'refresh', target };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
+        this.worker.postMessage(command);
+      })
+      .catch((error) => {
+        logger.warn({ err: error }, 'failed to post refresh command to statistics worker');
+      });
+  }
+
+  public enqueueStaleRefreshTask(task: {
+    amenity: string;
+    groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
+    statsPayload: RecordRequestOptions;
+  }): void {
+    if (!this.useWorker) {
+      void this.readyPromise
+        .then(() =>
+          this.inlineStaleRefreshQueue?.enqueue(async () => {
+            await this.runStaleRefreshTask(task);
+          }, {
+            tileGroups: task.groups.length,
+            tiles: task.groups.reduce((total, group) => total + group.tiles.length, 0)
+          })
+        )
+        .catch((error) => {
+          logger.warn({ err: error }, 'failed to enqueue inline stale refresh task');
+        });
+      return;
+    }
+
+    void this.readyPromise
+      .then(() => {
+        const command: StatsWorkerCommand = {
+          type: 'staleRefreshTask',
+          amenity: task.amenity,
+          groups: task.groups,
+          statsPayload: task.statsPayload
+        };
+        this.worker?.postMessage(command);
+      })
+      .catch((error) => {
+        logger.warn({ err: error }, 'failed to post stale refresh task to statistics worker');
+      });
+  }
+
+  public updateStaleRefreshOverview(overview: StaleRefreshQueueOverview): void {
+    if (!this.useWorker) {
+      this.inlineStaleRefreshMetrics?.update(overview);
+      return;
+    }
+
+    void this.readyPromise
+      .then(() => {
+        const command: StatsWorkerCommand = { type: 'staleRefreshUpdate', overview };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
+        this.worker.postMessage(command);
+      })
+      .catch((error) => {
+        logger.warn({ err: error }, 'failed to post stale refresh overview to statistics worker');
+      });
+  }
+
+  public getPendingRecordPosts(): number {
+    return this.pendingRecordPosts;
+  }
+
+  public async getStatisticsSnapshot(now = Date.now()): Promise<{
+    snapshot: StatisticsSnapshot | null;
+    pending: boolean;
+  }> {
+    if (!this.useWorker) {
+      await this.readyPromise;
+      const snapshot = await this.inlineStatistics?.getSnapshot(now);
+      return { snapshot: snapshot ?? null, pending: false };
+    }
+
+    const result = await readCachedSnapshot<StatisticsSnapshot>(
+      this.snapshotStore,
+      STATISTICS_SNAPSHOT_KEY,
+      now,
+      { refreshIntervalMs: this.refreshIntervalMs }
+    );
+
+    if (result.pending) {
+      this.refresh('statistics');
+    }
+
+    return result;
+  }
+
+  public async getCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
+    if (!this.useWorker) {
+      await this.readyPromise;
+      const snapshot = await this.inlineStatistics?.getCacheCoverageSnapshot(now);
+      return snapshot ?? { generatedAt: new Date(now).toISOString(), cacheCoverage: [], pending: true };
+    }
+
+    const result = await readCachedSnapshot<CacheCoverageSnapshot>(
+      this.snapshotStore,
+      CACHE_COVERAGE_SNAPSHOT_KEY,
+      now,
+      { refreshIntervalMs: this.refreshIntervalMs }
+    );
+
+    if (result.pending) {
+      this.refresh('cacheCoverage');
+    }
+
+    if (result.snapshot) {
+      return result.pending ? { ...result.snapshot, pending: true } : result.snapshot;
+    }
+
+    return { generatedAt: new Date(now).toISOString(), cacheCoverage: [], pending: true };
+  }
+
+  public async getGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
+    if (!this.useWorker) {
+      await this.readyPromise;
+      const snapshot = await this.inlineStatistics?.getGeohashCoverageSnapshot(now);
+      return snapshot ?? { generatedAt: new Date(now).toISOString(), geohashCoverage: [], pending: true };
+    }
+
+    const result = await readCachedSnapshot<GeohashCoverageSnapshot>(
+      this.snapshotStore,
+      GEOHASH_COVERAGE_SNAPSHOT_KEY,
+      now,
+      { refreshIntervalMs: this.refreshIntervalMs }
+    );
+
+    if (result.pending) {
+      this.refresh('geohashCoverage');
+    }
+
+    if (result.snapshot) {
+      return result.pending ? { ...result.snapshot, pending: true } : result.snapshot;
+    }
+
+    return { generatedAt: new Date(now).toISOString(), geohashCoverage: [], pending: true };
+  }
+
+  public async stop(): Promise<void> {
+    await this.readyPromise.catch(() => {});
+    if (this.worker) {
+      await this.worker.terminate();
+    }
+  }
+
+  private async runStaleRefreshTask(task: {
+    amenity: string;
+    groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
+    statsPayload: RecordRequestOptions;
+  }): Promise<void> {
+    if (!this.inlineStatistics || !this.inlineStore) {
+      return;
+    }
+
+    const { fetchTile } = await import('./upstream.js');
+    const { filterElementsByBbox } = await import('./store.js');
+
+    for (const group of task.groups) {
+      const representative = group.tiles[0];
+      if (!representative) continue;
+
+      await this.inlineStore
+        .withRefreshLock(representative, task.amenity, async () => {
+          const response = await fetchTile(this.config, group.bounds, task.amenity, {
+            redis: this.redis
+          });
+          const entries = group.tiles.map((fine) => ({
+            tile: fine,
+            response: { ...response, elements: filterElementsByBbox(response.elements, fine.bounds) }
+          }));
+          await this.inlineStore?.writeTiles(entries, task.amenity);
+        })
+        .catch((error: unknown) => {
+          logger.warn({ err: error }, 'failed to run inline stale refresh task');
+        });
+    }
+
+    await this.inlineStatistics.recordRequest(task.statsPayload);
   }
 }

@@ -22,7 +22,68 @@ export interface CacheCoverageEntry {
   staleAmenityItems: number;
 }
 
+export interface CacheCoverageOptions {
+  maxEntries?: number;
+}
+
 type PresenceListener = () => void;
+
+export interface RestorePresenceProgress {
+  batches: number;
+  cursor: string;
+  scannedKeys: number;
+  restoredTiles: number;
+}
+
+const reduceGeohashPrecision = (geohash: string): string => (geohash.length > 1 ? geohash.slice(0, -1) : geohash);
+
+const mergeCoverageEntry = (
+  existing: CacheCoverageEntry | undefined,
+  incoming: CacheCoverageEntry
+): CacheCoverageEntry => {
+  if (!existing) {
+    return { ...incoming };
+  }
+
+  return {
+    geohash: incoming.geohash,
+    entries: existing.entries + incoming.entries,
+    amenityItems: existing.amenityItems + incoming.amenityItems,
+    staleEntries: existing.staleEntries + incoming.staleEntries,
+    staleAmenityItems: existing.staleAmenityItems + incoming.staleAmenityItems
+  };
+};
+
+const compactCoverageEntries = (
+  coverage: Map<string, CacheCoverageEntry>,
+  targetSize: number
+): Map<string, CacheCoverageEntry> => {
+  if (!Number.isFinite(targetSize) || targetSize <= 0 || coverage.size <= targetSize) {
+    return coverage;
+  }
+
+  let current = coverage;
+
+  while (current.size > targetSize) {
+    const next = new Map<string, CacheCoverageEntry>();
+    let changed = false;
+
+    for (const entry of current.values()) {
+      const targetGeohash = reduceGeohashPrecision(entry.geohash);
+      const merged = mergeCoverageEntry(next.get(targetGeohash), { ...entry, geohash: targetGeohash });
+      next.set(targetGeohash, merged);
+      changed = changed || targetGeohash !== entry.geohash;
+    }
+
+    if (!changed) {
+      break;
+    }
+
+    current = next;
+  }
+
+  return current;
+};
 
 class TilePresenceCache {
   private readonly entries = new Map<string, Map<string, PresenceEntry>>();
@@ -264,8 +325,14 @@ class TilePresenceCache {
     return this.defaultMissingTtlMs;
   }
 
-  public getCoverage(): CacheCoverageEntry[] {
-    const coverage = new Map<string, CacheCoverageEntry>();
+  public getCoverage(options: CacheCoverageOptions = {}): CacheCoverageEntry[] {
+    const targetSize = Math.max(1, options.maxEntries ?? 50000);
+    const compactionThreshold = !Number.isFinite(targetSize)
+      ? Number.POSITIVE_INFINITY
+      : Math.max(targetSize, Math.floor(targetSize * 1.2));
+
+    let coverage = new Map<string, CacheCoverageEntry>();
+    let processed = 0;
 
     for (const [amenity, entries] of this.entries) {
       for (const [tileHash, entry] of entries) {
@@ -274,25 +341,28 @@ class TilePresenceCache {
           continue;
         }
 
-        const existing =
-          coverage.get(tileHash) ??
-          ({ geohash: tileHash, entries: 0, amenityItems: 0, staleEntries: 0, staleAmenityItems: 0 } as CacheCoverageEntry);
+        const base: CacheCoverageEntry = {
+          geohash: tileHash,
+          entries: current.stale ? 0 : 1,
+          amenityItems: current.stale ? 0 : current.amenityCount,
+          staleEntries: current.stale ? 1 : 0,
+          staleAmenityItems: current.stale ? current.amenityCount : 0
+        };
 
-        if (current.stale) {
-          existing.staleEntries += 1;
-          existing.staleAmenityItems += current.amenityCount;
-        } else {
-          existing.entries += 1;
-          existing.amenityItems += current.amenityCount;
+        coverage.set(tileHash, mergeCoverageEntry(coverage.get(tileHash), base));
+
+        processed += 1;
+        if (coverage.size > compactionThreshold && processed % 50 === 0) {
+          coverage = compactCoverageEntries(coverage, targetSize);
         }
-
-        coverage.set(tileHash, existing);
       }
 
       if (entries.size === 0) {
         this.entries.delete(amenity);
       }
     }
+
+    coverage = compactCoverageEntries(coverage, targetSize);
 
     return [...coverage.values()];
   }
@@ -345,22 +415,44 @@ export class TileStore {
     this.presence = new TilePresenceCache(missingTtl);
   }
 
-  public async restorePresence(): Promise<void> {
+  public async restorePresence(onProgress?: (progress: RestorePresenceProgress) => void): Promise<void> {
     let cursor = '0';
+    let batches = 0;
+    let scannedKeys = 0;
+    let restoredTiles = 0;
+
+    const reportProgress = () => {
+      if (!onProgress) {
+        return;
+      }
+
+      onProgress({
+        batches,
+        cursor,
+        scannedKeys,
+        restoredTiles
+      });
+    };
 
     do {
       const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', 'tile:*', 'COUNT', 100);
-      await this.restoreTileKeys(keys);
+      batches += 1;
+      scannedKeys += keys.length;
+      restoredTiles += await this.restoreTileKeys(keys);
       cursor = nextCursor;
+      if (batches === 1 || cursor === '0' || batches % 10 === 0) {
+        reportProgress();
+      }
     } while (cursor !== '0');
   }
 
-  private async restoreTileKeys(keys: string[]): Promise<void> {
+  private async restoreTileKeys(keys: string[]): Promise<number> {
     if (keys.length === 0) {
-      return;
+      return 0;
     }
 
     const values = await this.redis.mget(keys);
+    let restored = 0;
 
     keys.forEach((key, index) => {
       const parsed = this.parseTileKey(key);
@@ -375,10 +467,13 @@ export class TileStore {
         const amenityCount = countAmenitiesInResponse(payload.response);
         const isStale = payload.expiresAt < Date.now();
         this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, amenityCount, isStale);
+        restored += 1;
       } catch (error) {
         logger.warn({ err: error, key }, 'failed to restore tile presence from redis');
       }
     });
+
+    return restored;
   }
 
   private parseTileKey(key: string): { amenity: string; hash: string } | null {
@@ -386,12 +481,17 @@ export class TileStore {
       return null;
     }
 
-    const [, amenity, ...hashParts] = key.split(':');
-    if (!amenity || hashParts.length === 0) {
+    const parts = key.split(':');
+    if (parts.length !== 3) {
       return null;
     }
 
-    return { amenity, hash: hashParts.join(':') };
+    const [, amenity, hash] = parts;
+    if (!amenity || !hash) {
+      return null;
+    }
+
+    return { amenity, hash };
   }
 
   public countCachedTiles(amenity: string): number {
@@ -411,8 +511,8 @@ export class TileStore {
     return this.presence.countAllPresent();
   }
 
-  public getCacheCoverage(): CacheCoverageEntry[] {
-    return this.presence.getCoverage();
+  public getCacheCoverage(options?: CacheCoverageOptions): CacheCoverageEntry[] {
+    return this.presence.getCoverage(options);
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {
