@@ -8,6 +8,7 @@ import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
 import { createLoggerOptions, createProgressLogger, logger } from './logger.js';
 import { TileStore } from './store.js';
+import { StaleRefreshQueue } from './staleRefreshQueue.js';
 import { RedisStatisticsStorage, RequestStatistics } from './stats.js';
 import { createUpstreamMetricsProvider } from './upstream.js';
 
@@ -115,12 +116,16 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   await store.restorePresence();
   startupProgress('restoring cache presence');
 
+  const staleRefreshQueue = new StaleRefreshQueue();
   const statisticsStorage = new RedisStatisticsStorage(redis);
   const upstreamMetrics = await createUpstreamMetricsProvider(config, redis);
-  const statistics = await RequestStatistics.create(store, statisticsStorage, upstreamMetrics, { redis });
+  const statistics = await RequestStatistics.create(store, statisticsStorage, upstreamMetrics, {
+    redis,
+    staleRefreshQueue
+  });
   startupProgress('preparing statistics subsystem');
 
-  registerInterpreterRoutes(app, { config, redis, store, stats: statistics });
+  registerInterpreterRoutes(app, { config, redis, store, stats: statistics, staleRefreshQueue });
   startupProgress('registering interpreter routes');
 
   app.addHook('onClose', async () => {

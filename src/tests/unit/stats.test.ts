@@ -98,6 +98,52 @@ describe('RequestStatistics', () => {
     expect(toiletsCoverage?.geohashCoverage.length).toBe(tiles.length);
   });
 
+  it('includes stale refresh queue details when a provider is supplied', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    let describeCalls = 0;
+    const describeQueue = () => {
+      describeCalls += 1;
+      return {
+      queuedRequests: 1,
+      queuedTileGroups: 2,
+      queuedTiles: 3,
+      oldestEnqueuedAt: '2024-01-01T00:00:00.000Z',
+      latestEnqueuedAt: '2024-01-01T00:00:00.000Z'
+      };
+    };
+    let updateListener: (() => void) | undefined;
+
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => []
+      },
+      storage,
+      undefined,
+      {
+        staleRefreshQueue: {
+          describeQueue,
+          onUpdate: (listener) => {
+            updateListener = listener;
+          }
+        }
+      }
+    );
+
+    expect(updateListener).toBeDefined();
+    const snapshot = await stats.getSnapshot();
+    expect(snapshot.staleRefreshQueue?.queuedRequests).toBe(1);
+    expect(snapshot.staleRefreshQueue?.queuedTileGroups).toBe(2);
+    expect(snapshot.staleRefreshQueue?.queuedTiles).toBe(3);
+
+    updateListener?.();
+    const refreshed = await stats.getSnapshot();
+    expect(refreshed.staleRefreshQueue?.queuedRequests).toBe(1);
+  });
+
   it('resets daily counters across day boundaries', async () => {
     const storage = new InMemoryStatisticsStorage();
     const stats = await RequestStatistics.create(
