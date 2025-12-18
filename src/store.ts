@@ -449,12 +449,17 @@ export class TileStore {
       return null;
     }
 
-    const [, amenity, ...hashParts] = key.split(':');
-    if (!amenity || hashParts.length === 0) {
+    const parts = key.split(':');
+    if (parts.length !== 3) {
       return null;
     }
 
-    return { amenity, hash: hashParts.join(':') };
+    const [, amenity, hash] = parts;
+    if (!amenity || !hash) {
+      return null;
+    }
+
+    return { amenity, hash };
   }
 
   public countCachedTiles(amenity: string): number {
