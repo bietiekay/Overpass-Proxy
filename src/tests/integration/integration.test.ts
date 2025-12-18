@@ -1,5 +1,5 @@
 import type Redis from 'ioredis';
-import request from 'supertest';
+import request, { type Response } from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { extractBoundingBox } from '../../bbox.js';
@@ -14,6 +14,23 @@ const formBody = (query: string) => new URLSearchParams({ data: query }).toStrin
 const drinkingWaterQuery =
   '[out:json];node["amenity"="drinking_water"](52.5,13.3,52.6,13.4);out;';
 const uppercaseAmenityQuery = '[out:json];node["amenity"="TOILETS"](52.5,13.3,52.6,13.4);out;';
+
+const waitForCoverage = async (path: string) => {
+  let lastResponse: Response | undefined;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const response = await request(baseUrl).get(path);
+    lastResponse = response;
+    if (response.statusCode === 200) {
+      return response;
+    }
+    expect(response.statusCode).toBe(202);
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw new Error(`coverage not ready at ${path}, last status ${lastResponse?.statusCode}`);
+};
 
 let stopEnv: (() => Promise<void>) | undefined;
 let baseUrl: string;
@@ -503,7 +520,7 @@ describe('integration', () => {
       .send(formBody(jsonQuery))
       .expect(200);
 
-    const response = await request(baseUrl).get('/api/statistics/cacheCoverage').expect(200);
+    const response = await waitForCoverage('/api/statistics/cacheCoverage');
     expect(response.headers['content-type']).toContain('application/json');
     expect(Array.isArray(response.body.cacheCoverage)).toBe(true);
   });
@@ -518,7 +535,7 @@ describe('integration', () => {
       .send(formBody(jsonQuery))
       .expect(200);
 
-    const response = await request(baseUrl).get('/api/statistics/geohashCoverage').expect(200);
+    const response = await waitForCoverage('/api/statistics/geohashCoverage');
     expect(response.headers['content-type']).toContain('application/json');
     expect(Array.isArray(response.body.geohashCoverage)).toBe(true);
     expect(Array.isArray(response.body.geohashCoverage[0]?.geohashCoverage)).toBe(true);

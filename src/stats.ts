@@ -1,5 +1,6 @@
 import type { Redis } from 'ioredis';
 import ngeohash from 'ngeohash';
+import { setImmediate as setImmediateCallback } from 'node:timers';
 
 import type { BoundingBox } from './bbox.js';
 import { logger } from './logger.js';
@@ -32,6 +33,12 @@ export interface GeohashCoverageEntry {
   percentage: number;
   requests: number;
 }
+
+type AmenityCoverageState = {
+  amenity: string;
+  requests: number;
+  geohashCounts: Array<[string, number]>;
+};
 
 export interface AmenityStatistics {
   amenity: string;
@@ -74,11 +81,13 @@ export interface StatisticsSnapshot {
 export interface CacheCoverageSnapshot {
   generatedAt: string;
   cacheCoverage: CacheCoverageEntry[];
+  pending?: boolean;
 }
 
 export interface GeohashCoverageSnapshot {
   generatedAt: string;
   geohashCoverage: AmenityGeohashCoverage[];
+  pending?: boolean;
 }
 
 export type UpstreamStatus = 'available' | 'cooldown' | 'blocked';
@@ -106,6 +115,168 @@ export interface UpstreamStatisticsEntry {
 
 export interface UpstreamMetricsProvider {
   describeUpstreams(): UpstreamStatisticsEntry[];
+}
+
+const DEFAULT_COVERAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_COVERAGE_CACHE_TTL_MS = 30 * 60 * 1000;
+const COVERAGE_YIELD_INTERVAL = 250;
+
+const yieldToEventLoop = async (): Promise<void> =>
+  new Promise((resolve) => setImmediateCallback(resolve));
+
+interface SnapshotCacheStoreEntry {
+  value: string;
+  expiresAt: number;
+}
+
+class SnapshotCacheStore {
+  private readonly memory = new Map<string, SnapshotCacheStoreEntry>();
+
+  constructor(private readonly redis?: Redis) {}
+
+  public async get(key: string): Promise<string | null> {
+    if (this.redis) {
+      return this.redis.get(key);
+    }
+
+    const current = this.memory.get(key);
+    if (!current) {
+      return null;
+    }
+
+    if (current.expiresAt < Date.now()) {
+      this.memory.delete(key);
+      return null;
+    }
+
+    return current.value;
+  }
+
+  public async set(key: string, value: string, ttlMs: number): Promise<void> {
+    if (this.redis) {
+      await this.redis.set(key, value, 'PX', ttlMs);
+      return;
+    }
+
+    this.memory.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+}
+
+class SnapshotCache<T extends { generatedAt: string }> {
+  private refreshPromise: Promise<void> | null = null;
+
+  private lastGeneratedAt: number | null = null;
+
+  private dirty = false;
+
+  constructor(
+    private readonly store: SnapshotCacheStore,
+    private readonly key: string,
+    private readonly builder: () => Promise<T>,
+    private readonly ttlMs: number,
+    private readonly refreshIntervalMs: number,
+    private readonly label: string
+  ) {}
+
+  public start(): void {
+    this.maybeRefresh();
+    if (this.refreshIntervalMs > 0) {
+      setInterval(() => this.maybeRefresh(), this.refreshIntervalMs).unref();
+    }
+  }
+
+  public async refresh(): Promise<void> {
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+
+    this.refreshPromise = this.buildAndStore();
+    try {
+      await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
+    }
+  }
+
+  public markDirty(): void {
+    this.dirty = true;
+  }
+
+  public async saveSnapshot(snapshot: T): Promise<void> {
+    await this.storeSnapshot(snapshot);
+  }
+
+  public async readWithStatus(
+    now = Date.now(),
+    options: { skipRefresh?: boolean } = {}
+  ): Promise<{ snapshot: T | null; pending: boolean }> {
+    const snapshot = await this.read();
+    const stale = this.isStale(now);
+    if (stale && !options.skipRefresh) {
+      this.maybeRefresh();
+    }
+
+    return { snapshot, pending: stale || this.refreshPromise !== null || snapshot === null };
+  }
+
+  private async read(): Promise<T | null> {
+    const raw = await this.store.get(this.key);
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as T;
+      const generatedAt = Date.parse(parsed.generatedAt);
+      if (Number.isFinite(generatedAt)) {
+        this.lastGeneratedAt = generatedAt;
+        this.dirty = false;
+      }
+      return parsed;
+    } catch (error) {
+      logger.warn({ err: error, key: this.key }, 'failed to parse cached statistics snapshot');
+      return null;
+    }
+  }
+
+  private async buildAndStore(): Promise<void> {
+    try {
+      const snapshot = await this.builder();
+      await this.storeSnapshot(snapshot);
+    } catch (error) {
+      logger.warn({ err: error, key: this.key, label: this.label }, 'failed to refresh statistics snapshot');
+    }
+  }
+
+  private async storeSnapshot(snapshot: T): Promise<void> {
+    const serialised = JSON.stringify(snapshot);
+    await this.store.set(this.key, serialised, this.ttlMs);
+    const generatedAt = Date.parse(snapshot.generatedAt);
+    if (Number.isFinite(generatedAt)) {
+      this.lastGeneratedAt = generatedAt;
+      this.dirty = false;
+    }
+  }
+
+  private isStale(now: number): boolean {
+    if (this.dirty) {
+      return true;
+    }
+    if (!this.lastGeneratedAt) {
+      return true;
+    }
+    return now - this.lastGeneratedAt > this.refreshIntervalMs;
+  }
+
+  private maybeRefresh(): void {
+    if (this.refreshPromise) {
+      return;
+    }
+
+    this.refreshPromise = this.buildAndStore().finally(() => {
+      this.refreshPromise = null;
+    });
+  }
 }
 
 interface RecordRequestOptions {
@@ -180,6 +351,12 @@ export interface StatisticsStorage {
   save(state: PersistedStatisticsState): Promise<void>;
 }
 
+export interface RequestStatisticsOptions {
+  redis?: Redis;
+  coverageRefreshIntervalMs?: number;
+  coverageCacheTtlMs?: number;
+}
+
 export class RedisStatisticsStorage implements StatisticsStorage {
   constructor(private readonly redis: Redis, private readonly key = 'statistics:current') {}
 
@@ -227,19 +404,64 @@ export class RequestStatistics {
 
   private queue: Promise<void> = Promise.resolve();
 
+  private readonly snapshotStore: SnapshotCacheStore;
+
+  private readonly cacheCoverageCache: SnapshotCache<CacheCoverageSnapshot>;
+
+  private readonly geohashCoverageCache: SnapshotCache<GeohashCoverageSnapshot>;
+
+  private readonly statisticsCache: SnapshotCache<StatisticsSnapshot>;
+
+  private revision = 0;
+
+  private snapshotRevision = 0;
+
   private constructor(
     private readonly cacheMetrics: CacheMetricsProvider,
     private readonly storage: StatisticsStorage,
-    private readonly upstreamMetrics?: UpstreamMetricsProvider
-  ) {}
+    private readonly upstreamMetrics?: UpstreamMetricsProvider,
+    options: RequestStatisticsOptions = {}
+  ) {
+    const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
+    const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
+
+    this.snapshotStore = new SnapshotCacheStore(options.redis);
+    this.cacheCoverageCache = new SnapshotCache(
+      this.snapshotStore,
+      'statistics:cacheCoverageSnapshot',
+      () => this.buildCacheCoverageSnapshot(),
+      cacheTtlMs,
+      refreshIntervalMs,
+      'cache-coverage'
+    );
+    this.geohashCoverageCache = new SnapshotCache(
+      this.snapshotStore,
+      'statistics:geohashCoverageSnapshot',
+      () => this.buildGeohashCoverageSnapshot(),
+      cacheTtlMs,
+      refreshIntervalMs,
+      'geohash-coverage'
+    );
+    this.statisticsCache = new SnapshotCache(
+      this.snapshotStore,
+      'statistics:snapshot',
+      () => this.buildStatisticsSnapshot(),
+      cacheTtlMs,
+      refreshIntervalMs,
+      'statistics'
+    );
+  }
 
   public static async create(
     cacheMetrics: CacheMetricsProvider,
     storage: StatisticsStorage,
-    upstreamMetrics?: UpstreamMetricsProvider
+    upstreamMetrics?: UpstreamMetricsProvider,
+    options: RequestStatisticsOptions = {}
   ): Promise<RequestStatistics> {
-    const stats = new RequestStatistics(cacheMetrics, storage, upstreamMetrics);
+    const stats = new RequestStatistics(cacheMetrics, storage, upstreamMetrics, options);
     await stats.restore();
+    stats.cacheCoverageCache.start();
+    stats.geohashCoverageCache.start();
     return stats;
   }
 
@@ -291,6 +513,8 @@ export class RequestStatistics {
         };
         this.amenityStats.set(stats.amenity, stats);
       }
+
+      this.revision = persisted.totalRequests ?? 0;
     } catch (error) {
       logger.warn({ err: error }, 'failed to restore request statistics from storage');
     }
@@ -369,11 +593,63 @@ export class RequestStatistics {
         );
       }
 
+      this.revision += 1;
+
       await this.persist();
+
+      this.geohashCoverageCache.markDirty();
+      this.cacheCoverageCache.markDirty();
+      this.statisticsCache.markDirty();
     });
   }
 
   public async getSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
+    const { snapshot, pending } = await this.statisticsCache.readWithStatus(now, {
+      skipRefresh: true
+    });
+    const needsRefresh = pending || this.snapshotRevision < this.revision;
+
+    if (snapshot && !needsRefresh) {
+      return snapshot;
+    }
+
+    const rebuilt = await this.buildStatisticsSnapshot(now);
+    await this.statisticsCache.saveSnapshot(rebuilt);
+    this.snapshotRevision = this.revision;
+    return rebuilt;
+  }
+
+  public async getGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
+    const { snapshot, pending } = await this.geohashCoverageCache.readWithStatus(now);
+    if (snapshot) {
+      return pending ? { ...snapshot, pending: true } : snapshot;
+    }
+
+    return { generatedAt: new Date(now).toISOString(), geohashCoverage: [], pending: true };
+  }
+
+  public async getCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
+    const { snapshot, pending } = await this.cacheCoverageCache.readWithStatus(now);
+    if (snapshot) {
+      return pending ? { ...snapshot, pending: true } : snapshot;
+    }
+
+    return { generatedAt: new Date(now).toISOString(), cacheCoverage: [], pending: true };
+  }
+
+  public async refreshCoverageCaches(now = Date.now()): Promise<void> {
+    const [cacheCoverage, geohashCoverage] = await Promise.all([
+      this.buildCacheCoverageSnapshot(now),
+      this.buildGeohashCoverageSnapshot(now)
+    ]);
+
+    await Promise.all([
+      this.cacheCoverageCache.saveSnapshot(cacheCoverage),
+      this.geohashCoverageCache.saveSnapshot(geohashCoverage)
+    ]);
+  }
+
+  private async buildStatisticsSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
     return this.runExclusive(async () => {
       this.refreshPeriodCounters(now);
 
@@ -454,26 +730,6 @@ export class RequestStatistics {
     });
   }
 
-  public async getGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
-    return this.runExclusive(async () => {
-      this.refreshPeriodCounters(now);
-
-      const generatedAt = new Date(now).toISOString();
-      const { amenityCoverage } = this.buildGeohashCoverage();
-
-      return { generatedAt, geohashCoverage: amenityCoverage };
-    });
-  }
-
-  public async getCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
-    const generatedAt = new Date(now).toISOString();
-    const cacheCoverage = this.cacheMetrics
-      .getCacheCoverage()
-      .sort((a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash));
-
-    return { generatedAt, cacheCoverage };
-  }
-
   private async persist(): Promise<void> {
     try {
       await this.storage.save(this.serialise());
@@ -482,16 +738,46 @@ export class RequestStatistics {
     }
   }
 
-  private buildGeohashCoverage(): {
+  private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
+    const generatedAt = new Date(now).toISOString();
+    const cacheCoverage = this.cacheMetrics
+      .getCacheCoverage()
+      .sort((a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash));
+
+    return { generatedAt, cacheCoverage };
+  }
+
+  private async captureGeohashCoverageState(now: number): Promise<AmenityCoverageState[]> {
+    return this.runExclusive(async () => {
+      return [...this.amenityStats.values()].map((stats) => ({
+        amenity: stats.amenity,
+        requests: stats.requests,
+        geohashCounts: [...stats.geohashCounts.entries()]
+      }));
+    });
+  }
+
+  private async buildGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
+    const amenityState = await this.captureGeohashCoverageState(now);
+    const { amenityCoverage } = await this.buildGeohashCoverage(amenityState);
+    const generatedAt = new Date(now).toISOString();
+    return { generatedAt, geohashCoverage: amenityCoverage };
+  }
+
+  private async buildGeohashCoverage(
+    amenityState: AmenityCoverageState[]
+  ): Promise<{
     amenityCoverage: AmenityGeohashCoverage[];
     globalGeohashCounts: Map<string, number>;
-  } {
+  }> {
     const amenityCoverageWithCounts: Array<AmenityGeohashCoverage & { requests: number }> = [];
     const globalGeohashCounts = new Map<string, number>();
 
-    for (const stats of this.amenityStats.values()) {
+    let amenityCounter = 0;
+    for (const stats of amenityState) {
       const geohashCoverage: GeohashCoverageEntry[] = [];
 
+      let coverageCounter = 0;
       for (const [hash, count] of stats.geohashCounts) {
         const percentage = stats.requests > 0 ? (count / stats.requests) * 100 : 0;
         geohashCoverage.push({
@@ -500,6 +786,11 @@ export class RequestStatistics {
           requests: count
         });
         globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
+
+        coverageCounter += 1;
+        if (coverageCounter % COVERAGE_YIELD_INTERVAL === 0) {
+          await yieldToEventLoop();
+        }
       }
 
       geohashCoverage.sort((a, b) => b.requests - a.requests);
@@ -509,6 +800,11 @@ export class RequestStatistics {
         geohashCoverage,
         requests: stats.requests
       });
+
+      amenityCounter += 1;
+      if (amenityCounter % COVERAGE_YIELD_INTERVAL === 0) {
+        await yieldToEventLoop();
+      }
     }
 
     amenityCoverageWithCounts.sort(
