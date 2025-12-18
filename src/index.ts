@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 
 import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
-import { createLoggerOptions, logger } from './logger.js';
+import { createLoggerOptions, createProgressLogger, logger } from './logger.js';
 import { TileStore } from './store.js';
 import { RedisStatisticsStorage, RequestStatistics } from './stats.js';
 import { createUpstreamMetricsProvider } from './upstream.js';
@@ -14,11 +14,15 @@ import { createUpstreamMetricsProvider } from './upstream.js';
 export interface BuildServerOptions {
   configOverrides?: Partial<AppConfig>;
   redisClient?: Redis;
+  startupProgress?: (message: string) => void;
 }
 
 export const buildServer = async (options: BuildServerOptions = {}) => {
+  const startupProgress = options.startupProgress ?? (() => {});
+  startupProgress('loading configuration');
   const baseConfig = loadConfig();
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
+  startupProgress('creating fastify instance');
   const app = Fastify({ logger: createLoggerOptions(), trustProxy: config.trustProxy });
   void app.register(formbody);
 
@@ -94,7 +98,9 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       app.log.info({ body: summary }, 'incoming POST body');
     }
   });
+  startupProgress('registering base routes and hooks');
 
+  startupProgress('initialising Redis client');
   const redis = options.redisClient ??
     new Redis(config.redisUrl, {
       lazyConnect: true,
@@ -107,12 +113,15 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   });
 
   await store.restorePresence();
+  startupProgress('restoring cache presence');
 
   const statisticsStorage = new RedisStatisticsStorage(redis);
   const upstreamMetrics = await createUpstreamMetricsProvider(config, redis);
   const statistics = await RequestStatistics.create(store, statisticsStorage, upstreamMetrics, { redis });
+  startupProgress('preparing statistics subsystem');
 
   registerInterpreterRoutes(app, { config, redis, store, stats: statistics });
+  startupProgress('registering interpreter routes');
 
   app.addHook('onClose', async () => {
     if (!options.redisClient) {
@@ -124,9 +133,11 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 };
 
 export const start = async () => {
-  const { app, config } = await buildServer();
+  const startupProgress = createProgressLogger(8, logger);
+  const { app, config } = await buildServer({ startupProgress });
 
   await app.listen({ port: config.port, host: '0.0.0.0' });
+  startupProgress('overpass proxy listening');
   logger.info({ port: config.port }, 'overpass proxy listening');
 };
 
