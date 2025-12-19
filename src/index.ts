@@ -28,6 +28,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   const statisticsMapPath = resolve(process.cwd(), 'public', 'statistics-map.html');
   const cachePreheaterPath = resolve(process.cwd(), 'public', 'cache-preheater.html');
+  const cacheInvalidatorPath = resolve(process.cwd(), 'public', 'cache-invalidator.html');
 
   // Simple CORS handling for browser clients
   app.addHook('onSend', async (_request, reply, payload) => {
@@ -50,6 +51,12 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
 
   app.get('/cache-preheater', async (_request, reply) => {
     const html = await readFile(cachePreheaterPath, 'utf8');
+    reply.header('Content-Type', 'text/html; charset=utf-8');
+    reply.send(html);
+  });
+
+  app.get('/cache-invalidator', async (_request, reply) => {
+    const html = await readFile(cacheInvalidatorPath, 'utf8');
     reply.header('Content-Type', 'text/html; charset=utf-8');
     reply.send(html);
   });

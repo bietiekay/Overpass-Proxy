@@ -405,6 +405,13 @@ export interface OverpassTilePayload {
   expiresAt: number;
 }
 
+export interface InvalidateResult {
+  deletedKeys: number;
+  matchedKeys: number;
+  tileHashes: number;
+  affectedAmenities: string[];
+}
+
 export interface TileStoreOptions {
   ttlSeconds: number;
   swrSeconds: number;
@@ -736,6 +743,63 @@ export class TileStore {
     } finally {
       await this.redis.del(inflightKey);
     }
+  }
+
+  public async invalidateTiles(tiles: TileInfo[]): Promise<InvalidateResult> {
+    if (tiles.length === 0) {
+      return { deletedKeys: 0, matchedKeys: 0, tileHashes: 0, affectedAmenities: [] };
+    }
+
+    const hashes = new Set(tiles.map((tile) => tile.hash));
+    let deletedKeys = 0;
+    let matchedKeys = 0;
+    const affectedAmenities = new Set<string>();
+
+    for (const hash of hashes) {
+      const patterns = [`tile:*:${hash}`, `tile:*:${hash}:*`];
+      for (const pattern of patterns) {
+        let cursor = '0';
+        do {
+          const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+          cursor = nextCursor;
+          if (keys.length === 0) {
+            continue;
+          }
+
+          matchedKeys += keys.length;
+          const pipeline = this.redis.pipeline();
+          for (const key of keys) {
+            pipeline.del(key);
+          }
+          const results = await pipeline.exec();
+          for (const result of results ?? []) {
+            if (result?.[0]) {
+              throw result[0];
+            }
+            deletedKeys += Number(result?.[1] ?? 0);
+          }
+
+          for (const key of keys) {
+            const parsed = this.parseTileKey(key);
+            if (parsed) {
+              this.presence.markMissing(parsed.amenity, parsed.hash);
+              affectedAmenities.add(parsed.amenity);
+            }
+          }
+        } while (cursor !== '0');
+      }
+    }
+
+    if (deletedKeys > 0) {
+      await this.redis.decrby(TILE_COUNT_KEY, deletedKeys);
+    }
+
+    return {
+      deletedKeys,
+      matchedKeys,
+      tileHashes: hashes.size,
+      affectedAmenities: Array.from(affectedAmenities)
+    };
   }
 }
 

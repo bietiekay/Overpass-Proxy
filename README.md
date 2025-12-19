@@ -65,6 +65,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `PORT` | `8080` | Listen port |
 | `LOG_VERBOSITY` | `info` | Logging verbosity: `errors`, `info`, or `debug` for full request/response details |
 | `NODE_ENV` | `production` | Runtime environment |
+| `CACHE_INVALIDATION_SECRET` | *(unset)* | Secret keyword required by the cache invalidation API |
 
 The defaults for `TILE_PRECISION` and `MAX_TILES_PER_REQUEST` are tuned for the ToiletFinder iOS client: a precision of 5 keeps
 tile counts below the 1 024-tile ceiling even for the app’s widest live-map fetches (~70 km across) and cache-preload passes
@@ -206,3 +207,5 @@ Two static dashboards ship in `public/` to help operators observe coverage and p
   quota issues in real time. Use the dropdown to switch visualisations or the toggle to hide upstreams.
 - `public/cache-preheater.html` targets manual preload runs with live progress, error tracking, and memory-friendly batching so
   large geohash ranges can be warmed without exhausting the browser.
+- `public/cache-invalidator.html` provides a map-based UI for selecting a bounding box and sending an invalidation request (the
+  secret keyword must match `CACHE_INVALIDATION_SECRET`).
