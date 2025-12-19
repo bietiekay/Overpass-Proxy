@@ -148,6 +148,64 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
 
 Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities.
 
+### Cache invalidation tool
+
+The proxy ships with a lightweight cache invalidation tool at `GET /cache-invalidator.html` (served from `public/cache-invalidator.html`). It provides a map UI for selecting a bounding box and calling the invalidation API without crafting the request by hand.
+
+**Tool features**
+
+- Map-based bbox selection (Shift + drag) with live coordinate display.
+- Secret keyword entry that enables the action buttons once populated.
+- Single-click invalidation for the selected bbox, plus a clear-selection control.
+- Status banner that reports readiness and the success/error response from the API.
+
+**Secret handling**
+
+- The tool requires the same secret keyword configured in `CACHE_INVALIDATION_SECRET`.
+- The secret is sent only in the request payload (not in the URL) and is never stored server-side.
+- Requests are rejected with HTTP 403 if the secret is missing or incorrect, or if the secret is not configured.
+
+**API behavior**
+
+- **Input:** `POST /api/cache/invalidate` with the secret plus a bbox (`bbox=south,west,north,east`, `[south, west, north, east]`, or `south`/`west`/`north`/`east` fields).
+- **Validation:** Responds with HTTP 400 when the bbox is missing, and HTTP 413 if the bbox expands to more than `MAX_TILES_PER_REQUEST`.
+- **Result:** Removes cached tiles within the bbox for all amenities and responds with `{ ok, bbox, tileCount, deletedKeys, matchedKeys, tileHashes, affectedAmenities }`.
+
+### Cache preheater tool
+
+`GET /cache-preheater.html` (served from `public/cache-preheater.html`) is a map-driven tool for proactively warming the tile cache before a release, demo, or expected demand surge. It is designed to reduce cold-start latency by prefetching amenities in a controlled, observable way.
+
+**Tool features**
+
+- Map-based bbox selection for defining a warmup region.
+- Amenity selector for targeting specific cache segments instead of warming everything.
+- Batch size and concurrency controls to avoid overwhelming the upstream Overpass API.
+- Live progress indicators for queued, in-flight, and completed batches.
+- Automatic backoff messaging when an upstream responds slowly or returns errors.
+
+**Why it exists**
+
+- Prevents cache stampedes during launches or new region rollouts by preloading tiles.
+- Gives operators a safe way to prefill cache without writing one-off scripts.
+- Makes performance tuning (batch size vs. upstream load) visible and repeatable.
+
+### Statistics map tool
+
+`GET /statistics-map.html` (served from `public/statistics-map.html`) is an operator-focused dashboard that visualizes request hotspots and cache coverage at a glance. It is built to help evaluate cache efficiency and demand geography without exporting data.
+
+**Tool features**
+
+- Heatmap overlays for request hotspots and cache coverage.
+- Toggles for amenities, coverage types, and stale tile views.
+- Refresh controls with progress feedback to avoid heavy re-fetching during navigation.
+- Panel for upstream health and cache summary statistics.
+
+**Why it exists**
+
+- Quickly surfaces where demand is highest so you can target preheating or adjust TTLs.
+- Confirms whether cache coverage is keeping up with real request patterns.
+- Provides an at-a-glance operational view for non-CLI users.
+
 #### What the statistics include and how to use them
 
 - **Global totals (persisted across restarts):** total requests, total requested tiles, unique client IPs, cache hits/misses/stales and hit rate, current cached tile count and number of cached amenities, and the top ten geohash hotspots with their request share.
