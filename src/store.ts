@@ -14,6 +14,8 @@ interface PresenceEntry {
   stale: boolean;
 }
 
+const MIN_STATS_COVERAGE_GEOHASH_PRECISION = 3;
+
 export interface CacheCoverageEntry {
   geohash: string;
   entries: number;
@@ -35,7 +37,8 @@ export interface RestorePresenceProgress {
   restoredTiles: number;
 }
 
-const reduceGeohashPrecision = (geohash: string): string => (geohash.length > 1 ? geohash.slice(0, -1) : geohash);
+const reduceCoverageGeohashPrecision = (geohash: string): string =>
+  geohash.length > MIN_STATS_COVERAGE_GEOHASH_PRECISION ? geohash.slice(0, -1) : geohash;
 
 const mergeCoverageEntry = (
   existing: CacheCoverageEntry | undefined,
@@ -54,7 +57,7 @@ const mergeCoverageEntry = (
   };
 };
 
-const compactCoverageEntries = (
+const compactCoverageGeohashEntries = (
   coverage: Map<string, CacheCoverageEntry>,
   targetSize: number
 ): Map<string, CacheCoverageEntry> => {
@@ -69,7 +72,7 @@ const compactCoverageEntries = (
     let changed = false;
 
     for (const entry of current.values()) {
-      const targetGeohash = reduceGeohashPrecision(entry.geohash);
+      const targetGeohash = reduceCoverageGeohashPrecision(entry.geohash);
       const merged = mergeCoverageEntry(next.get(targetGeohash), { ...entry, geohash: targetGeohash });
       next.set(targetGeohash, merged);
       changed = changed || targetGeohash !== entry.geohash;
@@ -353,7 +356,7 @@ class TilePresenceCache {
 
         processed += 1;
         if (coverage.size > compactionThreshold && processed % 50 === 0) {
-          coverage = compactCoverageEntries(coverage, targetSize);
+          coverage = compactCoverageGeohashEntries(coverage, targetSize);
         }
       }
 
@@ -362,7 +365,7 @@ class TilePresenceCache {
       }
     }
 
-    coverage = compactCoverageEntries(coverage, targetSize);
+    coverage = compactCoverageGeohashEntries(coverage, targetSize);
 
     return [...coverage.values()];
   }

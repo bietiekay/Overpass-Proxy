@@ -132,6 +132,7 @@ export const COVERAGE_YIELD_INTERVAL = 250;
 export const DEFAULT_CACHE_COVERAGE_MAX_ENTRIES = 25000;
 export const DEFAULT_GEOHASH_COVERAGE_MAX_ENTRIES = 10000;
 export const COMPACTION_THRESHOLD_MULTIPLIER = 1.25;
+const MIN_STATS_COVERAGE_GEOHASH_PRECISION = 3;
 
 export const STATISTICS_SNAPSHOT_KEY = 'statistics:snapshot';
 export const CACHE_COVERAGE_SNAPSHOT_KEY = 'statistics:cacheCoverageSnapshot';
@@ -143,12 +144,12 @@ const yieldToEventLoop = async (): Promise<void> =>
 const normaliseLimit = (value: number | undefined, fallback: number): number =>
   Math.max(1, value ?? fallback);
 
-const reduceGeohashPrecision = (geohash: string): string =>
-  geohash.length > 1 ? geohash.slice(0, -1) : geohash;
+const reduceCoverageGeohashPrecision = (geohash: string): string =>
+  geohash.length > MIN_STATS_COVERAGE_GEOHASH_PRECISION ? geohash.slice(0, -1) : geohash;
 
 type GeohashMerge<T> = (existing: T | undefined, incoming: T, geohash: string) => T;
 
-const compactGeohashMap = <T>(
+const compactCoverageGeohashMap = <T>(
   entries: Map<string, T>,
   targetSize: number,
   combine: GeohashMerge<T>
@@ -164,7 +165,7 @@ const compactGeohashMap = <T>(
     let changed = false;
 
     for (const [geohash, value] of current) {
-      const targetHash = reduceGeohashPrecision(geohash);
+      const targetHash = reduceCoverageGeohashPrecision(geohash);
       const merged = combine(next.get(targetHash), value, targetHash);
       next.set(targetHash, merged);
       changed = changed || targetHash !== geohash;
@@ -927,7 +928,11 @@ export class RequestStatistics {
       processed += 1;
 
       if (coverage.size > this.cacheCoverageCompactionThreshold) {
-        coverage = compactGeohashMap(coverage, this.maxCacheCoverageEntries, mergeCacheCoverageForHash);
+        coverage = compactCoverageGeohashMap(
+          coverage,
+          this.maxCacheCoverageEntries,
+          mergeCacheCoverageForHash
+        );
       }
 
       if (processed % COVERAGE_YIELD_INTERVAL === 0) {
@@ -935,7 +940,7 @@ export class RequestStatistics {
       }
     }
 
-    coverage = compactGeohashMap(coverage, this.maxCacheCoverageEntries, mergeCacheCoverageForHash);
+    coverage = compactCoverageGeohashMap(coverage, this.maxCacheCoverageEntries, mergeCacheCoverageForHash);
 
     return [...coverage.values()].sort(
       (a, b) => b.entries - a.entries || a.geohash.localeCompare(b.geohash)
@@ -943,7 +948,7 @@ export class RequestStatistics {
   }
 
   private compactGeohashCounts(counts: Map<string, number>): Map<string, number> {
-    return compactGeohashMap(counts, this.maxGeohashCoverageEntries, mergeGeohashCount);
+    return compactCoverageGeohashMap(counts, this.maxGeohashCoverageEntries, mergeGeohashCount);
   }
 
   private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
