@@ -436,7 +436,9 @@ export class TileStore {
 
       const progressPercent = totalTiles
         ? Math.min(100, Math.round((scannedKeys / totalTiles) * 10000) / 100)
-        : undefined;
+        : cursor === '0'
+          ? 100
+          : 0;
 
       onProgress({
         batches,

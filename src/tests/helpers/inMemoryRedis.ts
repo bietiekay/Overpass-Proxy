@@ -39,6 +39,10 @@ export class InMemoryRedis extends EventEmitter {
     return this.store.get(key) ?? null;
   }
 
+  async exists(key: string): Promise<number> {
+    return this.store.has(key) ? 1 : 0;
+  }
+
   async del(key: string): Promise<number> {
     const existed = this.store.delete(key);
     const timeout = this.timeouts.get(key);
@@ -48,6 +52,13 @@ export class InMemoryRedis extends EventEmitter {
     }
     this.expiry.delete(key);
     return existed ? 1 : 0;
+  }
+
+  async incrby(key: string, increment: number): Promise<number> {
+    const current = Number(this.store.get(key) ?? 0);
+    const next = current + increment;
+    this.store.set(key, String(next));
+    return next;
   }
 
   async pttl(key: string): Promise<number> {
@@ -108,6 +119,7 @@ export class InMemoryRedis extends EventEmitter {
   }
 
   pipeline(): {
+    exists: (key: string) => ReturnType<InMemoryRedis['pipeline']>;
     set: (
       key: string,
       value: string,
@@ -121,6 +133,10 @@ export class InMemoryRedis extends EventEmitter {
     const parent = this;
 
     const pipeline = {
+      exists(key: string) {
+        commands.push(() => parent.exists(key));
+        return pipeline;
+      },
       set(
         key: string,
         value: string,
