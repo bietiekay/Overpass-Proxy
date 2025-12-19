@@ -34,6 +34,7 @@ The proxy implements the core Overpass API endpoints:
 - `GET /api/status`
 - `GET /api/timestamp` and `GET /api/timestamp/*`
 - `POST /api/kill_my_queries`
+- `POST /api/cache/invalidate`
 - `GET /api/statistics`
 - `GET /api/statistics/geohashCoverage`
 - `GET /api/statistics/cacheCoverage`
@@ -144,6 +145,8 @@ This starts the proxy along with Redis and a mock Overpass service used for inte
 
 The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, and per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
+Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities.
+
 #### What the statistics include and how to use them
 
 - **Global totals (persisted across restarts):** total requests, total requested tiles, unique client IPs, cache hits/misses/stales and hit rate, current cached tile count and number of cached amenities, and the top ten geohash hotspots with their request share.
@@ -188,6 +191,11 @@ curl -X POST http://localhost:8080/api/interpreter \
 curl -X POST http://localhost:8080/api/interpreter \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   --data '[out:json];node(52.5,13.3,52.6,13.4);out;'
+
+# Cache invalidation request
+curl -X POST 'http://localhost:8080/api/cache/invalidate' \
+  -H 'Content-Type: application/json' \
+  --data '{"secret":"YOUR_SECRET","south":52.5,"west":13.3,"north":52.6,"east":13.4}'
 ```
 
 ## Continuous Integration
@@ -207,5 +215,5 @@ Two static dashboards ship in `public/` to help operators observe coverage and p
   quota issues in real time. Use the dropdown to switch visualisations or the toggle to hide upstreams.
 - `public/cache-preheater.html` targets manual preload runs with live progress, error tracking, and memory-friendly batching so
   large geohash ranges can be warmed without exhausting the browser.
-- `public/cache-invalidator.html` provides a map-based UI for selecting a bounding box and sending an invalidation request (the
-  secret keyword must match `CACHE_INVALIDATION_SECRET`).
+- `public/cache-invalidator.html` provides a map-based UI for selecting a bounding box and sending an invalidation request. The
+  secret keyword must match `CACHE_INVALIDATION_SECRET`, and the page reports deleted key counts and affected amenities.
