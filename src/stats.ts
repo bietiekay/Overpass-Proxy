@@ -987,10 +987,10 @@ export class RequestStatistics {
   private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
     const start = Date.now();
     const generatedAt = new Date(now).toISOString();
-    if (this.refreshCacheCoverageFromRedis && this.cacheMetrics instanceof TileStore) {
-      await this.cacheMetrics.restorePresence();
-    }
-    const coverageEntries = this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
+    const coverageEntries =
+      this.refreshCacheCoverageFromRedis && this.cacheMetrics instanceof TileStore
+        ? await this.cacheMetrics.getCacheCoverageFromRedis({ maxEntries: this.maxCacheCoverageEntries })
+        : this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
     const cacheCoverage = await this.aggregateCacheCoverage(coverageEntries);
 
     logger.info(
