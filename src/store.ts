@@ -752,46 +752,64 @@ export class TileStore {
 
     const hashes = new Set(tiles.map((tile) => tile.hash));
     let deletedKeys = 0;
+    let deletedTileKeys = 0;
     let matchedKeys = 0;
     const affectedAmenities = new Set<string>();
 
-    for (const hash of hashes) {
-      const patterns = [`tile:*:${hash}`, `tile:*:${hash}:*`];
-      for (const pattern of patterns) {
-        let cursor = '0';
-        do {
-          const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-          cursor = nextCursor;
-          if (keys.length === 0) {
-            continue;
-          }
-
-          matchedKeys += keys.length;
-          const pipeline = this.redis.pipeline();
-          for (const key of keys) {
-            pipeline.del(key);
-          }
-          const results = await pipeline.exec();
-          for (const result of results ?? []) {
-            if (result?.[0]) {
-              throw result[0];
-            }
-            deletedKeys += Number(result?.[1] ?? 0);
-          }
-
-          for (const key of keys) {
-            const parsed = this.parseTileKey(key);
-            if (parsed) {
-              this.presence.markMissing(parsed.amenity, parsed.hash);
-              affectedAmenities.add(parsed.amenity);
-            }
-          }
-        } while (cursor !== '0');
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', 'tile:*', 'COUNT', 200);
+      cursor = nextCursor;
+      if (keys.length === 0) {
+        continue;
       }
-    }
 
-    if (deletedKeys > 0) {
-      await this.redis.decrby(TILE_COUNT_KEY, deletedKeys);
+      const toDelete: Array<{ key: string; amenity: string; hash: string; isTileKey: boolean }> = [];
+      for (const key of keys) {
+        const parts = key.split(':');
+        if (parts.length < 3 || parts[0] !== 'tile') {
+          continue;
+        }
+        const [, amenity, hash] = parts;
+        if (!hashes.has(hash)) {
+          continue;
+        }
+        toDelete.push({ key, amenity, hash, isTileKey: parts.length === 3 });
+      }
+
+      if (toDelete.length === 0) {
+        continue;
+      }
+
+      matchedKeys += toDelete.length;
+      const pipeline = this.redis.pipeline();
+      for (const entry of toDelete) {
+        pipeline.del(entry.key);
+      }
+      const results = await pipeline.exec();
+      for (let index = 0; index < (results?.length ?? 0); index += 1) {
+        const result = results?.[index];
+        if (result?.[0]) {
+          throw result[0];
+        }
+        const deleted = Number(result?.[1] ?? 0);
+        deletedKeys += deleted;
+        if (deleted > 0 && toDelete[index]?.isTileKey) {
+          deletedTileKeys += 1;
+        }
+      }
+
+      for (const entry of toDelete) {
+        if (!entry.isTileKey) {
+          continue;
+        }
+        this.presence.markMissing(entry.amenity, entry.hash);
+        affectedAmenities.add(entry.amenity);
+      }
+    } while (cursor !== '0');
+
+    if (deletedTileKeys > 0) {
+      await this.redis.decrby(TILE_COUNT_KEY, deletedTileKeys);
     }
 
     return {
