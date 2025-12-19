@@ -1,4 +1,5 @@
 import type { Redis } from 'ioredis';
+import ngeohash from 'ngeohash';
 
 import type { BoundingBox } from './bbox.js';
 import { logger } from './logger.js';
@@ -26,6 +27,11 @@ export interface CacheCoverageEntry {
 
 export interface CacheCoverageOptions {
   maxEntries?: number;
+}
+
+export interface CacheCoverageBoundsOptions extends CacheCoverageOptions {
+  bbox: BoundingBox;
+  precision: number;
 }
 
 type PresenceListener = () => void;
@@ -371,6 +377,67 @@ class TilePresenceCache {
 
     return [...coverage.values()];
   }
+
+  public getCoverageForBounds(options: CacheCoverageBoundsOptions): CacheCoverageEntry[] {
+    const targetSize = Math.max(1, options.maxEntries ?? 50000);
+    const compactionThreshold = !Number.isFinite(targetSize)
+      ? Number.POSITIVE_INFINITY
+      : Math.max(targetSize, Math.floor(targetSize * 1.2));
+
+    const prefixes = new Set(
+      ngeohash.bboxes(
+        options.bbox.south,
+        options.bbox.west,
+        options.bbox.north,
+        options.bbox.east,
+        options.precision
+      )
+    );
+
+    if (prefixes.size === 0) {
+      return [];
+    }
+
+    let coverage = new Map<string, CacheCoverageEntry>();
+    let processed = 0;
+
+    for (const [amenity, entries] of this.entries) {
+      for (const [tileHash, entry] of entries) {
+        const current = this.clearIfExpired(amenity, tileHash, entry);
+        if (current?.state !== 'present') {
+          continue;
+        }
+
+        const prefix = tileHash.slice(0, options.precision);
+        if (!prefixes.has(prefix)) {
+          continue;
+        }
+
+        const base: CacheCoverageEntry = {
+          geohash: prefix,
+          entries: current.stale ? 0 : 1,
+          amenityItems: current.stale ? 0 : current.amenityCount,
+          staleEntries: current.stale ? 1 : 0,
+          staleAmenityItems: current.stale ? current.amenityCount : 0
+        };
+
+        coverage.set(prefix, mergeCoverageEntry(coverage.get(prefix), base));
+
+        processed += 1;
+        if (coverage.size > compactionThreshold && processed % 50 === 0) {
+          coverage = compactCoverageGeohashEntries(coverage, targetSize);
+        }
+      }
+
+      if (entries.size === 0) {
+        this.entries.delete(amenity);
+      }
+    }
+
+    coverage = compactCoverageGeohashEntries(coverage, targetSize);
+
+    return [...coverage.values()];
+  }
 }
 
 export interface CachedTile {
@@ -538,6 +605,10 @@ export class TileStore {
 
   public getCacheCoverage(options?: CacheCoverageOptions): CacheCoverageEntry[] {
     return this.presence.getCoverage(options);
+  }
+
+  public getCacheCoverageForBounds(options: CacheCoverageBoundsOptions): CacheCoverageEntry[] {
+    return this.presence.getCoverageForBounds(options);
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {

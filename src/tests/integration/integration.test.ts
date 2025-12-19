@@ -589,6 +589,41 @@ describe('integration', () => {
     expect(Array.isArray(response.body.cacheCoverage)).toBe(true);
   });
 
+  it('exposes cache coverage for a bounding box', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    await request(baseUrl)
+      .post('/api/interpreter')
+      .set('Content-Type', 'application/x-www-form-urlencoded')
+      .send(formBody(jsonQuery))
+      .expect(200);
+
+    const response = await request(baseUrl)
+      .get('/api/statistics/cacheCoverage/area')
+      .query({ bbox: '52.5,13.3,52.6,13.4', precision: 5 })
+      .expect(200);
+
+    expect(response.headers['content-type']).toContain('application/json');
+    expect(response.body.precision).toBe(5);
+    expect(Array.isArray(response.body.cacheCoverage)).toBe(true);
+    for (const entry of response.body.cacheCoverage) {
+      expect(entry.geohash.length).toBeGreaterThanOrEqual(5);
+    }
+  });
+
+  it('rejects invalid cache coverage area requests', async () => {
+    await request(baseUrl)
+      .get('/api/statistics/cacheCoverage/area')
+      .query({ precision: 5 })
+      .expect(400);
+
+    await request(baseUrl)
+      .get('/api/statistics/cacheCoverage/area')
+      .query({ bbox: '52.5,13.3,52.6,13.4' })
+      .expect(400);
+  });
+
   it('exposes geohash coverage separately', async () => {
     await redisClient?.flushall();
     hits.splice(0, hits.length);

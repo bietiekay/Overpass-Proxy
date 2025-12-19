@@ -38,6 +38,7 @@ The proxy implements the core Overpass API endpoints:
 - `GET /api/statistics`
 - `GET /api/statistics/geohashCoverage`
 - `GET /api/statistics/cacheCoverage`
+- `GET /api/statistics/cacheCoverage/area`
 - Any other `/api/*` path is transparently proxied upstream
 
 Requests preserve HTTP methods, headers, payloads, and status codes. `/api/interpreter` requires JSON amenity queries with a bounding box; the proxy satisfies the response locally when tiles are cached and fetches amenity tiles upstream on cache misses.
@@ -143,7 +144,7 @@ docker-compose up --build
 
 This starts the proxy along with Redis and a mock Overpass service used for integration tests.
 
-The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, and per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, while `GET /api/statistics/cacheCoverage/area` returns cache coverage scoped to a bounding box at a requested geohash precision for zoomed-in maps. Per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
 Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities.
 
@@ -159,7 +160,7 @@ Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVA
 
 #### Retrieving statistics at runtime
 
-- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. Tile cache coverage is exposed separately at `GET /api/statistics/cacheCoverage` for clients that only need the cached tile breakdowns, and per-amenity geohash coverage is served at `GET /api/statistics/geohashCoverage` for viewers that visualise hotspots without inventory payloads.
+- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. Tile cache coverage is exposed separately at `GET /api/statistics/cacheCoverage` for clients that only need the cached tile breakdowns, `GET /api/statistics/cacheCoverage/area` scopes cache coverage to a bbox and precision for map viewports, and per-amenity geohash coverage is served at `GET /api/statistics/geohashCoverage` for viewers that visualise hotspots without inventory payloads.
 - **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()`, `await stats.getCacheCoverageSnapshot()`, or `await stats.getGeohashCoverageSnapshot()` to retrieve structured data inside the process without another HTTP request.
 - **Time window:** counters continue accumulating until cleared from Redis, so the snapshot survives restarts and day boundaries.
 

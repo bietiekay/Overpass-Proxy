@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import ngeohash from 'ngeohash';
 
 import type Redis from 'ioredis';
 
@@ -90,6 +91,30 @@ describe('TileStore', () => {
 
     expect(store.countCachedTiles('toilets')).toBe(2);
     expect(store.countCachedTiles('drinking_water')).toBe(0);
+  });
+
+  it('returns cache coverage scoped to bounds', async () => {
+    const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 60, swrSeconds: 30 });
+    const secondTile: TileInfo = {
+      hash: 'u0qj0d1',
+      bounds: { south: 10, west: 10, north: 11, east: 11 }
+    };
+
+    await store.writeTiles(
+      [
+        { tile, response: { elements: [], generator: 'first', osm3s: {}, version: 0.6 } },
+        { tile: secondTile, response: { elements: [], generator: 'second', osm3s: {}, version: 0.6 } }
+      ],
+      'toilets'
+    );
+
+    const precision = 5;
+    const [south, west, north, east] = ngeohash.decode_bbox(tile.hash.slice(0, precision));
+    const bbox = { south, west, north, east };
+
+    const coverage = store.getCacheCoverageForBounds({ bbox, precision });
+    expect(coverage).toHaveLength(1);
+    expect(coverage[0]?.geohash).toBe(tile.hash.slice(0, precision));
   });
 
   it('restores presence information from redis', async () => {
