@@ -28,6 +28,8 @@ type QueueEntry = {
 
 type ActiveEntry = QueueEntry & { startedAt: number };
 
+const DEFAULT_TASK_TIMEOUT_MS = 5 * 60 * 1000;
+
 export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
   private tail: Promise<void> = Promise.resolve();
 
@@ -38,6 +40,8 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
   private lastSettledAt: number | null = null;
 
   private readonly listeners = new Set<() => void>();
+
+  constructor(private readonly taskTimeoutMs = DEFAULT_TASK_TIMEOUT_MS) {}
 
   public enqueue(task: () => Promise<void>, meta: { tileGroups: number; tiles: number }): void {
     const entry: QueueEntry = {
@@ -59,9 +63,16 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
         this.notify();
 
         try {
-          await task();
+          await this.runWithTimeout(task);
         } catch (error) {
-          logger.warn({ err: error }, 'failed to refresh stale tiles in background');
+          if (this.isTimeoutError(error)) {
+            logger.warn(
+              { err: error, timeoutMs: this.taskTimeoutMs },
+              'stale refresh task timed out'
+            );
+          } else {
+            logger.warn({ err: error }, 'failed to refresh stale tiles in background');
+          }
         } finally {
           this.active = null;
           this.lastSettledAt = Date.now();
@@ -98,6 +109,37 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
 
   public onUpdate(listener: () => void): void {
     this.listeners.add(listener);
+  }
+
+  private async runWithTimeout(task: () => Promise<void>): Promise<void> {
+    if (this.taskTimeoutMs <= 0) {
+      await task();
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        task(),
+        new Promise<void>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            const error = new Error(
+              `Stale refresh task timed out after ${this.taskTimeoutMs}ms`
+            );
+            error.name = 'StaleRefreshTaskTimeout';
+            reject(error);
+          }, this.taskTimeoutMs);
+        })
+      ]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  private isTimeoutError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'StaleRefreshTaskTimeout';
   }
 
   private notify(): void {
