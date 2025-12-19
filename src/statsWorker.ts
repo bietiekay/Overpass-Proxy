@@ -108,6 +108,26 @@ const bootstrap = async (): Promise<void> => {
       }
     };
 
+    const handleMarkDirty = (target: StatisticsRefreshTarget): void => {
+      switch (target) {
+        case 'statistics':
+          statistics.markStatisticsDirty();
+          return;
+        case 'cacheCoverage':
+          statistics.markCacheCoverageDirty();
+          return;
+        case 'geohashCoverage':
+          statistics.markGeohashCoverageDirty();
+          return;
+        case 'all':
+        default:
+          statistics.markStatisticsDirty();
+          statistics.markCacheCoverageDirty();
+          statistics.markGeohashCoverageDirty();
+          return;
+      }
+    };
+
     const enqueueStaleRefresh = (
       amenity: string,
       groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>
@@ -136,6 +156,8 @@ const bootstrap = async (): Promise<void> => {
                 logger.warn({ err: error }, 'failed stale refresh task in worker');
               });
           }
+
+          statistics.markCacheCoverageDirty();
         },
         {
           tileGroups: groups.length,
@@ -151,6 +173,9 @@ const bootstrap = async (): Promise<void> => {
           return;
         case 'refresh':
           await handleRefresh(command.target);
+          return;
+        case 'markDirty':
+          handleMarkDirty(command.target);
           return;
         case 'staleRefreshTask':
           enqueueStaleRefresh(command.amenity, command.groups);

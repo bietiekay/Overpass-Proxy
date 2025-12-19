@@ -1,4 +1,5 @@
 import type { Redis } from 'ioredis';
+import ngeohash from 'ngeohash';
 
 import type { BoundingBox } from './bbox.js';
 import { logger } from './logger.js';
@@ -26,6 +27,11 @@ export interface CacheCoverageEntry {
 
 export interface CacheCoverageOptions {
   maxEntries?: number;
+}
+
+export interface CacheCoverageBoundsOptions extends CacheCoverageOptions {
+  bbox: BoundingBox;
+  precision: number;
 }
 
 type PresenceListener = () => void;
@@ -371,6 +377,67 @@ class TilePresenceCache {
 
     return [...coverage.values()];
   }
+
+  public getCoverageForBounds(options: CacheCoverageBoundsOptions): CacheCoverageEntry[] {
+    const targetSize = Math.max(1, options.maxEntries ?? 50000);
+    const compactionThreshold = !Number.isFinite(targetSize)
+      ? Number.POSITIVE_INFINITY
+      : Math.max(targetSize, Math.floor(targetSize * 1.2));
+
+    const prefixes = new Set(
+      ngeohash.bboxes(
+        options.bbox.south,
+        options.bbox.west,
+        options.bbox.north,
+        options.bbox.east,
+        options.precision
+      )
+    );
+
+    if (prefixes.size === 0) {
+      return [];
+    }
+
+    let coverage = new Map<string, CacheCoverageEntry>();
+    let processed = 0;
+
+    for (const [amenity, entries] of this.entries) {
+      for (const [tileHash, entry] of entries) {
+        const current = this.clearIfExpired(amenity, tileHash, entry);
+        if (current?.state !== 'present') {
+          continue;
+        }
+
+        const prefix = tileHash.slice(0, options.precision);
+        if (!prefixes.has(prefix)) {
+          continue;
+        }
+
+        const base: CacheCoverageEntry = {
+          geohash: prefix,
+          entries: current.stale ? 0 : 1,
+          amenityItems: current.stale ? 0 : current.amenityCount,
+          staleEntries: current.stale ? 1 : 0,
+          staleAmenityItems: current.stale ? current.amenityCount : 0
+        };
+
+        coverage.set(prefix, mergeCoverageEntry(coverage.get(prefix), base));
+
+        processed += 1;
+        if (coverage.size > compactionThreshold && processed % 50 === 0) {
+          coverage = compactCoverageGeohashEntries(coverage, targetSize);
+        }
+      }
+
+      if (entries.size === 0) {
+        this.entries.delete(amenity);
+      }
+    }
+
+    coverage = compactCoverageGeohashEntries(coverage, targetSize);
+
+    return [...coverage.values()];
+  }
 }
 
 export interface CachedTile {
@@ -403,6 +470,13 @@ export interface OverpassTilePayload {
   response: OverpassResponse;
   fetchedAt: number;
   expiresAt: number;
+}
+
+export interface InvalidateResult {
+  deletedKeys: number;
+  matchedKeys: number;
+  tileHashes: number;
+  affectedAmenities: string[];
 }
 
 export interface TileStoreOptions {
@@ -531,6 +605,10 @@ export class TileStore {
 
   public getCacheCoverage(options?: CacheCoverageOptions): CacheCoverageEntry[] {
     return this.presence.getCoverage(options);
+  }
+
+  public getCacheCoverageForBounds(options: CacheCoverageBoundsOptions): CacheCoverageEntry[] {
+    return this.presence.getCoverageForBounds(options);
   }
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {
@@ -736,6 +814,81 @@ export class TileStore {
     } finally {
       await this.redis.del(inflightKey);
     }
+  }
+
+  public async invalidateTiles(tiles: TileInfo[]): Promise<InvalidateResult> {
+    if (tiles.length === 0) {
+      return { deletedKeys: 0, matchedKeys: 0, tileHashes: 0, affectedAmenities: [] };
+    }
+
+    const hashes = new Set(tiles.map((tile) => tile.hash));
+    let deletedKeys = 0;
+    let deletedTileKeys = 0;
+    let matchedKeys = 0;
+    const affectedAmenities = new Set<string>();
+
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await this.redis.scan(cursor, 'MATCH', 'tile:*', 'COUNT', 200);
+      cursor = nextCursor;
+      if (keys.length === 0) {
+        continue;
+      }
+
+      const toDelete: Array<{ key: string; amenity: string; hash: string; isTileKey: boolean }> = [];
+      for (const key of keys) {
+        const parts = key.split(':');
+        if (parts.length < 3 || parts[0] !== 'tile') {
+          continue;
+        }
+        const [, amenity, hash] = parts;
+        if (!hashes.has(hash)) {
+          continue;
+        }
+        toDelete.push({ key, amenity, hash, isTileKey: parts.length === 3 });
+      }
+
+      if (toDelete.length === 0) {
+        continue;
+      }
+
+      matchedKeys += toDelete.length;
+      const pipeline = this.redis.pipeline();
+      for (const entry of toDelete) {
+        pipeline.del(entry.key);
+      }
+      const results = await pipeline.exec();
+      for (let index = 0; index < (results?.length ?? 0); index += 1) {
+        const result = results?.[index];
+        if (result?.[0]) {
+          throw result[0];
+        }
+        const deleted = Number(result?.[1] ?? 0);
+        deletedKeys += deleted;
+        if (deleted > 0 && toDelete[index]?.isTileKey) {
+          deletedTileKeys += 1;
+        }
+      }
+
+      for (const entry of toDelete) {
+        if (!entry.isTileKey) {
+          continue;
+        }
+        this.presence.markMissing(entry.amenity, entry.hash);
+        affectedAmenities.add(entry.amenity);
+      }
+    } while (cursor !== '0');
+
+    if (deletedTileKeys > 0) {
+      await this.redis.decrby(TILE_COUNT_KEY, deletedTileKeys);
+    }
+
+    return {
+      deletedKeys,
+      matchedKeys,
+      tileHashes: hashes.size,
+      affectedAmenities: Array.from(affectedAmenities)
+    };
   }
 }
 

@@ -1,7 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
-import got, { RequestError } from 'got';
-import type { Method } from 'got';
+import got from 'got';
+import type { Method, RetryOptions } from 'got';
 
 import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
@@ -23,6 +23,26 @@ out body meta;
 >;
 out skel qt;`;
 };
+
+const UPSTREAM_RETRY_LIMIT = 2;
+const UPSTREAM_RETRY_STATUS_CODES = [403, 408, 413, 429, 500, 502, 503, 504];
+const UPSTREAM_RETRY_ERROR_CODES = [
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED'
+];
+const UPSTREAM_RETRY_METHODS: Method[] = ['GET', 'PUT', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE'];
+const UPSTREAM_RETRY_METHODS_WITH_POST: Method[] = [...UPSTREAM_RETRY_METHODS, 'POST'];
+
+const buildUpstreamRetryOptions = (allowPost: boolean): Partial<RetryOptions> => ({
+  limit: UPSTREAM_RETRY_LIMIT,
+  methods: allowPost ? UPSTREAM_RETRY_METHODS_WITH_POST : UPSTREAM_RETRY_METHODS,
+  statusCodes: UPSTREAM_RETRY_STATUS_CODES,
+  errorCodes: UPSTREAM_RETRY_ERROR_CODES
+});
 
 interface UpstreamState {
   backoffUntil: number;
@@ -571,17 +591,7 @@ const getPool = (config: AppConfig, redis?: Redis): UpstreamPool => {
   return pool;
 };
 
-const shouldMarkFailure = (error: unknown): boolean => {
-  if (error instanceof RequestError) {
-    const statusCode = error.response?.statusCode;
-    if (statusCode !== undefined && statusCode < 500 && statusCode !== 429) {
-      return false;
-    }
-    return true;
-  }
-
-  return true;
-};
+const shouldMarkFailure = (_error: unknown): boolean => true;
 
 interface UpstreamCallOptions {
   redis?: Redis;
@@ -701,14 +711,24 @@ export const fetchTile = async (
           'Content-Type': 'application/x-www-form-urlencoded'
         },
         timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 },
-        throwHttpErrors: false,
-        retry: { limit: 0 }
+        throwHttpErrors: true,
+        retry: buildUpstreamRetryOptions(true)
       });
-      if (response.statusCode >= 400) {
-        throw new Error(`Upstream responded with status ${response.statusCode}`);
-      }
       logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');
-      return JSON.parse(response.body) as OverpassResponse;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(response.body);
+      } catch (error) {
+        throw new Error(
+          `Failed to parse upstream response from ${upstreamUrl}: ${(error as Error).message}`
+        );
+      }
+
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as OverpassResponse).elements)) {
+        throw new Error(`Upstream response missing elements array from ${upstreamUrl}`);
+      }
+
+      return parsed as OverpassResponse;
     }
   );
 };
@@ -867,7 +887,8 @@ export const proxyTransparent = async (
           body,
           throwHttpErrors: false,
           responseType: 'buffer',
-          timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 }
+          timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 },
+          retry: buildUpstreamRetryOptions(method === 'POST' && interpreterPath)
         });
 
         if (response.statusCode >= 500 || response.statusCode === 429) {

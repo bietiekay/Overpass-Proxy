@@ -396,10 +396,16 @@ class SnapshotCache<T extends { generatedAt: string }> {
     if (!this.lastGeneratedAt) {
       return true;
     }
+    if (this.refreshIntervalMs <= 0) {
+      return false;
+    }
     return now - this.lastGeneratedAt > this.refreshIntervalMs;
   }
 
   private maybeRefresh(): void {
+    if (!this.isStale(Date.now())) {
+      return;
+    }
     if (this.refreshPromise) {
       return;
     }
@@ -775,9 +781,20 @@ export class RequestStatistics {
       await this.persist();
 
       this.geohashCoverageCache.markDirty();
-      this.cacheCoverageCache.markDirty();
       this.statisticsCache.markDirty();
     });
+  }
+
+  public markCacheCoverageDirty(): void {
+    this.cacheCoverageCache.markDirty();
+  }
+
+  public markGeohashCoverageDirty(): void {
+    this.geohashCoverageCache.markDirty();
+  }
+
+  public markStatisticsDirty(): void {
+    this.statisticsCache.markDirty();
   }
 
   public async getSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
@@ -836,12 +853,17 @@ export class RequestStatistics {
       const monthStartIso = new Date(this.monthStart).toISOString();
 
       const amenities: AmenityStatistics[] = [];
-      const globalGeohashCounts = new Map<string, number>();
+      let globalGeohashCounts = new Map<string, number>();
+      let amenityCounter = 0;
 
       for (const stats of this.amenityStats.values()) {
         const cacheItems = this.cacheMetrics.countCachedTiles(stats.amenity);
         for (const [hash, count] of stats.geohashCounts) {
           globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
+        }
+
+        if (globalGeohashCounts.size > this.geohashCoverageCompactionThreshold) {
+          globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
         }
 
         const averageTilesPerRequest =
@@ -860,9 +882,16 @@ export class RequestStatistics {
           lastRequestAt:
             stats.lastRequestAt > 0 ? new Date(stats.lastRequestAt).toISOString() : undefined
         });
+
+        amenityCounter += 1;
+        if (amenityCounter % COVERAGE_YIELD_INTERVAL === 0) {
+          await yieldToEventLoop();
+        }
       }
 
       amenities.sort((a, b) => b.requests - a.requests || a.amenity.localeCompare(b.amenity));
+
+      globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
 
       const hotspots = [...globalGeohashCounts.entries()]
         .sort((a, b) => b[1] - a[1])
@@ -1098,6 +1127,7 @@ export class RequestStatistics {
 export type StatsWorkerCommand =
   | { type: 'record'; payload: RecordRequestOptions }
   | { type: 'refresh'; target: StatisticsRefreshTarget }
+  | { type: 'markDirty'; target: StatisticsRefreshTarget }
   | { type: 'staleRefreshUpdate'; overview: StaleRefreshQueueOverview }
   | {
       type: 'staleRefreshTask';
@@ -1336,6 +1366,60 @@ export class StatisticsWorkerClient {
       });
   }
 
+  public markDirty(target: StatisticsRefreshTarget = 'all'): void {
+    if (!this.useWorker) {
+      void this.readyPromise
+        .then(() => {
+          if (!this.inlineStatistics) return;
+          switch (target) {
+            case 'statistics':
+              this.inlineStatistics.markStatisticsDirty();
+              return;
+            case 'cacheCoverage':
+              this.inlineStatistics.markCacheCoverageDirty();
+              return;
+            case 'geohashCoverage':
+              this.inlineStatistics.markGeohashCoverageDirty();
+              return;
+            case 'all':
+            default:
+              this.inlineStatistics.markStatisticsDirty();
+              this.inlineStatistics.markCacheCoverageDirty();
+              this.inlineStatistics.markGeohashCoverageDirty();
+          }
+        })
+        .catch((error) => {
+          logger.warn({ err: error }, 'failed to mark inline statistics dirty');
+        });
+      return;
+    }
+
+    void this.readyPromise
+      .then(() => {
+        const command: StatsWorkerCommand = { type: 'markDirty', target };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
+        this.worker.postMessage(command);
+      })
+      .catch((error) => {
+        logger.warn({ err: error }, 'failed to post mark dirty command to statistics worker');
+      });
+  }
+
+  public markCacheCoverageDirty(): void {
+    this.markDirty('cacheCoverage');
+  }
+
+  public markGeohashCoverageDirty(): void {
+    this.markDirty('geohashCoverage');
+  }
+
+  public markStatisticsDirty(): void {
+    this.markDirty('statistics');
+  }
+
   public enqueueStaleRefreshTask(task: {
     amenity: string;
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
@@ -1510,5 +1594,6 @@ export class StatisticsWorkerClient {
     }
 
     await this.inlineStatistics.recordRequest(task.statsPayload);
+    this.inlineStatistics.markCacheCoverageDirty();
   }
 }
