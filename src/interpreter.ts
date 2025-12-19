@@ -275,6 +275,9 @@ const handleCacheable = async (
   const cached = await deps.store.readTiles(tiles, normalisedAmenity);
   const missing = tiles.filter((tile) => !cached.has(tile.hash));
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
+  if (missing.length > 0 || stale.length > 0) {
+    deps.stats.markCacheCoverageDirty();
+  }
 
   const responsesByTile = new Map<string, { response: OverpassResponse; fetchedAt: number }>();
   const recordResponse = (tileHash: string, payload: { response: OverpassResponse; fetchedAt: number }) => {
@@ -305,6 +308,7 @@ const handleCacheable = async (
     });
 
     await deps.store.writeTiles(entries, normalisedAmenity);
+    deps.stats.markCacheCoverageDirty();
   };
 
   const planOptions = {

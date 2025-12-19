@@ -14,7 +14,7 @@ interface PresenceEntry {
   stale: boolean;
 }
 
-const MIN_STATS_COVERAGE_GEOHASH_PRECISION = 4;
+const MIN_STATS_COVERAGE_GEOHASH_PRECISION = 3;
 
 export interface CacheCoverageEntry {
   geohash: string;

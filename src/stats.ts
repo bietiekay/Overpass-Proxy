@@ -132,7 +132,7 @@ export const COVERAGE_YIELD_INTERVAL = 250;
 export const DEFAULT_CACHE_COVERAGE_MAX_ENTRIES = 25000;
 export const DEFAULT_GEOHASH_COVERAGE_MAX_ENTRIES = 10000;
 export const COMPACTION_THRESHOLD_MULTIPLIER = 1.25;
-const MIN_STATS_COVERAGE_GEOHASH_PRECISION = 4;
+const MIN_STATS_COVERAGE_GEOHASH_PRECISION = 3;
 
 export const STATISTICS_SNAPSHOT_KEY = 'statistics:snapshot';
 export const CACHE_COVERAGE_SNAPSHOT_KEY = 'statistics:cacheCoverageSnapshot';
@@ -396,10 +396,16 @@ class SnapshotCache<T extends { generatedAt: string }> {
     if (!this.lastGeneratedAt) {
       return true;
     }
+    if (this.refreshIntervalMs <= 0) {
+      return false;
+    }
     return now - this.lastGeneratedAt > this.refreshIntervalMs;
   }
 
   private maybeRefresh(): void {
+    if (!this.isStale(Date.now())) {
+      return;
+    }
     if (this.refreshPromise) {
       return;
     }
@@ -775,9 +781,20 @@ export class RequestStatistics {
       await this.persist();
 
       this.geohashCoverageCache.markDirty();
-      this.cacheCoverageCache.markDirty();
       this.statisticsCache.markDirty();
     });
+  }
+
+  public markCacheCoverageDirty(): void {
+    this.cacheCoverageCache.markDirty();
+  }
+
+  public markGeohashCoverageDirty(): void {
+    this.geohashCoverageCache.markDirty();
+  }
+
+  public markStatisticsDirty(): void {
+    this.statisticsCache.markDirty();
   }
 
   public async getSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
@@ -1110,6 +1127,7 @@ export class RequestStatistics {
 export type StatsWorkerCommand =
   | { type: 'record'; payload: RecordRequestOptions }
   | { type: 'refresh'; target: StatisticsRefreshTarget }
+  | { type: 'markDirty'; target: StatisticsRefreshTarget }
   | { type: 'staleRefreshUpdate'; overview: StaleRefreshQueueOverview }
   | {
       type: 'staleRefreshTask';
@@ -1348,6 +1366,60 @@ export class StatisticsWorkerClient {
       });
   }
 
+  public markDirty(target: StatisticsRefreshTarget = 'all'): void {
+    if (!this.useWorker) {
+      void this.readyPromise
+        .then(() => {
+          if (!this.inlineStatistics) return;
+          switch (target) {
+            case 'statistics':
+              this.inlineStatistics.markStatisticsDirty();
+              return;
+            case 'cacheCoverage':
+              this.inlineStatistics.markCacheCoverageDirty();
+              return;
+            case 'geohashCoverage':
+              this.inlineStatistics.markGeohashCoverageDirty();
+              return;
+            case 'all':
+            default:
+              this.inlineStatistics.markStatisticsDirty();
+              this.inlineStatistics.markCacheCoverageDirty();
+              this.inlineStatistics.markGeohashCoverageDirty();
+          }
+        })
+        .catch((error) => {
+          logger.warn({ err: error }, 'failed to mark inline statistics dirty');
+        });
+      return;
+    }
+
+    void this.readyPromise
+      .then(() => {
+        const command: StatsWorkerCommand = { type: 'markDirty', target };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
+        this.worker.postMessage(command);
+      })
+      .catch((error) => {
+        logger.warn({ err: error }, 'failed to post mark dirty command to statistics worker');
+      });
+  }
+
+  public markCacheCoverageDirty(): void {
+    this.markDirty('cacheCoverage');
+  }
+
+  public markGeohashCoverageDirty(): void {
+    this.markDirty('geohashCoverage');
+  }
+
+  public markStatisticsDirty(): void {
+    this.markDirty('statistics');
+  }
+
   public enqueueStaleRefreshTask(task: {
     amenity: string;
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
@@ -1522,6 +1594,6 @@ export class StatisticsWorkerClient {
     }
 
     await this.inlineStatistics.recordRequest(task.statsPayload);
-    await this.inlineStatistics.refreshCoverageCaches();
+    this.inlineStatistics.markCacheCoverageDirty();
   }
 }
