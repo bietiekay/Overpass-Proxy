@@ -113,16 +113,23 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   });
 
   const logRestoreProgress = (progress: RestorePresenceProgress) => {
-    startupLogger.info(
-      {
-        stage: 'restoring cache presence',
-        batches: progress.batches,
-        cursor: progress.cursor,
-        scannedKeys: progress.scannedKeys,
-        restoredTiles: progress.restoredTiles
-      },
-      'scanning Redis for cached tiles'
-    );
+    const logContext: Record<string, unknown> = {
+      stage: 'restoring cache presence',
+      batches: progress.batches,
+      cursor: progress.cursor,
+      scannedKeys: progress.scannedKeys,
+      restoredTiles: progress.restoredTiles
+    };
+
+    if (progress.totalTiles !== undefined) {
+      logContext.totalTiles = progress.totalTiles;
+    }
+
+    if (progress.progressPercent !== undefined) {
+      logContext.progressPercent = progress.progressPercent;
+    }
+
+    startupLogger.info(logContext, 'scanning Redis for cached tiles');
   };
 
   startupProgress('restoring cache presence');
