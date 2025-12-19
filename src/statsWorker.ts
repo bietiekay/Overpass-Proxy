@@ -136,6 +136,8 @@ const bootstrap = async (): Promise<void> => {
                 logger.warn({ err: error }, 'failed stale refresh task in worker');
               });
           }
+
+          await statistics.refreshCoverageCaches();
         },
         {
           tileGroups: groups.length,
