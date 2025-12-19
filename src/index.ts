@@ -113,6 +113,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   });
 
   const logRestoreProgress = (progress: RestorePresenceProgress) => {
+    const progressPercent = progress.progressPercent ?? 0;
     const logContext: Record<string, unknown> = {
       stage: 'restoring cache presence',
       batches: progress.batches,
@@ -125,11 +126,12 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       logContext.totalTiles = progress.totalTiles;
     }
 
-    if (progress.progressPercent !== undefined) {
-      logContext.progressPercent = progress.progressPercent;
-    }
+    logContext.progressPercent = progressPercent;
 
-    startupLogger.info(logContext, 'scanning Redis for cached tiles');
+    startupLogger.info(
+      logContext,
+      `scanning Redis for cached tiles (${progressPercent}%)`
+    );
   };
 
   startupProgress('restoring cache presence');
