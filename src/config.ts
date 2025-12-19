@@ -25,6 +25,7 @@ export interface AppConfig {
   upstreamOrigin: string;
   upstreamReferer: string;
   serveStaleFromCache: boolean;
+  cacheInvalidateSecret: string | null;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -59,6 +60,7 @@ export const loadConfig = (): AppConfig => {
   const tilePrecision = toNumber(env.TILE_PRECISION, 5);
   // target ~2 levels coarser to get ~32x coverage (to cover ~50 tiles minimum)
   const upstreamTilePrecision = toNumber(env.UPSTREAM_TILE_PRECISION, Math.max(2, tilePrecision - 2));
+  const cacheInvalidateSecret = env.CACHE_INVALIDATION_SECRET?.trim();
 
   const parseUpstreamUrls = (raw: string | undefined): string[] => {
     if (!raw) {
@@ -103,6 +105,8 @@ export const loadConfig = (): AppConfig => {
     trustProxy: toBoolean(env.TRUST_PROXY, false),
     upstreamOrigin: env.UPSTREAM_ORIGIN ?? 'https://overpass-turbo.eu',
     upstreamReferer: env.UPSTREAM_REFERER ?? 'https://overpass-turbo.eu/',
-    serveStaleFromCache: toBoolean(env.SERVE_STALE_FROM_CACHE, true)
+    serveStaleFromCache: toBoolean(env.SERVE_STALE_FROM_CACHE, true),
+    cacheInvalidateSecret:
+      cacheInvalidateSecret && cacheInvalidateSecret.length > 0 ? cacheInvalidateSecret : null
   };
 };
