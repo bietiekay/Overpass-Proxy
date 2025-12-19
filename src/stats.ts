@@ -836,12 +836,17 @@ export class RequestStatistics {
       const monthStartIso = new Date(this.monthStart).toISOString();
 
       const amenities: AmenityStatistics[] = [];
-      const globalGeohashCounts = new Map<string, number>();
+      let globalGeohashCounts = new Map<string, number>();
+      let amenityCounter = 0;
 
       for (const stats of this.amenityStats.values()) {
         const cacheItems = this.cacheMetrics.countCachedTiles(stats.amenity);
         for (const [hash, count] of stats.geohashCounts) {
           globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
+        }
+
+        if (globalGeohashCounts.size > this.geohashCoverageCompactionThreshold) {
+          globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
         }
 
         const averageTilesPerRequest =
@@ -860,9 +865,16 @@ export class RequestStatistics {
           lastRequestAt:
             stats.lastRequestAt > 0 ? new Date(stats.lastRequestAt).toISOString() : undefined
         });
+
+        amenityCounter += 1;
+        if (amenityCounter % COVERAGE_YIELD_INTERVAL === 0) {
+          await yieldToEventLoop();
+        }
       }
 
       amenities.sort((a, b) => b.requests - a.requests || a.amenity.localeCompare(b.amenity));
+
+      globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
 
       const hotspots = [...globalGeohashCounts.entries()]
         .sort((a, b) => b[1] - a[1])
