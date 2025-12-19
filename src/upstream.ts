@@ -25,7 +25,7 @@ out skel qt;`;
 };
 
 const UPSTREAM_RETRY_LIMIT = 2;
-const UPSTREAM_RETRY_STATUS_CODES = [403, 408, 413, 429, 500, 502, 503, 504];
+const UPSTREAM_RETRY_STATUS_CODES = [403, 408, 413, 500, 502, 503, 504];
 const UPSTREAM_RETRY_ERROR_CODES = [
   'ETIMEDOUT',
   'ECONNRESET',
@@ -36,12 +36,35 @@ const UPSTREAM_RETRY_ERROR_CODES = [
 ];
 const UPSTREAM_RETRY_METHODS: Method[] = ['GET', 'PUT', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE'];
 const UPSTREAM_RETRY_METHODS_WITH_POST: Method[] = [...UPSTREAM_RETRY_METHODS, 'POST'];
+const UPSTREAM_RETRY_BACKOFF_BASE_MS = 500;
+const UPSTREAM_RETRY_BACKOFF_MAX_MS = 5000;
+
+const buildRetryDelayMs = (attemptCount: number): number => {
+  const exponential = Math.min(
+    UPSTREAM_RETRY_BACKOFF_MAX_MS,
+    UPSTREAM_RETRY_BACKOFF_BASE_MS * 2 ** Math.max(0, attemptCount - 1)
+  );
+  const jitter = Math.random() * UPSTREAM_RETRY_BACKOFF_BASE_MS;
+  return exponential + jitter;
+};
 
 const buildUpstreamRetryOptions = (allowPost: boolean): Partial<RetryOptions> => ({
   limit: UPSTREAM_RETRY_LIMIT,
   methods: allowPost ? UPSTREAM_RETRY_METHODS_WITH_POST : UPSTREAM_RETRY_METHODS,
   statusCodes: UPSTREAM_RETRY_STATUS_CODES,
-  errorCodes: UPSTREAM_RETRY_ERROR_CODES
+  errorCodes: UPSTREAM_RETRY_ERROR_CODES,
+  calculateDelay: ({ attemptCount, computedValue, error }) => {
+    if (computedValue === 0) {
+      return 0;
+    }
+
+    const statusCode = (error as { response?: { statusCode?: number } })?.response?.statusCode;
+    if (statusCode === 429) {
+      return 0;
+    }
+
+    return buildRetryDelayMs(attemptCount);
+  }
 });
 
 interface UpstreamState {
@@ -320,12 +343,44 @@ class UpstreamPool {
             if (!next) {
               return;
             }
-            await this.probeUpstream(next);
+            await this.probeWithTimeout(next);
           }
         })()
       );
     }
     await Promise.all(workers);
+  }
+
+  private async probeWithTimeout(url: string): Promise<void> {
+    if (this.probeTimeoutMs <= 0) {
+      await this.probeUpstream(url);
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.probeUpstream(url),
+        new Promise<void>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            const error = new Error(`Probe timed out after ${this.probeTimeoutMs}ms`);
+            error.name = 'UpstreamProbeTimeout';
+            reject(error);
+          }, this.probeTimeoutMs);
+        })
+      ]);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'UpstreamProbeTimeout') {
+        logger.debug({ err: error, upstream: url, timeoutMs: this.probeTimeoutMs }, 'probe timed out');
+        this.markFailure(url);
+      } else {
+        logger.debug({ err: error, upstream: url }, 'probe failed');
+      }
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
   }
 
   private async probeUpstream(url: string): Promise<void> {
@@ -591,7 +646,18 @@ const getPool = (config: AppConfig, redis?: Redis): UpstreamPool => {
   return pool;
 };
 
-const shouldMarkFailure = (_error: unknown): boolean => true;
+export const getUpstreamPoolForTesting = (config: AppConfig, redis?: Redis) =>
+  getPool(config, redis);
+
+const shouldMarkFailure = (error: unknown): boolean => {
+  if (error instanceof Error && error.name === 'RequestError') {
+    const statusCode = (error as { response?: { statusCode?: number } })?.response?.statusCode;
+    if (statusCode && statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
+      return false;
+    }
+  }
+  return true;
+};
 
 interface UpstreamCallOptions {
   redis?: Redis;
