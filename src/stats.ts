@@ -495,6 +495,7 @@ export interface RequestStatisticsOptions {
   maxCacheCoverageEntries?: number;
   maxGeohashCoverageEntries?: number;
   staleRefreshQueue?: StaleRefreshQueueMetricsProvider;
+  refreshCacheCoverageFromRedis?: boolean;
 }
 
 export class RedisStatisticsStorage implements StatisticsStorage {
@@ -562,6 +563,8 @@ export class RequestStatistics {
 
   private readonly geohashCoverageCompactionThreshold: number;
 
+  private readonly refreshCacheCoverageFromRedis: boolean;
+
   private revision = 0;
 
   private snapshotRevision = 0;
@@ -573,6 +576,7 @@ export class RequestStatistics {
     options: RequestStatisticsOptions = {}
   ) {
     this.staleRefreshQueue = options.staleRefreshQueue;
+    this.refreshCacheCoverageFromRedis = options.refreshCacheCoverageFromRedis ?? false;
 
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
@@ -983,7 +987,10 @@ export class RequestStatistics {
   private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
     const start = Date.now();
     const generatedAt = new Date(now).toISOString();
-    const coverageEntries = this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
+    const coverageEntries =
+      this.refreshCacheCoverageFromRedis && this.cacheMetrics instanceof TileStore
+        ? await this.cacheMetrics.getCacheCoverageFromRedis({ maxEntries: this.maxCacheCoverageEntries })
+        : this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
     const cacheCoverage = await this.aggregateCacheCoverage(coverageEntries);
 
     logger.info(
