@@ -3,7 +3,14 @@ import { Redis } from 'ioredis';
 
 import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
-import { RequestStatistics, RedisStatisticsStorage, type StatsWorkerCommand, type StatsWorkerNotification, type StatisticsRefreshTarget } from './stats.js';
+import {
+  DEFAULT_COVERAGE_REFRESH_INTERVAL_MS,
+  RequestStatistics,
+  RedisStatisticsStorage,
+  type StatsWorkerCommand,
+  type StatsWorkerNotification,
+  type StatisticsRefreshTarget
+} from './stats.js';
 import { TileStore, filterElementsByBbox } from './store.js';
 import type { TileInfo } from './tiling.js';
 import { StaleRefreshQueue } from './staleRefreshQueue.js';
@@ -41,6 +48,7 @@ const bootstrap = async (): Promise<void> => {
   try {
     const data = workerData as StatisticsWorkerData;
     redis = new Redis(data.redisUrl, { lazyConnect: true, maxRetriesPerRequest: 3 });
+    await redis.connect();
 
     const store = new TileStore(redis, {
       ttlSeconds: data.config.cacheTtlSeconds,
@@ -50,6 +58,9 @@ const bootstrap = async (): Promise<void> => {
     await store.restorePresence();
     const upstreamMetrics = await createUpstreamMetricsProvider(data.config, redis);
     const staleRefreshQueue = new StaleRefreshQueue();
+
+    const refreshIntervalMs =
+      data.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
 
     const statistics = await RequestStatistics.create(
       store,
@@ -64,6 +75,19 @@ const bootstrap = async (): Promise<void> => {
         maxGeohashCoverageEntries: data.maxGeohashCoverageEntries
       }
     );
+
+    const refreshStatisticsSnapshot = async (): Promise<void> => {
+      await statistics.getSnapshot();
+    };
+
+    await refreshStatisticsSnapshot();
+    if (refreshIntervalMs > 0) {
+      setInterval(() => {
+        void refreshStatisticsSnapshot().catch((error: unknown) => {
+          logger.warn({ err: error }, 'failed to refresh statistics snapshot');
+        });
+      }, refreshIntervalMs).unref();
+    }
 
     const notifyReady: StatsWorkerNotification = { type: 'ready' };
     parentPort.postMessage(notifyReady);
