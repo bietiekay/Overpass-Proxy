@@ -1510,5 +1510,6 @@ export class StatisticsWorkerClient {
     }
 
     await this.inlineStatistics.recordRequest(task.statsPayload);
+    await this.inlineStatistics.refreshCoverageCaches();
   }
 }
