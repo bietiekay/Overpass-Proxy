@@ -7,7 +7,7 @@ import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
 import type { CacheCoverageEntry, CacheCoverageOptions } from './store.js';
-import { TileStore } from './store.js';
+import { CACHE_COVERAGE_REVISION_KEY, TileStore } from './store.js';
 import type { TileInfo } from './tiling.js';
 import { startOfDayMs, startOfMonthMs, startOfWeekMs } from './time.js';
 import type {
@@ -244,10 +244,9 @@ export interface SnapshotReadOptions {
 export const readCachedSnapshot = async <T extends { generatedAt: string }>(
   store: SnapshotCacheStore,
   key: string,
-  now = Date.now(),
-  options: SnapshotReadOptions = {}
+  _now = Date.now(),
+  _options: SnapshotReadOptions = {}
 ): Promise<{ snapshot: T | null; pending: boolean }> => {
-  const refreshIntervalMs = options.refreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
   const raw = await store.get(key);
   if (!raw) {
     return { snapshot: null, pending: true };
@@ -256,8 +255,8 @@ export const readCachedSnapshot = async <T extends { generatedAt: string }>(
   try {
     const snapshot = JSON.parse(raw) as T;
     const generatedAt = Date.parse(snapshot.generatedAt);
-    const stale = !Number.isFinite(generatedAt) || now - generatedAt > refreshIntervalMs;
-    return { snapshot, pending: stale };
+    const invalid = !Number.isFinite(generatedAt);
+    return { snapshot, pending: invalid };
   } catch (error) {
     logger.warn({ err: error, key }, 'failed to parse cached snapshot');
     return { snapshot: null, pending: true };
@@ -437,17 +436,14 @@ class SnapshotCache<T extends { generatedAt: string }> {
     }
   }
 
-  private isStale(now: number): boolean {
+  private isStale(_now: number): boolean {
     if (this.dirty) {
       return true;
     }
     if (!this.lastGeneratedAt) {
       return true;
     }
-    if (this.refreshIntervalMs <= 0) {
-      return false;
-    }
-    return now - this.lastGeneratedAt > this.refreshIntervalMs;
+    return false;
   }
 
   private maybeRefresh(): void {
@@ -543,7 +539,6 @@ export interface RequestStatisticsOptions {
   maxCacheCoverageEntries?: number;
   maxGeohashCoverageEntries?: number;
   staleRefreshQueue?: StaleRefreshQueueMetricsProvider;
-  refreshCacheCoverageFromRedis?: boolean;
 }
 
 export class RedisStatisticsStorage implements StatisticsStorage {
@@ -611,11 +606,13 @@ export class RequestStatistics {
 
   private readonly geohashCoverageCompactionThreshold: number;
 
-  private readonly refreshCacheCoverageFromRedis: boolean;
-
   private revision = 0;
 
   private snapshotRevision = 0;
+
+  private cacheCoverageRevision: number | null = null;
+
+  private cacheCoverageSnapshot: CacheCoverageSnapshot | null = null;
 
   private constructor(
     private readonly cacheMetrics: CacheMetricsProvider,
@@ -624,8 +621,6 @@ export class RequestStatistics {
     options: RequestStatisticsOptions = {}
   ) {
     this.staleRefreshQueue = options.staleRefreshQueue;
-    this.refreshCacheCoverageFromRedis = options.refreshCacheCoverageFromRedis ?? false;
-
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
 
@@ -1042,12 +1037,20 @@ export class RequestStatistics {
 
   private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
     const start = Date.now();
+    const storedRevision = await this.snapshotStore.get(CACHE_COVERAGE_REVISION_KEY);
+    const nextRevision = storedRevision ? Number(storedRevision) : null;
+    if (
+      Number.isFinite(nextRevision) &&
+      this.cacheCoverageSnapshot &&
+      this.cacheCoverageRevision === nextRevision
+    ) {
+      return this.cacheCoverageSnapshot;
+    }
     const generatedAt = new Date(now).toISOString();
     logger.info({ memory: reportMemoryUsage() }, 'cache coverage snapshot build started');
-    const coverageEntries =
-      this.refreshCacheCoverageFromRedis && this.cacheMetrics instanceof TileStore
-        ? await this.cacheMetrics.getCacheCoverageFromRedis({ maxEntries: this.maxCacheCoverageEntries })
-        : this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
+    const coverageEntries = this.cacheMetrics.getCacheCoverage({
+      maxEntries: this.maxCacheCoverageEntries
+    });
     logger.info(
       { memory: reportMemoryUsage(), inputEntries: coverageEntries.length },
       'cache coverage snapshot input loaded'
@@ -1065,7 +1068,12 @@ export class RequestStatistics {
       'cache coverage snapshot built'
     );
 
-    return { generatedAt, cacheCoverage };
+    const snapshot = { generatedAt, cacheCoverage };
+    if (Number.isFinite(nextRevision)) {
+      this.cacheCoverageRevision = nextRevision;
+    }
+    this.cacheCoverageSnapshot = snapshot;
+    return snapshot;
   }
 
   private async captureGeohashCoverageState(now: number): Promise<AmenityCoverageState[]> {
@@ -1569,10 +1577,6 @@ export class StatisticsWorkerClient {
       now,
       { refreshIntervalMs: this.refreshIntervalMs }
     );
-
-    if (result.pending) {
-      this.refresh('statistics');
-    }
 
     return result;
   }
