@@ -14,7 +14,7 @@ import type { AppConfig } from './config.js';
 import { TooManyTilesError } from './errors.js';
 import { applyConditionalHeaders } from './headers.js';
 import { logger } from './logger.js';
-import type { TileStore } from './store.js';
+import type { CacheCoverageBoundsOptions, TileStore } from './store.js';
 import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
@@ -34,6 +34,8 @@ interface InterpreterDeps {
 }
 
 type InterpreterRequest = FastifyRequest;
+
+const MIN_CACHE_COVERAGE_PRECISION = 3;
 
 const readNumberValue = (value: unknown): number | null => {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -56,6 +58,18 @@ const readNumberValue = (value: unknown): number | null => {
     }
   }
   return null;
+};
+
+const parseCacheCoveragePrecision = (value: unknown, maxPrecision: number): number | null => {
+  const parsed = readNumberValue(value);
+  if (parsed === null) {
+    return null;
+  }
+  const rounded = Math.round(parsed);
+  if (!Number.isFinite(rounded)) {
+    return null;
+  }
+  return Math.min(Math.max(rounded, MIN_CACHE_COVERAGE_PRECISION), Math.max(maxPrecision, 1));
 };
 
 const parseBoundingBoxInput = (value: unknown): BoundingBox | null => {
@@ -568,6 +582,47 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
       reply.code(202);
     }
     reply.send(snapshot);
+  });
+
+  app.get('/api/statistics/cacheCoverage/area', async (request, reply) => {
+    const queryParams = request.query as Record<string, unknown>;
+    const bbox =
+      parseBoundingBoxInput(queryParams?.bbox) ??
+      parseBoundingBoxInput({
+        south: queryParams?.south,
+        west: queryParams?.west,
+        north: queryParams?.north,
+        east: queryParams?.east
+      });
+
+    if (!bbox) {
+      reply.code(400);
+      reply.send({ error: 'Bounding box required' });
+      return;
+    }
+
+    const precision = parseCacheCoveragePrecision(queryParams?.precision, deps.config.tilePrecision);
+    if (!precision) {
+      reply.code(400);
+      reply.send({ error: 'Precision required' });
+      return;
+    }
+
+    const maxEntries = readNumberValue(queryParams?.maxEntries);
+    const coverageOptions: CacheCoverageBoundsOptions = {
+      bbox,
+      precision,
+      maxEntries: maxEntries ?? undefined
+    };
+    const coverage = deps.store.getCacheCoverageForBounds(coverageOptions);
+
+    reply.header('Content-Type', 'application/json');
+    reply.send({
+      generatedAt: new Date().toISOString(),
+      bbox,
+      precision,
+      cacheCoverage: coverage
+    });
   });
 
   app.post('/api/cache/invalidate', async (request, reply) => {
