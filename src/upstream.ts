@@ -1,7 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
 import got, { RequestError } from 'got';
-import type { Method } from 'got';
+import type { Method, RetryOptions } from 'got';
 
 import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
@@ -35,10 +35,11 @@ const UPSTREAM_RETRY_ERROR_CODES = [
   'ECONNREFUSED'
 ];
 const UPSTREAM_RETRY_METHODS: Method[] = ['GET', 'PUT', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE'];
+const UPSTREAM_RETRY_METHODS_WITH_POST: Method[] = [...UPSTREAM_RETRY_METHODS, 'POST'];
 
-const buildUpstreamRetryOptions = (allowPost: boolean) => ({
+const buildUpstreamRetryOptions = (allowPost: boolean): Partial<RetryOptions> => ({
   limit: UPSTREAM_RETRY_LIMIT,
-  methods: allowPost ? [...UPSTREAM_RETRY_METHODS, 'POST'] : [...UPSTREAM_RETRY_METHODS],
+  methods: allowPost ? UPSTREAM_RETRY_METHODS_WITH_POST : UPSTREAM_RETRY_METHODS,
   statusCodes: UPSTREAM_RETRY_STATUS_CODES,
   errorCodes: UPSTREAM_RETRY_ERROR_CODES
 });
