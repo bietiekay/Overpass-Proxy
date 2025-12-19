@@ -35,6 +35,8 @@ export interface RestorePresenceProgress {
   cursor: string;
   scannedKeys: number;
   restoredTiles: number;
+  totalTiles?: number;
+  progressPercent?: number;
 }
 
 const reduceCoverageGeohashPrecision = (geohash: string): string =>
@@ -409,6 +411,7 @@ export interface TileStoreOptions {
 }
 
 const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
+const TILE_COUNT_KEY = 'metadata:tile_count';
 
 export class TileStore {
   private readonly presence: TilePresenceCache;
@@ -423,17 +426,25 @@ export class TileStore {
     let batches = 0;
     let scannedKeys = 0;
     let restoredTiles = 0;
+    const storedTotal = await this.redis.get(TILE_COUNT_KEY);
+    const totalTiles = storedTotal && Number.isFinite(Number(storedTotal)) ? Number(storedTotal) : undefined;
 
     const reportProgress = () => {
       if (!onProgress) {
         return;
       }
 
+      const progressPercent = totalTiles
+        ? Math.min(100, Math.round((scannedKeys / totalTiles) * 10000) / 100)
+        : undefined;
+
       onProgress({
         batches,
         cursor,
         scannedKeys,
-        restoredTiles
+        restoredTiles,
+        totalTiles,
+        progressPercent
       });
     };
 
@@ -447,6 +458,8 @@ export class TileStore {
         reportProgress();
       }
     } while (cursor !== '0');
+
+    await this.redis.set(TILE_COUNT_KEY, String(scannedKeys));
   }
 
   private async restoreTileKeys(keys: string[]): Promise<number> {
@@ -595,15 +608,30 @@ export class TileStore {
       };
       const amenityCount = countAmenitiesInResponse(response);
       tileHashes.push(tile.hash);
-      pipeline.set(tileKey(tile.hash, amenitySuffix), JSON.stringify(payload));
+      const key = tileKey(tile.hash, amenitySuffix);
+      pipeline.exists(key);
+      pipeline.set(key, JSON.stringify(payload));
       entriesWithPayload.push({ tile, payload, amenityCount });
     }
 
     const results = await pipeline.exec();
-    for (const [error] of results ?? []) {
-      if (error) {
-        throw error;
+    let newTiles = 0;
+    for (let index = 0; index < (results?.length ?? 0); index += 2) {
+      const existsResult = results?.[index];
+      const setResult = results?.[index + 1];
+      if (existsResult?.[0]) {
+        throw existsResult[0];
       }
+      if (setResult?.[0]) {
+        throw setResult[0];
+      }
+      if (existsResult?.[1] === 0) {
+        newTiles += 1;
+      }
+    }
+
+    if (newTiles > 0) {
+      await this.redis.incrby(TILE_COUNT_KEY, newTiles);
     }
 
     const logContext: Record<string, unknown> = {
