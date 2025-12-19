@@ -1,6 +1,6 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
-import got, { RequestError } from 'got';
+import got from 'got';
 import type { Method, RetryOptions } from 'got';
 
 import type { BoundingBox } from './bbox.js';
@@ -25,7 +25,7 @@ out skel qt;`;
 };
 
 const UPSTREAM_RETRY_LIMIT = 2;
-const UPSTREAM_RETRY_STATUS_CODES = [408, 413, 429, 500, 502, 503, 504];
+const UPSTREAM_RETRY_STATUS_CODES = [403, 408, 413, 429, 500, 502, 503, 504];
 const UPSTREAM_RETRY_ERROR_CODES = [
   'ETIMEDOUT',
   'ECONNRESET',
@@ -591,17 +591,7 @@ const getPool = (config: AppConfig, redis?: Redis): UpstreamPool => {
   return pool;
 };
 
-const shouldMarkFailure = (error: unknown): boolean => {
-  if (error instanceof RequestError) {
-    const statusCode = error.response?.statusCode;
-    if (statusCode !== undefined && statusCode < 500 && statusCode !== 429) {
-      return false;
-    }
-    return true;
-  }
-
-  return true;
-};
+const shouldMarkFailure = (_error: unknown): boolean => true;
 
 interface UpstreamCallOptions {
   redis?: Redis;
@@ -725,7 +715,20 @@ export const fetchTile = async (
         retry: buildUpstreamRetryOptions(true)
       });
       logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');
-      return JSON.parse(response.body) as OverpassResponse;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(response.body);
+      } catch (error) {
+        throw new Error(
+          `Failed to parse upstream response from ${upstreamUrl}: ${(error as Error).message}`
+        );
+      }
+
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as OverpassResponse).elements)) {
+        throw new Error(`Upstream response missing elements array from ${upstreamUrl}`);
+      }
+
+      return parsed as OverpassResponse;
     }
   );
 };
