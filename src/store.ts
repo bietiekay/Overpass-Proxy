@@ -491,6 +491,7 @@ export interface TileStoreOptions {
 
 const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
 const TILE_COUNT_KEY = 'metadata:tile_count';
+export const CACHE_COVERAGE_REVISION_KEY = 'statistics:cacheCoverageRevision';
 const TILE_META_PREFIX = 'tilemeta';
 const tileMetaKey = (tileHash: string, amenity: string): string =>
   `${TILE_META_PREFIX}:${amenity}:${tileHash}`;
@@ -926,6 +927,7 @@ export class TileStore {
     if (newTiles > 0) {
       await this.redis.incrby(TILE_COUNT_KEY, newTiles);
     }
+    await this.redis.incr(CACHE_COVERAGE_REVISION_KEY);
 
     const logContext: Record<string, unknown> = {
       tiles: tileHashes,
@@ -1098,6 +1100,7 @@ export class TileStore {
 
     if (deletedTileKeys > 0) {
       await this.redis.decrby(TILE_COUNT_KEY, deletedTileKeys);
+      await this.redis.incr(CACHE_COVERAGE_REVISION_KEY);
     }
 
     return {

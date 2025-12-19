@@ -72,8 +72,7 @@ const bootstrap = async (): Promise<void> => {
         coverageRefreshIntervalMs: data.coverageRefreshIntervalMs,
         coverageCacheTtlMs: data.coverageCacheTtlMs,
         maxCacheCoverageEntries: data.maxCacheCoverageEntries,
-        maxGeohashCoverageEntries: data.maxGeohashCoverageEntries,
-        refreshCacheCoverageFromRedis: true
+        maxGeohashCoverageEntries: data.maxGeohashCoverageEntries
       }
     );
 
