@@ -472,6 +472,11 @@ export interface OverpassTilePayload {
   expiresAt: number;
 }
 
+interface TileMetadataPayload {
+  expiresAt: number;
+  amenityCount: number;
+}
+
 export interface InvalidateResult {
   deletedKeys: number;
   matchedKeys: number;
@@ -486,6 +491,9 @@ export interface TileStoreOptions {
 
 const amenityKey = (amenity: string): string => amenity.trim().toLowerCase();
 const TILE_COUNT_KEY = 'metadata:tile_count';
+const TILE_META_PREFIX = 'tilemeta';
+const tileMetaKey = (tileHash: string, amenity: string): string =>
+  `${TILE_META_PREFIX}:${amenity}:${tileHash}`;
 
 export class TileStore {
   private readonly presence: TilePresenceCache;
@@ -496,6 +504,24 @@ export class TileStore {
   }
 
   public async restorePresence(onProgress?: (progress: RestorePresenceProgress) => void): Promise<void> {
+    const metadataRestore = await this.restorePresenceFromMetadata(onProgress);
+    if (metadataRestore.sawMetadata) {
+      if (
+        metadataRestore.totalTiles !== undefined &&
+        metadataRestore.restoredTiles < metadataRestore.totalTiles
+      ) {
+        logger.info(
+          {
+            restoredTiles: metadataRestore.restoredTiles,
+            totalTiles: metadataRestore.totalTiles
+          },
+          'tile metadata incomplete, falling back to payload restore'
+        );
+      } else {
+        return;
+      }
+    }
+
     let cursor = '0';
     let batches = 0;
     let scannedKeys = 0;
@@ -538,6 +564,84 @@ export class TileStore {
     await this.redis.set(TILE_COUNT_KEY, String(scannedKeys));
   }
 
+  private async restorePresenceFromMetadata(
+    onProgress?: (progress: RestorePresenceProgress) => void
+  ): Promise<{ sawMetadata: boolean; restoredTiles: number; totalTiles?: number }> {
+    let cursor = '0';
+    let batches = 0;
+    let scannedKeys = 0;
+    let restoredTiles = 0;
+    const storedTotal = await this.redis.get(TILE_COUNT_KEY);
+    const totalTiles = storedTotal && Number.isFinite(Number(storedTotal)) ? Number(storedTotal) : undefined;
+    let sawMetadata = false;
+
+    const reportProgress = () => {
+      if (!onProgress) {
+        return;
+      }
+
+      const progressPercent = totalTiles
+        ? Math.min(100, Math.round((scannedKeys / totalTiles) * 10000) / 100)
+        : cursor === '0'
+          ? 100
+          : 0;
+
+      onProgress({
+        batches,
+        cursor,
+        scannedKeys,
+        restoredTiles,
+        totalTiles,
+        progressPercent
+      });
+    };
+
+    do {
+      const [nextCursor, keys] = await this.redis.scan(
+        cursor,
+        'MATCH',
+        `${TILE_META_PREFIX}:*`,
+        'COUNT',
+        200
+      );
+      batches += 1;
+      cursor = nextCursor;
+      scannedKeys += keys.length;
+      if (keys.length === 0) {
+        continue;
+      }
+      sawMetadata = true;
+
+      const values = await this.redis.mget(keys);
+      keys.forEach((key, index) => {
+        const parsed = this.parseTileMetaKey(key);
+        const raw = values[index];
+        if (!parsed || !raw) {
+          return;
+        }
+
+        try {
+          const payload = JSON.parse(raw) as TileMetadataPayload;
+          const isStale = payload.expiresAt < Date.now();
+          this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, payload.amenityCount, isStale);
+          restoredTiles += 1;
+        } catch (error) {
+          logger.warn({ err: error, key }, 'failed to restore tile metadata from redis');
+        }
+      });
+
+      if (batches === 1 || cursor === '0' || batches % 10 === 0) {
+        reportProgress();
+      }
+    } while (cursor !== '0');
+
+    if (sawMetadata) {
+      await this.redis.set(TILE_COUNT_KEY, String(scannedKeys));
+    }
+
+    return { sawMetadata, restoredTiles, totalTiles };
+  }
+
   private async restoreTileKeys(keys: string[]): Promise<number> {
     if (keys.length === 0) {
       return 0;
@@ -545,6 +649,7 @@ export class TileStore {
 
     const values = await this.redis.mget(keys);
     let restored = 0;
+    const metadataUpdates: Array<{ amenity: string; hash: string; payload: TileMetadataPayload }> = [];
 
     keys.forEach((key, index) => {
       const parsed = this.parseTileKey(key);
@@ -559,17 +664,57 @@ export class TileStore {
         const amenityCount = countAmenitiesInResponse(payload.response);
         const isStale = payload.expiresAt < Date.now();
         this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, amenityCount, isStale);
+        metadataUpdates.push({
+          amenity: parsed.amenity,
+          hash: parsed.hash,
+          payload: { expiresAt: payload.expiresAt, amenityCount }
+        });
         restored += 1;
       } catch (error) {
         logger.warn({ err: error, key }, 'failed to restore tile presence from redis');
       }
     });
 
+    if (metadataUpdates.length > 0) {
+      const pipeline = this.redis.pipeline();
+      for (const update of metadataUpdates) {
+        pipeline.set(tileMetaKey(update.hash, update.amenity), JSON.stringify(update.payload));
+      }
+      try {
+        const results = await pipeline.exec();
+        for (const result of results ?? []) {
+          if (result?.[0]) {
+            throw result[0];
+          }
+        }
+      } catch (error) {
+        logger.warn({ err: error }, 'failed to store tile metadata during restore');
+      }
+    }
+
     return restored;
   }
 
   private parseTileKey(key: string): { amenity: string; hash: string } | null {
     if (!key.startsWith('tile:')) {
+      return null;
+    }
+
+    const parts = key.split(':');
+    if (parts.length !== 3) {
+      return null;
+    }
+
+    const [, amenity, hash] = parts;
+    if (!amenity || !hash) {
+      return null;
+    }
+
+    return { amenity, hash };
+  }
+
+  private parseTileMetaKey(key: string): { amenity: string; hash: string } | null {
+    if (!key.startsWith(`${TILE_META_PREFIX}:`)) {
       return null;
     }
 
@@ -605,6 +750,66 @@ export class TileStore {
 
   public getCacheCoverage(options?: CacheCoverageOptions): CacheCoverageEntry[] {
     return this.presence.getCoverage(options);
+  }
+
+  public async getCacheCoverageFromRedis(options: CacheCoverageOptions = {}): Promise<CacheCoverageEntry[]> {
+    const targetSize = Math.max(1, options.maxEntries ?? 50000);
+    const compactionThreshold = !Number.isFinite(targetSize)
+      ? Number.POSITIVE_INFINITY
+      : Math.max(targetSize, Math.floor(targetSize * 1.2));
+
+    let coverage = new Map<string, CacheCoverageEntry>();
+    let processed = 0;
+    let cursor = '0';
+    const now = Date.now();
+
+    do {
+      const [nextCursor, keys] = await this.redis.scan(
+        cursor,
+        'MATCH',
+        `${TILE_META_PREFIX}:*`,
+        'COUNT',
+        250
+      );
+      cursor = nextCursor;
+      if (keys.length === 0) {
+        continue;
+      }
+
+      const values = await this.redis.mget(keys);
+      keys.forEach((key, index) => {
+        const parsed = this.parseTileMetaKey(key);
+        const raw = values[index];
+        if (!parsed || !raw) {
+          return;
+        }
+
+        try {
+          const payload = JSON.parse(raw) as TileMetadataPayload;
+          const stale = payload.expiresAt < now;
+          const base: CacheCoverageEntry = {
+            geohash: parsed.hash,
+            entries: stale ? 0 : 1,
+            amenityItems: stale ? 0 : payload.amenityCount,
+            staleEntries: stale ? 1 : 0,
+            staleAmenityItems: stale ? payload.amenityCount : 0
+          };
+
+          coverage.set(parsed.hash, mergeCoverageEntry(coverage.get(parsed.hash), base));
+
+          processed += 1;
+          if (coverage.size > compactionThreshold && processed % 50 === 0) {
+            coverage = compactCoverageGeohashEntries(coverage, targetSize);
+          }
+        } catch {
+          // ignore parse errors
+        }
+      });
+    } while (cursor !== '0');
+
+    coverage = compactCoverageGeohashEntries(coverage, targetSize);
+
+    return [...coverage.values()];
   }
 
   public getCacheCoverageForBounds(options: CacheCoverageBoundsOptions): CacheCoverageEntry[] {
@@ -691,19 +896,27 @@ export class TileStore {
       const key = tileKey(tile.hash, amenitySuffix);
       pipeline.exists(key);
       pipeline.set(key, JSON.stringify(payload));
+      pipeline.set(
+        tileMetaKey(tile.hash, amenitySuffix),
+        JSON.stringify({ expiresAt: payload.expiresAt, amenityCount } satisfies TileMetadataPayload)
+      );
       entriesWithPayload.push({ tile, payload, amenityCount });
     }
 
     const results = await pipeline.exec();
     let newTiles = 0;
-    for (let index = 0; index < (results?.length ?? 0); index += 2) {
+    for (let index = 0; index < (results?.length ?? 0); index += 3) {
       const existsResult = results?.[index];
       const setResult = results?.[index + 1];
+      const metaResult = results?.[index + 2];
       if (existsResult?.[0]) {
         throw existsResult[0];
       }
       if (setResult?.[0]) {
         throw setResult[0];
+      }
+      if (metaResult?.[0]) {
+        throw metaResult[0];
       }
       if (existsResult?.[1] === 0) {
         newTiles += 1;
@@ -845,7 +1058,11 @@ export class TileStore {
         if (!hashes.has(hash)) {
           continue;
         }
-        toDelete.push({ key, amenity, hash, isTileKey: parts.length === 3 });
+        const isTileKey = parts.length === 3;
+        toDelete.push({ key, amenity, hash, isTileKey });
+        if (isTileKey) {
+          toDelete.push({ key: tileMetaKey(hash, amenity), amenity, hash, isTileKey: false });
+        }
       }
 
       if (toDelete.length === 0) {

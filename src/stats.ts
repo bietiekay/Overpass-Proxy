@@ -264,6 +264,54 @@ export const readCachedSnapshot = async <T extends { generatedAt: string }>(
   }
 };
 
+const reportMemoryUsage = (): {
+  rssMb: number;
+  heapTotalMb: number;
+  heapUsedMb: number;
+  externalMb: number;
+  arrayBuffersMb: number;
+} => {
+  const memory = process.memoryUsage();
+  const toMb = (value: number) => Math.round(value / 1024 / 1024);
+
+  return {
+    rssMb: toMb(memory.rss),
+    heapTotalMb: toMb(memory.heapTotal),
+    heapUsedMb: toMb(memory.heapUsed),
+    externalMb: toMb(memory.external),
+    arrayBuffersMb: toMb(memory.arrayBuffers)
+  };
+};
+
+const summarizeAmenityState = (
+  amenityState: AmenityCoverageState[]
+): {
+  amenityCount: number;
+  geohashEntries: number;
+  maxAmenityGeohashes: number;
+  maxAmenity?: string;
+} => {
+  let geohashEntries = 0;
+  let maxAmenityGeohashes = 0;
+  let maxAmenity: string | undefined;
+
+  for (const stats of amenityState) {
+    const entryCount = stats.geohashCounts.length;
+    geohashEntries += entryCount;
+    if (entryCount > maxAmenityGeohashes) {
+      maxAmenityGeohashes = entryCount;
+      maxAmenity = stats.amenity;
+    }
+  }
+
+  return {
+    amenityCount: amenityState.length,
+    geohashEntries,
+    maxAmenityGeohashes,
+    maxAmenity
+  };
+};
+
 export class SharedStaleRefreshMetrics implements StaleRefreshQueueMetricsProvider {
   private overview: StaleRefreshQueueOverview = {
     queuedRequests: 0,
@@ -495,6 +543,7 @@ export interface RequestStatisticsOptions {
   maxCacheCoverageEntries?: number;
   maxGeohashCoverageEntries?: number;
   staleRefreshQueue?: StaleRefreshQueueMetricsProvider;
+  refreshCacheCoverageFromRedis?: boolean;
 }
 
 export class RedisStatisticsStorage implements StatisticsStorage {
@@ -562,6 +611,8 @@ export class RequestStatistics {
 
   private readonly geohashCoverageCompactionThreshold: number;
 
+  private readonly refreshCacheCoverageFromRedis: boolean;
+
   private revision = 0;
 
   private snapshotRevision = 0;
@@ -573,6 +624,7 @@ export class RequestStatistics {
     options: RequestStatisticsOptions = {}
   ) {
     this.staleRefreshQueue = options.staleRefreshQueue;
+    this.refreshCacheCoverageFromRedis = options.refreshCacheCoverageFromRedis ?? false;
 
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
@@ -845,6 +897,14 @@ export class RequestStatistics {
 
   private async buildStatisticsSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
     return this.runExclusive(async () => {
+      logger.info(
+        {
+          memory: reportMemoryUsage(),
+          amenityCount: this.amenityStats.size,
+          uniqueClients: this.uniqueClients.size
+        },
+        'statistics snapshot build started'
+      );
       this.refreshPeriodCounters(now);
 
       const generatedAt = new Date(now).toISOString();
@@ -983,7 +1043,15 @@ export class RequestStatistics {
   private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
     const start = Date.now();
     const generatedAt = new Date(now).toISOString();
-    const coverageEntries = this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
+    logger.info({ memory: reportMemoryUsage() }, 'cache coverage snapshot build started');
+    const coverageEntries =
+      this.refreshCacheCoverageFromRedis && this.cacheMetrics instanceof TileStore
+        ? await this.cacheMetrics.getCacheCoverageFromRedis({ maxEntries: this.maxCacheCoverageEntries })
+        : this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
+    logger.info(
+      { memory: reportMemoryUsage(), inputEntries: coverageEntries.length },
+      'cache coverage snapshot input loaded'
+    );
     const cacheCoverage = await this.aggregateCacheCoverage(coverageEntries);
 
     logger.info(
@@ -1012,7 +1080,12 @@ export class RequestStatistics {
 
   private async buildGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
     const start = Date.now();
+    logger.info({ memory: reportMemoryUsage() }, 'geohash coverage snapshot build started');
     const amenityState = await this.captureGeohashCoverageState(now);
+    logger.info(
+      { memory: reportMemoryUsage(), ...summarizeAmenityState(amenityState) },
+      'geohash coverage snapshot input captured'
+    );
     const { amenityCoverage } = await this.buildGeohashCoverage(amenityState);
     const generatedAt = new Date(now).toISOString();
 

@@ -164,6 +164,33 @@
       font-size: 0.9rem;
     }
 
+    .loading-indicator {
+      display: none;
+      align-items: center;
+      gap: 0.4rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .loading-indicator.visible {
+      display: inline-flex;
+    }
+
+    .loading-spinner {
+      width: 0.75rem;
+      height: 0.75rem;
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
     .upstreams-panel {
       position: absolute;
       z-index: 900;
@@ -459,6 +486,10 @@
         </svg>
       </button>
       <span id="status" class="status">Loading statistics…</span>
+      <span id="layer-loading" class="loading-indicator" role="status" aria-live="polite">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <span class="loading-text">Loading cache coverage…</span>
+      </span>
       <div id="progress" class="progress-wrapper hidden" role="status" aria-live="polite">
         <div class="progress-track" aria-hidden="true">
           <div id="progress-bar" class="progress-bar"></div>
@@ -578,6 +609,8 @@
     const serverUrlInput = document.getElementById('server-url');
     const settingsCancel = document.getElementById('settings-cancel');
     const settingsSave = document.getElementById('settings-save');
+    const layerLoadingEl = document.getElementById('layer-loading');
+    const layerLoadingTextEl = layerLoadingEl.querySelector('.loading-text');
     let latestSnapshot = null;
     let latestCacheCoverage = [];
     let latestGeohashCoverage = [];
@@ -587,6 +620,7 @@
     let cacheCoverageSignature = null;
     let cacheCoverageAbort = null;
     let cacheCoverageDebounce = null;
+    let cacheCoverageRequestToken = 0;
 
     const getServerUrl = () => {
       const stored = localStorage.getItem(serverUrlStorageKey);
@@ -712,6 +746,16 @@
       await updateProgress(1, label ?? 'Ready');
       await waitForAnimationFrame();
       window.setTimeout(() => progressEl.classList.add('hidden'), 250);
+    };
+
+    const setLayerLoading = (isLoading, label = 'Loading cache coverage…') => {
+      if (!layerLoadingEl) return;
+      if (isLoading) {
+        layerLoadingTextEl.textContent = label;
+        layerLoadingEl.classList.add('visible');
+      } else {
+        layerLoadingEl.classList.remove('visible');
+      }
     };
 
     const toColor = (ratio) => {
@@ -1430,6 +1474,8 @@
 
       const controller = new AbortController();
       cacheCoverageAbort = controller;
+      const requestToken = ++cacheCoverageRequestToken;
+      setLayerLoading(true);
 
       const params = new URLSearchParams({
         south: bounds.getSouth().toFixed(6),
@@ -1461,6 +1507,9 @@
           await fetchCacheCoverageLegacy();
         }
       } finally {
+        if (requestToken === cacheCoverageRequestToken) {
+          setLayerLoading(false);
+        }
         if (cacheCoverageAbort === controller) {
           cacheCoverageAbort = null;
         }
