@@ -504,6 +504,24 @@ export class TileStore {
   }
 
   public async restorePresence(onProgress?: (progress: RestorePresenceProgress) => void): Promise<void> {
+    const metadataRestore = await this.restorePresenceFromMetadata(onProgress);
+    if (metadataRestore.sawMetadata) {
+      if (
+        metadataRestore.totalTiles !== undefined &&
+        metadataRestore.restoredTiles < metadataRestore.totalTiles
+      ) {
+        logger.info(
+          {
+            restoredTiles: metadataRestore.restoredTiles,
+            totalTiles: metadataRestore.totalTiles
+          },
+          'tile metadata incomplete, falling back to payload restore'
+        );
+      } else {
+        return;
+      }
+    }
+
     let cursor = '0';
     let batches = 0;
     let scannedKeys = 0;
@@ -544,6 +562,84 @@ export class TileStore {
     } while (cursor !== '0');
 
     await this.redis.set(TILE_COUNT_KEY, String(scannedKeys));
+  }
+
+  private async restorePresenceFromMetadata(
+    onProgress?: (progress: RestorePresenceProgress) => void
+  ): Promise<{ sawMetadata: boolean; restoredTiles: number; totalTiles?: number }> {
+    let cursor = '0';
+    let batches = 0;
+    let scannedKeys = 0;
+    let restoredTiles = 0;
+    const storedTotal = await this.redis.get(TILE_COUNT_KEY);
+    const totalTiles = storedTotal && Number.isFinite(Number(storedTotal)) ? Number(storedTotal) : undefined;
+    let sawMetadata = false;
+
+    const reportProgress = () => {
+      if (!onProgress) {
+        return;
+      }
+
+      const progressPercent = totalTiles
+        ? Math.min(100, Math.round((scannedKeys / totalTiles) * 10000) / 100)
+        : cursor === '0'
+          ? 100
+          : 0;
+
+      onProgress({
+        batches,
+        cursor,
+        scannedKeys,
+        restoredTiles,
+        totalTiles,
+        progressPercent
+      });
+    };
+
+    do {
+      const [nextCursor, keys] = await this.redis.scan(
+        cursor,
+        'MATCH',
+        `${TILE_META_PREFIX}:*`,
+        'COUNT',
+        200
+      );
+      batches += 1;
+      cursor = nextCursor;
+      scannedKeys += keys.length;
+      if (keys.length === 0) {
+        continue;
+      }
+      sawMetadata = true;
+
+      const values = await this.redis.mget(keys);
+      keys.forEach((key, index) => {
+        const parsed = this.parseTileMetaKey(key);
+        const raw = values[index];
+        if (!parsed || !raw) {
+          return;
+        }
+
+        try {
+          const payload = JSON.parse(raw) as TileMetadataPayload;
+          const isStale = payload.expiresAt < Date.now();
+          this.presence.markPresent(parsed.amenity, parsed.hash, payload.expiresAt, payload.amenityCount, isStale);
+          restoredTiles += 1;
+        } catch (error) {
+          logger.warn({ err: error, key }, 'failed to restore tile metadata from redis');
+        }
+      });
+
+      if (batches === 1 || cursor === '0' || batches % 10 === 0) {
+        reportProgress();
+      }
+    } while (cursor !== '0');
+
+    if (sawMetadata) {
+      await this.redis.set(TILE_COUNT_KEY, String(scannedKeys));
+    }
+
+    return { sawMetadata, restoredTiles, totalTiles };
   }
 
   private async restoreTileKeys(keys: string[]): Promise<number> {
