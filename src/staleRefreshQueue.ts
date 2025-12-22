@@ -1,7 +1,7 @@
 import type { BoundingBox } from './bbox.js';
 import type { TileInfo } from './tiling.js';
 
-import { boundsForHash, tilesForBoundingBox } from './tiling.js';
+import { planTileFetches } from './fetchPlan.js';
 import { logger } from './logger.js';
 
 export interface StaleRefreshQueueOverview {
@@ -34,16 +34,21 @@ type QueueEntry = {
 type ActiveEntry = QueueEntry & { startedAt: number };
 
 const DEFAULT_TASK_TIMEOUT_MS = 5 * 60 * 1000;
-const COARSE_GEOHASH_PRECISION = 4;
-
 export type StaleRefreshGroup = {
   bounds: BoundingBox;
   tiles: TileInfo[];
 };
 
+export type StaleRefreshPlanOptions = {
+  coarsePrecision: number;
+  finePrecision: number;
+  targetTilesPerRequest?: number;
+};
+
 export type StaleRefreshTask = {
   amenity: string;
   groups: StaleRefreshGroup[];
+  planOptions: StaleRefreshPlanOptions;
   run: (groups: StaleRefreshGroup[]) => Promise<void>;
   onSettled?: () => void | Promise<void>;
 };
@@ -62,13 +67,17 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
   constructor(private readonly taskTimeoutMs = DEFAULT_TASK_TIMEOUT_MS) {}
 
   public enqueue(task: StaleRefreshTask): void {
-    const tileGroups = task.groups.length;
-    const tiles = task.groups.reduce((total, group) => total + group.tiles.length, 0);
+    const groups = this.normalizeGroups(task.groups, task.planOptions);
+    const tileGroups = groups.length;
+    const tiles = groups.reduce((total, group) => total + group.tiles.length, 0);
     const entry: QueueEntry = {
       enqueuedAt: Date.now(),
       tileGroups,
       tiles,
-      task
+      task: {
+        ...task,
+        groups
+      }
     };
 
     this.queued.push(entry);
@@ -191,17 +200,18 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
 
   private mergeEntries(entries: QueueEntry[]): QueueEntry {
     const allGroups = entries.flatMap((entry) => entry.task.groups);
-    const mergedGroups = this.mergeGroupsByPrefix(allGroups);
+    const baseTask = entries[0]?.task;
+    if (!baseTask) {
+      throw new Error('Cannot merge empty stale refresh queue');
+    }
+
+    const mergedGroups = this.normalizeGroups(allGroups, baseTask.planOptions);
     const tileGroups = mergedGroups.length;
     const tiles = mergedGroups.reduce((total, group) => total + group.tiles.length, 0);
     const enqueuedAt = Math.min(...entries.map((entry) => entry.enqueuedAt));
     const callbacks = entries.map((entry) => entry.task.onSettled).filter(Boolean) as Array<
       () => void | Promise<void>
     >;
-    const baseTask = entries[0]?.task;
-    if (!baseTask) {
-      throw new Error('Cannot merge empty stale refresh queue');
-    }
 
     return {
       enqueuedAt,
@@ -210,6 +220,7 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
       task: {
         amenity: baseTask.amenity,
         groups: mergedGroups,
+        planOptions: baseTask.planOptions,
         run: baseTask.run,
         onSettled: callbacks.length
           ? async () => {
@@ -222,7 +233,10 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
     };
   }
 
-  private mergeGroupsByPrefix(groups: StaleRefreshGroup[]): StaleRefreshGroup[] {
+  private normalizeGroups(
+    groups: StaleRefreshGroup[],
+    planOptions: StaleRefreshPlanOptions
+  ): StaleRefreshGroup[] {
     const tilesByHash = new Map<string, TileInfo>();
     for (const group of groups) {
       for (const tile of group.tiles) {
@@ -230,34 +244,7 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
       }
     }
 
-    const tilesByPrefix = new Map<string, TileInfo[]>();
-    for (const tile of tilesByHash.values()) {
-      const prefix = tile.hash.slice(0, Math.min(COARSE_GEOHASH_PRECISION, tile.hash.length));
-      const bucket = tilesByPrefix.get(prefix) ?? [];
-      bucket.push(tile);
-      tilesByPrefix.set(prefix, bucket);
-    }
-
-    const mergedGroups: StaleRefreshGroup[] = [];
-    for (const [prefix, tiles] of tilesByPrefix) {
-      if (tiles.length >= 2 && prefix.length === COARSE_GEOHASH_PRECISION) {
-        const finePrecision = Math.max(
-          COARSE_GEOHASH_PRECISION,
-          ...tiles.map((tile) => tile.hash.length)
-        );
-        const bounds = boundsForHash(prefix);
-        mergedGroups.push({
-          bounds,
-          tiles: tilesForBoundingBox(bounds, finePrecision)
-        });
-      } else {
-        for (const tile of tiles) {
-          mergedGroups.push({ bounds: tile.bounds, tiles: [tile] });
-        }
-      }
-    }
-
-    return mergedGroups;
+    return planTileFetches(Array.from(tilesByHash.values()), planOptions);
   }
 
   private async runSettledHandlers(entry: QueueEntry): Promise<void> {

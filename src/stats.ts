@@ -1214,6 +1214,11 @@ export type StatsWorkerCommand =
       type: 'staleRefreshTask';
       amenity: string;
       groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
+      planOptions: {
+        coarsePrecision: number;
+        finePrecision: number;
+        targetTilesPerRequest?: number;
+      };
       statsPayload: RecordRequestOptions;
     };
 
@@ -1506,12 +1511,19 @@ export class StatisticsWorkerClient {
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
     statsPayload: RecordRequestOptions;
   }): void {
+    const planOptions = {
+      coarsePrecision: this.config.staleRefreshCoarsePrecision,
+      finePrecision: this.config.tilePrecision,
+      targetTilesPerRequest: this.config.staleRefreshTargetTilesPerRequest
+    };
+
     if (!this.useWorker) {
       void this.readyPromise
         .then(() =>
           this.inlineStaleRefreshQueue?.enqueue({
             amenity: task.amenity,
             groups: task.groups,
+            planOptions,
             run: async (groups) => {
               await this.runStaleRefreshTask({ amenity: task.amenity, groups });
             },
@@ -1532,6 +1544,7 @@ export class StatisticsWorkerClient {
           type: 'staleRefreshTask',
           amenity: task.amenity,
           groups: task.groups,
+          planOptions,
           statsPayload: task.statsPayload
         };
         this.worker?.postMessage(command);
