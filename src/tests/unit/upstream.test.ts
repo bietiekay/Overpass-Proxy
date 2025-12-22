@@ -44,6 +44,8 @@ const baseConfig: AppConfig = {
   tilePrecision: 5,
   upstreamTilePrecision: 3,
   maxTilesPerRequest: 100,
+  staleRefreshCoarsePrecision: 3,
+  staleRefreshTargetTilesPerRequest: 64,
   nodeEnv: 'test',
   upstreamFailureCooldownSeconds: 60,
   upstreamBackoffBaseSeconds: 1,
@@ -58,7 +60,9 @@ const baseConfig: AppConfig = {
   transparentOnly: false,
   trustProxy: false,
   upstreamOrigin: 'https://overpass-turbo.eu',
-  upstreamReferer: 'https://overpass-turbo.eu/'
+  upstreamReferer: 'https://overpass-turbo.eu/',
+  serveStaleFromCache: true,
+  cacheInvalidateSecret: null
 };
 
 const mockReply = () => {

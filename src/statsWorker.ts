@@ -130,11 +130,17 @@ const bootstrap = async (): Promise<void> => {
 
     const enqueueStaleRefresh = (
       amenity: string,
-      groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>
+      groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>,
+      planOptions: {
+        coarsePrecision: number;
+        finePrecision: number;
+        targetTilesPerRequest?: number;
+      }
     ): void => {
       staleRefreshQueue.enqueue({
         amenity,
         groups,
+        planOptions,
         run: async (mergedGroups) => {
           for (const group of mergedGroups) {
             const representative = group.tiles[0];
@@ -176,7 +182,7 @@ const bootstrap = async (): Promise<void> => {
           handleMarkDirty(command.target);
           return;
         case 'staleRefreshTask':
-          enqueueStaleRefresh(command.amenity, command.groups);
+          enqueueStaleRefresh(command.amenity, command.groups, command.planOptions);
           await statistics.recordRequest(command.statsPayload);
           return;
         case 'staleRefreshUpdate':
