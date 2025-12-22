@@ -132,9 +132,11 @@ const bootstrap = async (): Promise<void> => {
       amenity: string,
       groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>
     ): void => {
-      staleRefreshQueue.enqueue(
-        async () => {
-          for (const group of groups) {
+      staleRefreshQueue.enqueue({
+        amenity,
+        groups,
+        run: async (mergedGroups) => {
+          for (const group of mergedGroups) {
             const representative = group.tiles[0];
             if (!representative) continue;
 
@@ -158,12 +160,8 @@ const bootstrap = async (): Promise<void> => {
           }
 
           statistics.markCacheCoverageDirty();
-        },
-        {
-          tileGroups: groups.length,
-          tiles: groups.reduce((total, group) => total + group.tiles.length, 0)
         }
-      );
+      });
     };
 
     const handleCommand = async (command: StatsWorkerCommand): Promise<void> => {

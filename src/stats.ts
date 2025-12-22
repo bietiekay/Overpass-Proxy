@@ -1509,11 +1509,15 @@ export class StatisticsWorkerClient {
     if (!this.useWorker) {
       void this.readyPromise
         .then(() =>
-          this.inlineStaleRefreshQueue?.enqueue(async () => {
-            await this.runStaleRefreshTask(task);
-          }, {
-            tileGroups: task.groups.length,
-            tiles: task.groups.reduce((total, group) => total + group.tiles.length, 0)
+          this.inlineStaleRefreshQueue?.enqueue({
+            amenity: task.amenity,
+            groups: task.groups,
+            run: async (groups) => {
+              await this.runStaleRefreshTask({ amenity: task.amenity, groups });
+            },
+            onSettled: async () => {
+              await this.inlineStatistics?.recordRequest(task.statsPayload);
+            }
           })
         )
         .catch((error) => {
@@ -1641,7 +1645,6 @@ export class StatisticsWorkerClient {
   private async runStaleRefreshTask(task: {
     amenity: string;
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
-    statsPayload: RecordRequestOptions;
   }): Promise<void> {
     if (!this.inlineStatistics || !this.inlineStore) {
       return;
@@ -1670,7 +1673,6 @@ export class StatisticsWorkerClient {
         });
     }
 
-    await this.inlineStatistics.recordRequest(task.statsPayload);
     this.inlineStatistics.markCacheCoverageDirty();
   }
 }
