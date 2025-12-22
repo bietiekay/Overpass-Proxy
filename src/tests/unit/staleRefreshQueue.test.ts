@@ -19,11 +19,13 @@ describe('StaleRefreshQueue', () => {
       queue.enqueue({
         amenity: 'toilets',
         groups,
+        planOptions: { coarsePrecision: 3, finePrecision: 6 },
         run: () => new Promise(() => {})
       });
       queue.enqueue({
         amenity: 'toilets',
         groups,
+        planOptions: { coarsePrecision: 3, finePrecision: 6 },
         run: async () => {
           completed.push('second');
         }

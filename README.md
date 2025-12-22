@@ -59,6 +59,8 @@ Environment variables are read at startup. Defaults are shown below:
 | `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
+| `STALE_REFRESH_COARSE_PRECISION` | `3` | Coarse geohash precision for background stale refresh grouping |
+| `STALE_REFRESH_TARGET_TILES_PER_REQUEST` | `max(32, MAX_TILES_PER_REQUEST / 4)` | Target tile count per background stale refresh request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-For`/`X-Real-IP` headers from a reverse proxy when determining client IPs |
 | `UPSTREAM_ORIGIN` | `https://overpass-turbo.eu` | Origin header used when proxying `/api/interpreter` |
@@ -94,8 +96,10 @@ workflow is:
   callers from stampeding the same fetch. Late callers reuse the fresh write once it lands or fall back to waiting until the
   inflight window expires.
 - **Upstream grouping:** tiles slated for refresh are clustered at `UPSTREAM_TILE_PRECISION` (default two geohash levels
-  coarser than `TILE_PRECISION`) so one upstream bbox request can repopulate many fine-grained tiles. Each grouped request uses
-  the canonical amenity query and obeys `UPSTREAM_REQUEST_TIMEOUT_SECONDS` (default 30 seconds, bounded by
+  coarser than `TILE_PRECISION`) so one upstream bbox request can repopulate many fine-grained tiles. Background refreshes
+  replan tiles using `STALE_REFRESH_COARSE_PRECISION` (default 3) and `STALE_REFRESH_TARGET_TILES_PER_REQUEST` (default a
+  quarter of `MAX_TILES_PER_REQUEST`, min 32) to reduce redundant bbox fetches. Each grouped request uses the canonical
+  amenity query and obeys `UPSTREAM_REQUEST_TIMEOUT_SECONDS` (default 30 seconds, bounded by
   `UPSTREAM_FAILURE_COOLDOWN_SECONDS`).
 - **Persistence:** successful upstream responses are clipped to each fine tile’s exact bbox and written with `fetchedAt` and
   `expiresAt` using Redis pipelines. Presence counters that drive `GET /api/statistics/cacheCoverage` are updated alongside the

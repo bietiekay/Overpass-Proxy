@@ -23,6 +23,8 @@ services:
       # TILE_PRECISION: 5               # finer tiles served to clients
       # UPSTREAM_TILE_PRECISION: 3      # coarser tiles fetched from upstreams
       # MAX_TILES_PER_REQUEST: 1024     # safeguard for very large bbox requests
+      # STALE_REFRESH_COARSE_PRECISION: 3  # coarse precision for background stale refresh grouping
+      # STALE_REFRESH_TARGET_TILES_PER_REQUEST: 256 # target tiles per background refresh request
       # CACHE_INVALIDATION_SECRET: 'change-me' # secret required to use /api/cache/invalidate
 
       # Upstream health & load-balancing (EWMA + stickiness + backoff + probes)
