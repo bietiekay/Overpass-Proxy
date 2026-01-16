@@ -615,3 +615,175 @@ npm run build
 
 ---
 
+
+Build passes. The non-null assertion (`!`) is safe because the condition checks that `this.cacheCoverageSnapshot` is truthy before returning it.
+
+The fix ensures TypeScript understands that when `shouldSkipRebuild` is true, `this.cacheCoverageSnapshot` is guaranteed to be non-null, satisfying the `Promise<CacheCoverageSnapshot>` return type.
+
+---
+
+_**User (2026-01-16 19:04Z)**_
+
+describe and commit
+
+---
+
+_**Agent (model default, mode Agent)**_
+
+
+
+---
+
+
+Checking what changed, then committing:
+
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: git status</summary>
+
+```bash
+git status
+```
+
+```
+On branch testing
+Your branch is ahead of 'github/testing' by 1 commit.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add &lt;file&gt;..." to update what will be committed)
+  (use "git restore &lt;file&gt;..." to discard changes in working directory)
+	modified:   src/stats.ts
+
+Untracked files:
+  (use "git add &lt;file&gt;..." to include in what will be committed)
+	.specstory/history/2026-01-16_19-04Z-npm-audit-and-tests.md
+
+no changes added to commit (use "git add" and/or "git commit -a")
+
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+Checking the diff to see what changed:
+
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: git diff src/stats.ts</summary>
+
+```bash
+git diff src/stats.ts
+```
+
+```
+diff --git a/src/stats.ts b/src/stats.ts
+index 7d08a60..14b56be 100644
+--- a/src/stats.ts
++++ b/src/stats.ts
+@@ -1079,7 +1079,7 @@ export class RequestStatistics {
+       timeSinceLastBuild &lt; this.coverageRefreshIntervalMs;
+     
+     if (shouldSkipRebuild) {
+-      return this.cacheCoverageSnapshot;
++      return this.cacheCoverageSnapshot!;
+     }
+     
+     const generatedAt = new Date(now).toISOString();
+
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+Staging and committing the fix:
+
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: git add src/stats.ts</summary>
+
+```bash
+git add src/stats.ts
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+
+
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: git commit -m "fix: add non-null assertion for cacheCoverageSnapshot return
+
+TypeScript couldn't infer that cacheCoverageSnapshot is non-null
+when shouldSkipRebuild is true, even though the condition explicitly
+checks for its existence. Added non-null assertion operator to fix
+compilation error.
+
+Fixes: TS2322 error in buildCacheCoverageSnapshot method"</summary>
+
+```bash
+git commit -m "fix: add non-null assertion for cacheCoverageSnapshot return
+
+TypeScript couldn't infer that cacheCoverageSnapshot is non-null
+when shouldSkipRebuild is true, even though the condition explicitly
+checks for its existence. Added non-null assertion operator to fix
+compilation error.
+
+Fixes: TS2322 error in buildCacheCoverageSnapshot method"
+```
+
+```
+[testing cda7b2e] fix: add non-null assertion for cacheCoverageSnapshot return
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+Committed the fix.
+
+**Commit Summary:**
+- **Fixed TypeScript compilation error:** Added a non-null assertion (`!`) to `this.cacheCoverageSnapshot` at line 1082
+- **Issue:** TypeScript couldn't infer that `cacheCoverageSnapshot` is non-null when `shouldSkipRebuild` is true, even though the condition checks for its existence
+- **Solution:** Used a non-null assertion operator since the condition guarantees the value is non-null
+- **Result:** Build now compiles successfully
+- **Commit hash:** `cda7b2e`
+
+The change has been committed to the `testing` branch.
+
+---
+
