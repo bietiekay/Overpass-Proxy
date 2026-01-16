@@ -1079,7 +1079,7 @@ export class RequestStatistics {
       timeSinceLastBuild < this.coverageRefreshIntervalMs;
     
     if (shouldSkipRebuild) {
-      return this.cacheCoverageSnapshot;
+      return this.cacheCoverageSnapshot!;
     }
     
     const generatedAt = new Date(now).toISOString();
