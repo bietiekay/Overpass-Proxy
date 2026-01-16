@@ -76,11 +76,12 @@ export interface StatisticsSnapshot {
   totalUniqueClients: number;
   totalTilesRequested: number;
   totalCachedTiles: number;
+  totalStaleTiles: number; // Total number of stale tiles in cache (sum of staleEntries from cache coverage)
   cachedAmenities: number;
   cachedAmenityTypes: number;
   cacheHitRate: number;
   averageTilesPerRequest: number;
-  cacheStatus: Record<CacheStatus, number>;
+  cacheStatus: Record<CacheStatus, number>; // cacheStatus.STALE = number of requests that returned stale data (not tile count)
   hotspots: Array<{ geohash: string; requests: number; share: number }>;
   amenities: AmenityStatistics[];
   upstreams: UpstreamStatisticsEntry[];
@@ -614,6 +615,10 @@ export class RequestStatistics {
 
   private cacheCoverageSnapshot: CacheCoverageSnapshot | null = null;
 
+  private cacheCoverageLastBuiltAt: number | null = null;
+
+  private readonly coverageRefreshIntervalMs: number;
+
   private constructor(
     private readonly cacheMetrics: CacheMetricsProvider,
     private readonly storage: StatisticsStorage,
@@ -622,6 +627,7 @@ export class RequestStatistics {
   ) {
     this.staleRefreshQueue = options.staleRefreshQueue;
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
+    this.coverageRefreshIntervalMs = refreshIntervalMs;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
 
     this.maxCacheCoverageEntries = normaliseLimit(
@@ -984,6 +990,12 @@ export class RequestStatistics {
       const upstreams = this.upstreamMetrics?.describeUpstreams() ?? [];
       const staleRefreshQueue = this.staleRefreshQueue?.describeQueue();
 
+      // Calculate total stale tiles from cache coverage
+      const cacheCoverage = this.cacheMetrics.getCacheCoverage({
+        maxEntries: this.maxCacheCoverageEntries
+      });
+      const totalStaleTiles = cacheCoverage.reduce((sum, entry) => sum + (entry.staleEntries ?? 0), 0);
+
       return {
         generatedAt,
         dayStart: dayStartIso,
@@ -996,6 +1008,7 @@ export class RequestStatistics {
         totalUniqueClients: this.uniqueClients.size,
         totalTilesRequested: this.totalTiles,
         totalCachedTiles: this.cacheMetrics.countTotalCachedTiles(),
+        totalStaleTiles,
         cachedAmenities: this.cacheMetrics.countCachedAmenities(),
         cachedAmenityTypes: this.cacheMetrics.countCachedAmenityTypes(),
         cacheHitRate,
@@ -1055,13 +1068,20 @@ export class RequestStatistics {
     const start = Date.now();
     const storedRevision = await this.snapshotStore.get(CACHE_COVERAGE_REVISION_KEY);
     const nextRevision = storedRevision ? Number(storedRevision) : null;
-    if (
+    
+    // Only skip rebuild if revision hasn't changed AND we have a recent snapshot
+    // This allows periodic rebuilds to catch tiles that became stale over time
+    const timeSinceLastBuild = this.cacheCoverageLastBuiltAt ? now - this.cacheCoverageLastBuiltAt : Infinity;
+    const shouldSkipRebuild =
       Number.isFinite(nextRevision) &&
       this.cacheCoverageSnapshot &&
-      this.cacheCoverageRevision === nextRevision
-    ) {
+      this.cacheCoverageRevision === nextRevision &&
+      timeSinceLastBuild < this.coverageRefreshIntervalMs;
+    
+    if (shouldSkipRebuild) {
       return this.cacheCoverageSnapshot;
     }
+    
     const generatedAt = new Date(now).toISOString();
     logger.info({ memory: reportMemoryUsage() }, 'cache coverage snapshot build started');
     const coverageEntries = this.cacheMetrics.getCacheCoverage({
@@ -1089,6 +1109,7 @@ export class RequestStatistics {
       this.cacheCoverageRevision = nextRevision;
     }
     this.cacheCoverageSnapshot = snapshot;
+    this.cacheCoverageLastBuiltAt = now;
     return snapshot;
   }
 
