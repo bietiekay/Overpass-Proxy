@@ -943,7 +943,8 @@ export class TileStore {
     }
 
     for (const { tile, payload, amenityCount } of entriesWithPayload) {
-      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount);
+      const stale = payload.expiresAt < now;
+      this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount, stale);
     }
 
     logger.info(logContext, 'redis tile write');
