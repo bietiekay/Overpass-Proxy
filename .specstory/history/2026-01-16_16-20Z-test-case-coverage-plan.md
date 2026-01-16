@@ -10746,3 +10746,98 @@ All tests are passing and there are no linting errors. The implementation includ
 
 ---
 
+_**User (2026-01-16 15:59Z)**_
+
+take the summary and use it as commit message, commit all
+
+---
+
+_**Agent (model default, mode Agent)**_
+
+
+
+---
+
+
+Committing all changes with the summary as the commit message.
+
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /Users/bietiekay/code/Overpass-Proxy && git add -A</summary>
+
+```bash
+cd /Users/bietiekay/code/Overpass-Proxy && git add -A
+```
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /Users/bietiekay/code/Overpass-Proxy && git commit -m "Add 50 additional integration test cases
+
+Implemented all additional test cases from the plan:
+
+1. Upstream Retry & Error Handling (9 tests) - Tests retry behavior on 503/502/500 errors, no retry on 429/400, network errors, cooldown periods, and daily limits
+2. Amenity Extraction (6 tests) - Tests extraction from query parameters, form body, default fallback, normalization, and whitespace handling
+3. ETag & Conditional Headers (5 tests) - Tests ETag changes, multiple If-None-Match values, case-insensitive headers, weak ETag format, and stability
+4. Cache Invalidation Edge Cases (6 tests) - Tests invalidation with no matching tiles, invalid bbox formats, whitespace handling, inverted bbox, and boundary values
+5. Concurrent Requests (4 tests) - Tests concurrent requests for same tiles (cache miss/hit), different amenities, and concurrent invalidation and read
+6. Statistics Endpoint Edge Cases (4 tests) - Tests pending state, maxEntries parameter, no requests yet, and geohash coverage pending
+7. Invalid Input Handling (5 tests) - Tests malformed queries, invalid bbox coordinates, large bbox values, empty queries, and special characters
+8. Transparent Proxy Additional Scenarios (4 tests) - Tests PUT/DELETE methods, OPTIONS preflight, and query string preservation
+9. Cache Behavior Edge Cases (4 tests) - Tests partial invalidation, X-Cache header states, and X-Cache-Fetched-At accuracy
+10. Bbox Parsing Edge Cases (5 tests) - Tests comma/space separators, too few/many coordinates, and international date line
+
+All 109 tests passing with proper test isolation, error handling, and edge case coverage."</summary>
+
+```bash
+cd /Users/bietiekay/code/Overpass-Proxy && git commit -m "Add 50 additional integration test cases
+
+Implemented all additional test cases from the plan:
+
+1. Upstream Retry & Error Handling (9 tests) - Tests retry behavior on 503/502/500 errors, no retry on 429/400, network errors, cooldown periods, and daily limits
+2. Amenity Extraction (6 tests) - Tests extraction from query parameters, form body, default fallback, normalization, and whitespace handling
+3. ETag & Conditional Headers (5 tests) - Tests ETag changes, multiple If-None-Match values, case-insensitive headers, weak ETag format, and stability
+4. Cache Invalidation Edge Cases (6 tests) - Tests invalidation with no matching tiles, invalid bbox formats, whitespace handling, inverted bbox, and boundary values
+5. Concurrent Requests (4 tests) - Tests concurrent requests for same tiles (cache miss/hit), different amenities, and concurrent invalidation and read
+6. Statistics Endpoint Edge Cases (4 tests) - Tests pending state, maxEntries parameter, no requests yet, and geohash coverage pending
+7. Invalid Input Handling (5 tests) - Tests malformed queries, invalid bbox coordinates, large bbox values, empty queries, and special characters
+8. Transparent Proxy Additional Scenarios (4 tests) - Tests PUT/DELETE methods, OPTIONS preflight, and query string preservation
+9. Cache Behavior Edge Cases (4 tests) - Tests partial invalidation, X-Cache header states, and X-Cache-Fetched-At accuracy
+10. Bbox Parsing Edge Cases (5 tests) - Tests comma/space separators, too few/many coordinates, and international date line
+
+All 109 tests passing with proper test isolation, error handling, and edge case coverage."
+```
+
+```
+[testing d473e47] Add 50 additional integration test cases
+ 6 files changed, 15489 insertions(+), 9 deletions(-)
+ create mode 100644 .cursor/plans/add_missing_test_cases_f65e9433.plan.md
+ create mode 100644 .cursor/plans/additional_test_cases_enhancement_1cd04970.plan.md
+ create mode 100644 .specstory/history/2026-01-16_13-15Z-cache-coverage-and-stale-tile-statistics.md
+ create mode 100644 .specstory/history/2026-01-16_16-20Z-test-case-coverage-plan.md
+
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+Committed all changes with the summary as the commit message. The commit includes:
+
+- 6 files changed
+- 15,489 insertions
+- 9 deletions
+
+The commit message includes the summary of all 50 additional test cases organized by category. All 109 tests are passing.
+
+---
+
