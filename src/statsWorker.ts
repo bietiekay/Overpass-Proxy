@@ -108,13 +108,41 @@ const bootstrap = async (): Promise<void> => {
       }
     };
 
+    const handleMarkDirty = (target: StatisticsRefreshTarget): void => {
+      switch (target) {
+        case 'statistics':
+          statistics.markStatisticsDirty();
+          return;
+        case 'cacheCoverage':
+          statistics.markCacheCoverageDirty();
+          return;
+        case 'geohashCoverage':
+          statistics.markGeohashCoverageDirty();
+          return;
+        case 'all':
+        default:
+          statistics.markStatisticsDirty();
+          statistics.markCacheCoverageDirty();
+          statistics.markGeohashCoverageDirty();
+          return;
+      }
+    };
+
     const enqueueStaleRefresh = (
       amenity: string,
-      groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>
+      groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>,
+      planOptions: {
+        coarsePrecision: number;
+        finePrecision: number;
+        targetTilesPerRequest?: number;
+      }
     ): void => {
-      staleRefreshQueue.enqueue(
-        async () => {
-          for (const group of groups) {
+      staleRefreshQueue.enqueue({
+        amenity,
+        groups,
+        planOptions,
+        run: async (mergedGroups) => {
+          for (const group of mergedGroups) {
             const representative = group.tiles[0];
             if (!representative) continue;
 
@@ -136,12 +164,10 @@ const bootstrap = async (): Promise<void> => {
                 logger.warn({ err: error }, 'failed stale refresh task in worker');
               });
           }
-        },
-        {
-          tileGroups: groups.length,
-          tiles: groups.reduce((total, group) => total + group.tiles.length, 0)
+
+          statistics.markCacheCoverageDirty();
         }
-      );
+      });
     };
 
     const handleCommand = async (command: StatsWorkerCommand): Promise<void> => {
@@ -152,8 +178,11 @@ const bootstrap = async (): Promise<void> => {
         case 'refresh':
           await handleRefresh(command.target);
           return;
+        case 'markDirty':
+          handleMarkDirty(command.target);
+          return;
         case 'staleRefreshTask':
-          enqueueStaleRefresh(command.amenity, command.groups);
+          enqueueStaleRefresh(command.amenity, command.groups, command.planOptions);
           await statistics.recordRequest(command.statsPayload);
           return;
         case 'staleRefreshUpdate':

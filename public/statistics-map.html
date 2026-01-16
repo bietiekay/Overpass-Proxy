@@ -164,6 +164,33 @@
       font-size: 0.9rem;
     }
 
+    .loading-indicator {
+      display: none;
+      align-items: center;
+      gap: 0.4rem;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .loading-indicator.visible {
+      display: inline-flex;
+    }
+
+    .loading-spinner {
+      width: 0.75rem;
+      height: 0.75rem;
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
     .upstreams-panel {
       position: absolute;
       z-index: 900;
@@ -459,6 +486,10 @@
         </svg>
       </button>
       <span id="status" class="status">Loading statistics…</span>
+      <span id="layer-loading" class="loading-indicator" role="status" aria-live="polite">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <span class="loading-text">Loading cache coverage…</span>
+      </span>
       <div id="progress" class="progress-wrapper hidden" role="status" aria-live="polite">
         <div class="progress-track" aria-hidden="true">
           <div id="progress-bar" class="progress-bar"></div>
@@ -578,12 +609,18 @@
     const serverUrlInput = document.getElementById('server-url');
     const settingsCancel = document.getElementById('settings-cancel');
     const settingsSave = document.getElementById('settings-save');
+    const layerLoadingEl = document.getElementById('layer-loading');
+    const layerLoadingTextEl = layerLoadingEl.querySelector('.loading-text');
     let latestSnapshot = null;
     let latestCacheCoverage = [];
     let latestGeohashCoverage = [];
     const geohashBoundsCache = new Map();
     const upstreamPanelStorageKey = 'overpass-proxy.upstreams-panel.visible';
     const serverUrlStorageKey = 'overpass-proxy.server-url';
+    let cacheCoverageSignature = null;
+    let cacheCoverageAbort = null;
+    let cacheCoverageDebounce = null;
+    let cacheCoverageRequestToken = 0;
 
     const getServerUrl = () => {
       const stored = localStorage.getItem(serverUrlStorageKey);
@@ -607,6 +644,22 @@
       const base = baseUrl.replace(/\/$/, '');
       const apiPath = path.startsWith('/') ? path : `/${path}`;
       return `${base}${apiPath}`;
+    };
+
+    const precisionForZoom = (zoom) => {
+      if (zoom >= 10) return 6;
+      if (zoom >= 7) return 5;
+      return 4;
+    };
+
+    const boundsSignature = (bounds, precision) => {
+      const parts = [
+        bounds.getSouth().toFixed(5),
+        bounds.getWest().toFixed(5),
+        bounds.getNorth().toFixed(5),
+        bounds.getEast().toFixed(5)
+      ];
+      return `${precision}|${parts.join(',')}`;
     };
 
     const demoSnapshot = {
@@ -693,6 +746,16 @@
       await updateProgress(1, label ?? 'Ready');
       await waitForAnimationFrame();
       window.setTimeout(() => progressEl.classList.add('hidden'), 250);
+    };
+
+    const setLayerLoading = (isLoading, label = 'Loading cache coverage…') => {
+      if (!layerLoadingEl) return;
+      if (isLoading) {
+        layerLoadingTextEl.textContent = label;
+        layerLoadingEl.classList.add('visible');
+      } else {
+        layerLoadingEl.classList.remove('visible');
+      }
     };
 
     const toColor = (ratio) => {
@@ -1339,7 +1402,7 @@
       localStorage.setItem(upstreamPanelStorageKey, JSON.stringify(visible));
     };
 
-    const applyMode = async ({ reuseProgress = false } = {}) => {
+    const applyMode = async ({ reuseProgress = false, refreshCache = false } = {}) => {
       if (!latestSnapshot) return;
       const mode = modeSelect.value;
       const coverageData =
@@ -1351,6 +1414,7 @@
           reuseProgress
         });
       } else if (mode === 'cache') {
+        await fetchCacheCoverageForView({ force: refreshCache });
         const cacheCoverageData =
           latestCacheCoverage?.length > 0
             ? latestCacheCoverage
@@ -1379,16 +1443,75 @@
       }
     };
 
-    const fetchCacheCoverage = async () => {
+    const fetchCacheCoverageLegacy = async () => {
       try {
         const response = await fetch(buildApiUrl('/api/statistics/cacheCoverage'), { cache: 'no-store' });
         if (!response.ok) throw new Error('Request failed');
         const snapshot = await response.json();
         latestCacheCoverage = snapshot.cacheCoverage ?? [];
+        return true;
       } catch (error) {
         console.error('Failed to load cache coverage data, falling back to demo data.', error);
         if (!latestCacheCoverage?.length) {
           latestCacheCoverage = demoSnapshot.cacheCoverage ?? [];
+        }
+        return false;
+      }
+    };
+
+    const fetchCacheCoverageForView = async ({ force = false } = {}) => {
+      const bounds = map.getBounds();
+      const precision = precisionForZoom(map.getZoom());
+      const signature = boundsSignature(bounds, precision);
+      if (!force && signature === cacheCoverageSignature) {
+        return;
+      }
+      cacheCoverageSignature = signature;
+
+      if (cacheCoverageAbort) {
+        cacheCoverageAbort.abort();
+      }
+
+      const controller = new AbortController();
+      cacheCoverageAbort = controller;
+      const requestToken = ++cacheCoverageRequestToken;
+      setLayerLoading(true);
+
+      const params = new URLSearchParams({
+        south: bounds.getSouth().toFixed(6),
+        west: bounds.getWest().toFixed(6),
+        north: bounds.getNorth().toFixed(6),
+        east: bounds.getEast().toFixed(6),
+        precision: String(precision)
+      });
+
+      try {
+        const response = await fetch(
+          buildApiUrl(`/api/statistics/cacheCoverage/area?${params.toString()}`),
+          {
+            cache: 'no-store',
+            signal: controller.signal
+          }
+        );
+        if (!response.ok) {
+          throw new Error(`Request failed (${response.status})`);
+        }
+        const snapshot = await response.json();
+        latestCacheCoverage = snapshot.cacheCoverage ?? [];
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          return;
+        }
+        console.error('Failed to load cache coverage data for view, falling back.', error);
+        if (!latestCacheCoverage?.length) {
+          await fetchCacheCoverageLegacy();
+        }
+      } finally {
+        if (requestToken === cacheCoverageRequestToken) {
+          setLayerLoading(false);
+        }
+        if (cacheCoverageAbort === controller) {
+          cacheCoverageAbort = null;
         }
       }
     };
@@ -1413,7 +1536,11 @@
 
       try {
         await updateProgress(0.05, 'Fetching statistics…');
-        await Promise.all([fetchStatistics(), fetchCacheCoverage(), fetchGeohashCoverage()]);
+        await Promise.all([
+          fetchStatistics(),
+          fetchGeohashCoverage(),
+          modeSelect.value === 'cache' ? fetchCacheCoverageForView({ force: true }) : Promise.resolve()
+        ]);
         await updateProgress(0.35, 'Preparing visualisation…');
         updateSummary(latestSnapshot);
         await applyMode({ reuseProgress: true });
@@ -1465,7 +1592,7 @@
     });
 
     modeSelect.addEventListener('change', () => {
-      void applyMode();
+      void applyMode({ refreshCache: true });
     });
     refreshButton.addEventListener('click', () => {
       void refreshData();
@@ -1477,6 +1604,20 @@
 
     const storedVisibility = localStorage.getItem(upstreamPanelStorageKey);
     setUpstreamPanelVisibility(storedVisibility === null ? true : JSON.parse(storedVisibility));
+
+    const scheduleCacheCoverageRefresh = () => {
+      if (modeSelect.value !== 'cache') {
+        return;
+      }
+      if (cacheCoverageDebounce) {
+        clearTimeout(cacheCoverageDebounce);
+      }
+      cacheCoverageDebounce = setTimeout(() => {
+        void fetchCacheCoverageForView().then(() => applyMode({ reuseProgress: true }));
+      }, 200);
+    };
+
+    map.on('zoomend moveend', scheduleCacheCoverageRefresh);
 
     refreshData();
   </script>

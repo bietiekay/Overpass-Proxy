@@ -9,6 +9,8 @@ export interface AppConfig {
   tilePrecision: number;
   upstreamTilePrecision: number;
   maxTilesPerRequest: number;
+  staleRefreshCoarsePrecision: number;
+  staleRefreshTargetTilesPerRequest: number;
   nodeEnv: string;
   upstreamFailureCooldownSeconds: number;
   upstreamBackoffBaseSeconds: number;
@@ -25,6 +27,7 @@ export interface AppConfig {
   upstreamOrigin: string;
   upstreamReferer: string;
   serveStaleFromCache: boolean;
+  cacheInvalidateSecret: string | null;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -59,6 +62,16 @@ export const loadConfig = (): AppConfig => {
   const tilePrecision = toNumber(env.TILE_PRECISION, 5);
   // target ~2 levels coarser to get ~32x coverage (to cover ~50 tiles minimum)
   const upstreamTilePrecision = toNumber(env.UPSTREAM_TILE_PRECISION, Math.max(2, tilePrecision - 2));
+  const cacheInvalidateSecret = env.CACHE_INVALIDATION_SECRET?.trim();
+  const maxTilesPerRequest = toNumber(env.MAX_TILES_PER_REQUEST, 1024);
+  const staleRefreshCoarsePrecision = Math.min(
+    tilePrecision,
+    Math.max(1, toNumber(env.STALE_REFRESH_COARSE_PRECISION, 3))
+  );
+  const staleRefreshTargetTilesPerRequest = toNumber(
+    env.STALE_REFRESH_TARGET_TILES_PER_REQUEST,
+    Math.min(256, Math.max(32, Math.floor(maxTilesPerRequest / 4)))
+  );
 
   const parseUpstreamUrls = (raw: string | undefined): string[] => {
     if (!raw) {
@@ -84,7 +97,9 @@ export const loadConfig = (): AppConfig => {
     swrSeconds: toNumber(env.SWR_SECONDS, swr),
     tilePrecision,
     upstreamTilePrecision,
-    maxTilesPerRequest: toNumber(env.MAX_TILES_PER_REQUEST, 1024),
+    maxTilesPerRequest,
+    staleRefreshCoarsePrecision,
+    staleRefreshTargetTilesPerRequest,
     nodeEnv: env.NODE_ENV ?? 'production',
     upstreamFailureCooldownSeconds: failureCooldownSeconds,
     upstreamBackoffBaseSeconds: toNumber(env.UPSTREAM_BACKOFF_BASE_SECONDS, failureCooldownSeconds),
@@ -103,6 +118,8 @@ export const loadConfig = (): AppConfig => {
     trustProxy: toBoolean(env.TRUST_PROXY, false),
     upstreamOrigin: env.UPSTREAM_ORIGIN ?? 'https://overpass-turbo.eu',
     upstreamReferer: env.UPSTREAM_REFERER ?? 'https://overpass-turbo.eu/',
-    serveStaleFromCache: toBoolean(env.SERVE_STALE_FROM_CACHE, true)
+    serveStaleFromCache: toBoolean(env.SERVE_STALE_FROM_CACHE, true),
+    cacheInvalidateSecret:
+      cacheInvalidateSecret && cacheInvalidateSecret.length > 0 ? cacheInvalidateSecret : null
   };
 };

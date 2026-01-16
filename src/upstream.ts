@@ -1,7 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Redis } from 'ioredis';
-import got, { RequestError } from 'got';
-import type { Method } from 'got';
+import got from 'got';
+import type { Method, RetryOptions } from 'got';
 
 import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
@@ -23,6 +23,49 @@ out body meta;
 >;
 out skel qt;`;
 };
+
+const UPSTREAM_RETRY_LIMIT = 2;
+const UPSTREAM_RETRY_STATUS_CODES = [403, 408, 413, 500, 502, 503, 504];
+const UPSTREAM_RETRY_ERROR_CODES = [
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED'
+];
+const UPSTREAM_RETRY_METHODS: Method[] = ['GET', 'PUT', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE'];
+const UPSTREAM_RETRY_METHODS_WITH_POST: Method[] = [...UPSTREAM_RETRY_METHODS, 'POST'];
+const UPSTREAM_RETRY_BACKOFF_BASE_MS = 500;
+const UPSTREAM_RETRY_BACKOFF_MAX_MS = 5000;
+
+const buildRetryDelayMs = (attemptCount: number): number => {
+  const exponential = Math.min(
+    UPSTREAM_RETRY_BACKOFF_MAX_MS,
+    UPSTREAM_RETRY_BACKOFF_BASE_MS * 2 ** Math.max(0, attemptCount - 1)
+  );
+  const jitter = Math.random() * UPSTREAM_RETRY_BACKOFF_BASE_MS;
+  return exponential + jitter;
+};
+
+const buildUpstreamRetryOptions = (allowPost: boolean): Partial<RetryOptions> => ({
+  limit: UPSTREAM_RETRY_LIMIT,
+  methods: allowPost ? UPSTREAM_RETRY_METHODS_WITH_POST : UPSTREAM_RETRY_METHODS,
+  statusCodes: UPSTREAM_RETRY_STATUS_CODES,
+  errorCodes: UPSTREAM_RETRY_ERROR_CODES,
+  calculateDelay: ({ attemptCount, computedValue, error }) => {
+    if (computedValue === 0) {
+      return 0;
+    }
+
+    const statusCode = (error as { response?: { statusCode?: number } })?.response?.statusCode;
+    if (statusCode === 429) {
+      return 0;
+    }
+
+    return buildRetryDelayMs(attemptCount);
+  }
+});
 
 interface UpstreamState {
   backoffUntil: number;
@@ -300,12 +343,44 @@ class UpstreamPool {
             if (!next) {
               return;
             }
-            await this.probeUpstream(next);
+            await this.probeWithTimeout(next);
           }
         })()
       );
     }
     await Promise.all(workers);
+  }
+
+  private async probeWithTimeout(url: string): Promise<void> {
+    if (this.probeTimeoutMs <= 0) {
+      await this.probeUpstream(url);
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.probeUpstream(url),
+        new Promise<void>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            const error = new Error(`Probe timed out after ${this.probeTimeoutMs}ms`);
+            error.name = 'UpstreamProbeTimeout';
+            reject(error);
+          }, this.probeTimeoutMs);
+        })
+      ]);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'UpstreamProbeTimeout') {
+        logger.debug({ err: error, upstream: url, timeoutMs: this.probeTimeoutMs }, 'probe timed out');
+        this.markFailure(url);
+      } else {
+        logger.debug({ err: error, upstream: url }, 'probe failed');
+      }
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
   }
 
   private async probeUpstream(url: string): Promise<void> {
@@ -571,15 +646,16 @@ const getPool = (config: AppConfig, redis?: Redis): UpstreamPool => {
   return pool;
 };
 
+export const getUpstreamPoolForTesting = (config: AppConfig, redis?: Redis) =>
+  getPool(config, redis);
+
 const shouldMarkFailure = (error: unknown): boolean => {
-  if (error instanceof RequestError) {
-    const statusCode = error.response?.statusCode;
-    if (statusCode !== undefined && statusCode < 500 && statusCode !== 429) {
+  if (error instanceof Error && error.name === 'RequestError') {
+    const statusCode = (error as { response?: { statusCode?: number } })?.response?.statusCode;
+    if (statusCode && statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
       return false;
     }
-    return true;
   }
-
   return true;
 };
 
@@ -701,14 +777,24 @@ export const fetchTile = async (
           'Content-Type': 'application/x-www-form-urlencoded'
         },
         timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 },
-        throwHttpErrors: false,
-        retry: { limit: 0 }
+        throwHttpErrors: true,
+        retry: buildUpstreamRetryOptions(true)
       });
-      if (response.statusCode >= 400) {
-        throw new Error(`Upstream responded with status ${response.statusCode}`);
-      }
       logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');
-      return JSON.parse(response.body) as OverpassResponse;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(response.body);
+      } catch (error) {
+        throw new Error(
+          `Failed to parse upstream response from ${upstreamUrl}: ${(error as Error).message}`
+        );
+      }
+
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as OverpassResponse).elements)) {
+        throw new Error(`Upstream response missing elements array from ${upstreamUrl}`);
+      }
+
+      return parsed as OverpassResponse;
     }
   );
 };
@@ -867,7 +953,8 @@ export const proxyTransparent = async (
           body,
           throwHttpErrors: false,
           responseType: 'buffer',
-          timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 }
+          timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 },
+          retry: buildUpstreamRetryOptions(method === 'POST' && interpreterPath)
         });
 
         if (response.statusCode >= 500 || response.statusCode === 429) {

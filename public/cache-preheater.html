@@ -89,6 +89,8 @@
 
     .row { display: flex; gap: 0.75rem; flex-wrap: wrap; }
     .row > div { flex: 1; min-width: 14rem; }
+    .checkbox-row { display: flex; align-items: center; gap: 0.6rem; }
+    .checkbox-row input { width: auto; }
 
     button {
       padding: 0.65rem 1.1rem;
@@ -166,6 +168,12 @@
           <input id="concurrency" type="number" min="1" max="16" value="4" />
         </div>
       </div>
+      <div class="row" style="margin-top:0.75rem;">
+        <div class="checkbox-row">
+          <input id="reheatStale" type="checkbox" />
+          <label for="reheatStale">Stale Cache-Kacheln nach vollständiger Land-Abdeckung erneut aufwärmen</label>
+        </div>
+      </div>
       <div class="row" style="margin-top:0.75rem; align-items:flex-end;">
         <div style="flex: 1 1 12rem;">
           <label for="timeout">Timeout pro Anfrage (Sekunden)</label>
@@ -178,7 +186,7 @@
       </div>
       <p style="color:var(--muted); margin-top:0.75rem;">
         Der Ablauf lädt zuerst die Cache-Belegung, berechnet fehlende Land-Kacheln und feuert dann gezielt Overpass-Queries, um nur nicht belegte Bereiche zu erwärmen –
-        und iteriert dabei automatisch über alle Landflächen des Planeten in der gewählten Genauigkeit.
+        und iteriert dabei automatisch über alle Landflächen des Planeten in der gewählten Genauigkeit. Optional können stale Kacheln erst danach erneut aufgewärmt werden.
       </p>
     </section>
 
@@ -224,6 +232,7 @@
     const targetPrecisionInput = byId('targetPrecision');
     const concurrencyInput = byId('concurrency');
     const timeoutInput = byId('timeout');
+    const reheatStaleInput = byId('reheatStale');
     const startButton = byId('startButton');
     const stopButton = byId('stopButton');
     const logEl = byId('log');
@@ -470,8 +479,42 @@
       const queue = [{ south: -90, west: -180, north: 90, east: 180, precision: targetPrecision }];
       let candidates = 0;
       const missingSet = new Set();
+      const missingByPrecision = new Map();
+      const missingPrefixCounts = new Map();
       const landSeen = new Set();
       let activePrecision = targetPrecision;
+
+      const updatePrefixCount = (precision, normalized, delta) => {
+        if (precision < 4) return;
+        const prefix = normalized.slice(0, 4);
+        let prefixCounts = missingPrefixCounts.get(precision);
+        if (!prefixCounts) {
+          prefixCounts = new Map();
+          missingPrefixCounts.set(precision, prefixCounts);
+        }
+        const nextCount = (prefixCounts.get(prefix) ?? 0) + delta;
+        if (nextCount <= 0) {
+          prefixCounts.delete(prefix);
+        } else {
+          prefixCounts.set(prefix, nextCount);
+        }
+      };
+
+      const addMissing = (precision, normalized) => {
+        missingSet.add(precisionKey(precision, normalized));
+        const set = ensureSet(missingByPrecision, precision);
+        set.add(normalized);
+        updatePrefixCount(precision, normalized, 1);
+      };
+
+      const removeMissing = (precision, normalized) => {
+        const composite = precisionKey(precision, normalized);
+        if (!missingSet.has(composite)) return false;
+        missingSet.delete(composite);
+        missingByPrecision.get(precision)?.delete(normalized);
+        updatePrefixCount(precision, normalized, -1);
+        return true;
+      };
 
       const planBatch = (maxPlan, iterationLimit = 4000) => {
         const planned = [];
@@ -517,7 +560,7 @@
               candidates += 1;
             }
             if (!cachedHere) {
-              missingSet.add(compositeKey);
+              addMissing(bounds.precision, key);
               planned.push({ bounds, precision: bounds.precision, normalized: key });
               activePrecision = Math.max(activePrecision, bounds.precision);
             }
@@ -548,12 +591,31 @@
       };
 
       const markCached = (precision, normalized) => {
-        missingSet.delete(precisionKey(precision, normalized));
+        removeMissing(precision, normalized);
       };
 
       return {
         planBatch,
         markCached,
+        markCachedByPrefix: (prefix) => {
+          let removed = 0;
+          for (const [precision, set] of missingByPrecision.entries()) {
+            if (precision < 4) continue;
+            for (const hash of Array.from(set)) {
+              if (!hash.startsWith(prefix)) continue;
+              if (removeMissing(precision, hash)) {
+                removed += 1;
+              }
+            }
+          }
+          return removed;
+        },
+        hasOtherMissingInPrefix: (precision, normalized) => {
+          if (precision < 4) return false;
+          const prefix = normalized.slice(0, 4);
+          const count = missingPrefixCounts.get(precision)?.get(prefix) ?? 0;
+          return count > 1;
+        },
         getCounts: () => ({ candidates, missingCount: missingSet.size }),
         getActivePrecision: () => activePrecision,
         getMaxPrecision: () => maxPrecision
@@ -589,6 +651,11 @@
       }
     };
 
+    const boundsFromGeohash = (hash) => {
+      const [south, west, north, east] = ngeohash.decode_bbox(hash);
+      return { south, west, north, east };
+    };
+
     const preheat = async () => {
       const baseUrl = proxyUrlInput.value.trim();
       const amenity = amenityInput.value.trim() || 'toilets';
@@ -597,6 +664,7 @@
       const concurrency = Number(concurrencyInput.value);
       const timeoutMs = Number(timeoutInput.value) * 1000;
       const queueTarget = Math.max(concurrency * 4, 64);
+      const allowStaleReheat = reheatStaleInput.checked;
 
       if (!baseUrl) {
         alert('Bitte eine Proxy-URL angeben.');
@@ -624,6 +692,7 @@
         const staleQueue = [];
         const plannedSet = new Set();
         const stalePlannedSet = new Set();
+        const coarsenedPrefixes = new Map();
         let plannerFinished = false;
         let coverageFinished = false;
         let plannedCount = 0;
@@ -677,6 +746,36 @@
               }
               continue;
             }
+            if (job.precision > 4 && planner.hasOtherMissingInPrefix(job.precision, job.normalized)) {
+              const prefix = job.normalized.slice(0, 4);
+              const coarseKey = precisionKey(4, prefix);
+              if (!plannedSet.has(coarseKey) && !coarsenedPrefixes.has(prefix)) {
+                const removedJobs = [job];
+                plannedSet.delete(precisionKey(job.precision, job.normalized));
+                let nextPlannedQueue = [];
+                for (const queued of plannedQueue) {
+                  if (queued.normalized.startsWith(prefix)) {
+                    removedJobs.push(queued);
+                    plannedSet.delete(precisionKey(queued.precision, queued.normalized));
+                  } else {
+                    nextPlannedQueue.push(queued);
+                  }
+                }
+                plannedQueue.length = 0;
+                plannedQueue.push(...nextPlannedQueue);
+                plannedCount = Math.max(0, plannedCount - removedJobs.length);
+                plannedSet.add(coarseKey);
+                plannedCount += 1;
+                coarsenedPrefixes.set(prefix, removedJobs);
+                refreshStats();
+                return {
+                  bounds: boundsFromGeohash(prefix),
+                  precision: 4,
+                  normalized: prefix,
+                  coarsenedPrefix: prefix
+                };
+              }
+            }
             return job;
           }
           return null;
@@ -715,8 +814,19 @@
           updatePreheatProgress();
         });
 
+        const missingFullyCovered = () => {
+          const counts = planner.getCounts();
+          return (
+            plannerFinished &&
+            coverageFinished &&
+            counts.missingCount === 0 &&
+            plannedQueue.length === 0 &&
+            inFlight === 0
+          );
+        };
+
         const fillStaleQueue = () => {
-          if (!coverageFinished) return;
+          if (!coverageFinished || !allowStaleReheat || !missingFullyCovered()) return;
           const capacity = queueBudget();
           if (capacity <= 0) return;
           const orderedPrecisions = Array.from(staleCandidatesByPrecision.keys()).sort((a, b) => a - b);
@@ -751,7 +861,7 @@
             if (stopped || stopRequested || signal.aborted) return;
             if (noWorkLeft()) return;
 
-            const missingDepleted = plannerFinished && plannedQueue.length === 0;
+            const missingDepleted = plannerFinished && plannedQueue.length === 0 && inFlight === 0;
             if (missingDepleted && staleQueue.length === 0) {
               fillStaleQueue();
             }
@@ -785,16 +895,37 @@
             try {
               await sendPreheatRequest({ baseUrl, amenity, bounds: job.bounds, timeoutMs, signal });
               completed += 1;
-              planner.markCached(job.precision, job.normalized);
+              if (job.coarsenedPrefix) {
+                planner.markCachedByPrefix(job.coarsenedPrefix);
+                coarsenedPrefixes.delete(job.coarsenedPrefix);
+              } else {
+                planner.markCached(job.precision, job.normalized);
+              }
               requestsDoneEl.textContent = completed.toLocaleString();
               log(
                 isStaleJob
                   ? `Stale-Kachel ${job.normalized} (Präzision ${job.precision}) erneuert`
-                  : `Kachel ${job.normalized} (Präzision ${job.precision}) erwärmt`
+                  : job.coarsenedPrefix
+                    ? `Geohash-${job.normalized} (Präzision 4) gebündelt vorgewärmt`
+                    : `Kachel ${job.normalized} (Präzision ${job.precision}) erwärmt`
               );
             } catch (error) {
               failed += 1;
               requestsFailedEl.textContent = failed.toLocaleString();
+              if (job.coarsenedPrefix) {
+                const recovered = coarsenedPrefixes.get(job.coarsenedPrefix) ?? [];
+                if (recovered.length > 0) {
+                  for (const recoveredJob of recovered) {
+                    const key = precisionKey(recoveredJob.precision, recoveredJob.normalized);
+                    if (!plannedSet.has(key)) {
+                      plannedSet.add(key);
+                      plannedQueue.push(recoveredJob);
+                      plannedCount += 1;
+                    }
+                  }
+                }
+                coarsenedPrefixes.delete(job.coarsenedPrefix);
+              }
               log(`Fehler für ${job.normalized}: ${error.message || error}`);
             } finally {
               inFlight -= 1;

@@ -87,6 +87,8 @@ export const createMockOverpass = () => {
     },
     start: async (port: number) => {
       await app.listen({ port, host: '0.0.0.0' });
+      // Wait for server to be ready
+      await app.ready();
     },
     stop: async () => {
       await app.close();

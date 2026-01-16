@@ -34,9 +34,11 @@ The proxy implements the core Overpass API endpoints:
 - `GET /api/status`
 - `GET /api/timestamp` and `GET /api/timestamp/*`
 - `POST /api/kill_my_queries`
+- `POST /api/cache/invalidate`
 - `GET /api/statistics`
 - `GET /api/statistics/geohashCoverage`
 - `GET /api/statistics/cacheCoverage`
+- `GET /api/statistics/cacheCoverage/area`
 - Any other `/api/*` path is transparently proxied upstream
 
 Requests preserve HTTP methods, headers, payloads, and status codes. `/api/interpreter` requires JSON amenity queries with a bounding box; the proxy satisfies the response locally when tiles are cached and fetches amenity tiles upstream on cache misses.
@@ -57,6 +59,8 @@ Environment variables are read at startup. Defaults are shown below:
 | `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
+| `STALE_REFRESH_COARSE_PRECISION` | `3` | Coarse geohash precision for background stale refresh grouping |
+| `STALE_REFRESH_TARGET_TILES_PER_REQUEST` | `max(32, MAX_TILES_PER_REQUEST / 4)` | Target tile count per background stale refresh request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-For`/`X-Real-IP` headers from a reverse proxy when determining client IPs |
 | `UPSTREAM_ORIGIN` | `https://overpass-turbo.eu` | Origin header used when proxying `/api/interpreter` |
@@ -65,6 +69,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `PORT` | `8080` | Listen port |
 | `LOG_VERBOSITY` | `info` | Logging verbosity: `errors`, `info`, or `debug` for full request/response details |
 | `NODE_ENV` | `production` | Runtime environment |
+| `CACHE_INVALIDATION_SECRET` | *(unset)* | Secret keyword required by the cache invalidation API |
 
 The defaults for `TILE_PRECISION` and `MAX_TILES_PER_REQUEST` are tuned for the ToiletFinder iOS client: a precision of 5 keeps
 tile counts below the 1 024-tile ceiling even for the app’s widest live-map fetches (~70 km across) and cache-preload passes
@@ -91,8 +96,10 @@ workflow is:
   callers from stampeding the same fetch. Late callers reuse the fresh write once it lands or fall back to waiting until the
   inflight window expires.
 - **Upstream grouping:** tiles slated for refresh are clustered at `UPSTREAM_TILE_PRECISION` (default two geohash levels
-  coarser than `TILE_PRECISION`) so one upstream bbox request can repopulate many fine-grained tiles. Each grouped request uses
-  the canonical amenity query and obeys `UPSTREAM_REQUEST_TIMEOUT_SECONDS` (default 30 seconds, bounded by
+  coarser than `TILE_PRECISION`) so one upstream bbox request can repopulate many fine-grained tiles. Background refreshes
+  replan tiles using `STALE_REFRESH_COARSE_PRECISION` (default 3) and `STALE_REFRESH_TARGET_TILES_PER_REQUEST` (default a
+  quarter of `MAX_TILES_PER_REQUEST`, min 32) to reduce redundant bbox fetches. Each grouped request uses the canonical
+  amenity query and obeys `UPSTREAM_REQUEST_TIMEOUT_SECONDS` (default 30 seconds, bounded by
   `UPSTREAM_FAILURE_COOLDOWN_SECONDS`).
 - **Persistence:** successful upstream responses are clipped to each fine tile’s exact bbox and written with `fetchedAt` and
   `expiresAt` using Redis pipelines. Presence counters that drive `GET /api/statistics/cacheCoverage` are updated alongside the
@@ -141,7 +148,67 @@ docker-compose up --build
 
 This starts the proxy along with Redis and a mock Overpass service used for integration tests.
 
-The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, and per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, while `GET /api/statistics/cacheCoverage/area` returns cache coverage scoped to a bounding box at a requested geohash precision for zoomed-in maps. Per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+
+Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities.
+
+### Cache invalidation tool
+
+The proxy ships with a lightweight cache invalidation tool at `GET /cache-invalidator.html` (served from `public/cache-invalidator.html`). It provides a map UI for selecting a bounding box and calling the invalidation API without crafting the request by hand.
+
+**Tool features**
+
+- Map-based bbox selection (Shift + drag) with live coordinate display.
+- Secret keyword entry that enables the action buttons once populated.
+- Single-click invalidation for the selected bbox, plus a clear-selection control.
+- Status banner that reports readiness and the success/error response from the API.
+
+**Secret handling**
+
+- The tool requires the same secret keyword configured in `CACHE_INVALIDATION_SECRET`.
+- The secret is sent only in the request payload (not in the URL) and is never stored server-side.
+- Requests are rejected with HTTP 403 if the secret is missing or incorrect, or if the secret is not configured.
+
+**API behavior**
+
+- **Input:** `POST /api/cache/invalidate` with the secret plus a bbox (`bbox=south,west,north,east`, `[south, west, north, east]`, or `south`/`west`/`north`/`east` fields).
+- **Validation:** Responds with HTTP 400 when the bbox is missing, and HTTP 413 if the bbox expands to more than `MAX_TILES_PER_REQUEST`.
+- **Result:** Removes cached tiles within the bbox for all amenities and responds with `{ ok, bbox, tileCount, deletedKeys, matchedKeys, tileHashes, affectedAmenities }`.
+
+### Cache preheater tool
+
+`GET /cache-preheater.html` (served from `public/cache-preheater.html`) is a map-driven tool for proactively warming the tile cache before a release, demo, or expected demand surge. It is designed to reduce cold-start latency by prefetching amenities in a controlled, observable way.
+
+**Tool features**
+
+- Map-based bbox selection for defining a warmup region.
+- Amenity selector for targeting specific cache segments instead of warming everything.
+- Batch size and concurrency controls to avoid overwhelming the upstream Overpass API.
+- Live progress indicators for queued, in-flight, and completed batches.
+- Automatic backoff messaging when an upstream responds slowly or returns errors.
+
+**Why it exists**
+
+- Prevents cache stampedes during launches or new region rollouts by preloading tiles.
+- Gives operators a safe way to prefill cache without writing one-off scripts.
+- Makes performance tuning (batch size vs. upstream load) visible and repeatable.
+
+### Statistics map tool
+
+`GET /statistics-map.html` (served from `public/statistics-map.html`) is an operator-focused dashboard that visualizes request hotspots and cache coverage at a glance. It is built to help evaluate cache efficiency and demand geography without exporting data.
+
+**Tool features**
+
+- Heatmap overlays for request hotspots and cache coverage.
+- Toggles for amenities, coverage types, and stale tile views.
+- Refresh controls with progress feedback to avoid heavy re-fetching during navigation.
+- Panel for upstream health and cache summary statistics.
+
+**Why it exists**
+
+- Quickly surfaces where demand is highest so you can target preheating or adjust TTLs.
+- Confirms whether cache coverage is keeping up with real request patterns.
+- Provides an at-a-glance operational view for non-CLI users.
 
 #### What the statistics include and how to use them
 
@@ -155,7 +222,7 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
 
 #### Retrieving statistics at runtime
 
-- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. Tile cache coverage is exposed separately at `GET /api/statistics/cacheCoverage` for clients that only need the cached tile breakdowns, and per-amenity geohash coverage is served at `GET /api/statistics/geohashCoverage` for viewers that visualise hotspots without inventory payloads.
+- **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. Tile cache coverage is exposed separately at `GET /api/statistics/cacheCoverage` for clients that only need the cached tile breakdowns, `GET /api/statistics/cacheCoverage/area` scopes cache coverage to a bbox and precision for map viewports, and per-amenity geohash coverage is served at `GET /api/statistics/geohashCoverage` for viewers that visualise hotspots without inventory payloads.
 - **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()`, `await stats.getCacheCoverageSnapshot()`, or `await stats.getGeohashCoverageSnapshot()` to retrieve structured data inside the process without another HTTP request.
 - **Time window:** counters continue accumulating until cleared from Redis, so the snapshot survives restarts and day boundaries.
 
@@ -187,6 +254,11 @@ curl -X POST http://localhost:8080/api/interpreter \
 curl -X POST http://localhost:8080/api/interpreter \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   --data '[out:json];node(52.5,13.3,52.6,13.4);out;'
+
+# Cache invalidation request
+curl -X POST 'http://localhost:8080/api/cache/invalidate' \
+  -H 'Content-Type: application/json' \
+  --data '{"secret":"YOUR_SECRET","south":52.5,"west":13.3,"north":52.6,"east":13.4}'
 ```
 
 ## Continuous Integration
@@ -206,3 +278,5 @@ Two static dashboards ship in `public/` to help operators observe coverage and p
   quota issues in real time. Use the dropdown to switch visualisations or the toggle to hide upstreams.
 - `public/cache-preheater.html` targets manual preload runs with live progress, error tracking, and memory-friendly batching so
   large geohash ranges can be warmed without exhausting the browser.
+- `public/cache-invalidator.html` provides a map-based UI for selecting a bounding box and sending an invalidation request. The
+  secret keyword must match `CACHE_INVALIDATION_SECRET`, and the page reports deleted key counts and affected amenities.

@@ -7,7 +7,7 @@ import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
 import type { CacheCoverageEntry, CacheCoverageOptions } from './store.js';
-import { TileStore } from './store.js';
+import { CACHE_COVERAGE_REVISION_KEY, TileStore } from './store.js';
 import type { TileInfo } from './tiling.js';
 import { startOfDayMs, startOfMonthMs, startOfWeekMs } from './time.js';
 import type {
@@ -244,10 +244,9 @@ export interface SnapshotReadOptions {
 export const readCachedSnapshot = async <T extends { generatedAt: string }>(
   store: SnapshotCacheStore,
   key: string,
-  now = Date.now(),
-  options: SnapshotReadOptions = {}
+  _now = Date.now(),
+  _options: SnapshotReadOptions = {}
 ): Promise<{ snapshot: T | null; pending: boolean }> => {
-  const refreshIntervalMs = options.refreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
   const raw = await store.get(key);
   if (!raw) {
     return { snapshot: null, pending: true };
@@ -256,12 +255,60 @@ export const readCachedSnapshot = async <T extends { generatedAt: string }>(
   try {
     const snapshot = JSON.parse(raw) as T;
     const generatedAt = Date.parse(snapshot.generatedAt);
-    const stale = !Number.isFinite(generatedAt) || now - generatedAt > refreshIntervalMs;
-    return { snapshot, pending: stale };
+    const invalid = !Number.isFinite(generatedAt);
+    return { snapshot, pending: invalid };
   } catch (error) {
     logger.warn({ err: error, key }, 'failed to parse cached snapshot');
     return { snapshot: null, pending: true };
   }
+};
+
+const reportMemoryUsage = (): {
+  rssMb: number;
+  heapTotalMb: number;
+  heapUsedMb: number;
+  externalMb: number;
+  arrayBuffersMb: number;
+} => {
+  const memory = process.memoryUsage();
+  const toMb = (value: number) => Math.round(value / 1024 / 1024);
+
+  return {
+    rssMb: toMb(memory.rss),
+    heapTotalMb: toMb(memory.heapTotal),
+    heapUsedMb: toMb(memory.heapUsed),
+    externalMb: toMb(memory.external),
+    arrayBuffersMb: toMb(memory.arrayBuffers)
+  };
+};
+
+const summarizeAmenityState = (
+  amenityState: AmenityCoverageState[]
+): {
+  amenityCount: number;
+  geohashEntries: number;
+  maxAmenityGeohashes: number;
+  maxAmenity?: string;
+} => {
+  let geohashEntries = 0;
+  let maxAmenityGeohashes = 0;
+  let maxAmenity: string | undefined;
+
+  for (const stats of amenityState) {
+    const entryCount = stats.geohashCounts.length;
+    geohashEntries += entryCount;
+    if (entryCount > maxAmenityGeohashes) {
+      maxAmenityGeohashes = entryCount;
+      maxAmenity = stats.amenity;
+    }
+  }
+
+  return {
+    amenityCount: amenityState.length,
+    geohashEntries,
+    maxAmenityGeohashes,
+    maxAmenity
+  };
 };
 
 export class SharedStaleRefreshMetrics implements StaleRefreshQueueMetricsProvider {
@@ -389,17 +436,20 @@ class SnapshotCache<T extends { generatedAt: string }> {
     }
   }
 
-  private isStale(now: number): boolean {
+  private isStale(_now: number): boolean {
     if (this.dirty) {
       return true;
     }
     if (!this.lastGeneratedAt) {
       return true;
     }
-    return now - this.lastGeneratedAt > this.refreshIntervalMs;
+    return false;
   }
 
   private maybeRefresh(): void {
+    if (!this.isStale(Date.now())) {
+      return;
+    }
     if (this.refreshPromise) {
       return;
     }
@@ -560,6 +610,10 @@ export class RequestStatistics {
 
   private snapshotRevision = 0;
 
+  private cacheCoverageRevision: number | null = null;
+
+  private cacheCoverageSnapshot: CacheCoverageSnapshot | null = null;
+
   private constructor(
     private readonly cacheMetrics: CacheMetricsProvider,
     private readonly storage: StatisticsStorage,
@@ -567,7 +621,6 @@ export class RequestStatistics {
     options: RequestStatisticsOptions = {}
   ) {
     this.staleRefreshQueue = options.staleRefreshQueue;
-
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
 
@@ -775,9 +828,20 @@ export class RequestStatistics {
       await this.persist();
 
       this.geohashCoverageCache.markDirty();
-      this.cacheCoverageCache.markDirty();
       this.statisticsCache.markDirty();
     });
+  }
+
+  public markCacheCoverageDirty(): void {
+    this.cacheCoverageCache.markDirty();
+  }
+
+  public markGeohashCoverageDirty(): void {
+    this.geohashCoverageCache.markDirty();
+  }
+
+  public markStatisticsDirty(): void {
+    this.statisticsCache.markDirty();
   }
 
   public async getSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
@@ -786,10 +850,26 @@ export class RequestStatistics {
     });
     const needsRefresh = pending || this.snapshotRevision < this.revision;
 
-    if (snapshot && !needsRefresh) {
+    // If we have a cached snapshot (even if stale), return it immediately
+    // and trigger refresh in background without blocking
+    if (snapshot) {
+      if (needsRefresh) {
+        // Trigger refresh asynchronously without waiting
+        setImmediateCallback(() => {
+          void this.statisticsCache.refresh().then(() => {
+            this.snapshotRevision = this.revision;
+          }).catch((error) => {
+            logger.warn({ err: error }, 'failed to refresh statistics snapshot in background');
+          });
+        });
+      }
       return snapshot;
     }
 
+    // If no cached snapshot exists, we need to build it
+    // For the first build, we do it synchronously (should be fast with no data)
+    // but ensure it yields to event loop to avoid blocking
+    // For subsequent calls, this should not happen as cache should exist
     const rebuilt = await this.buildStatisticsSnapshot(now);
     await this.statisticsCache.saveSnapshot(rebuilt);
     this.snapshotRevision = this.revision;
@@ -828,6 +908,14 @@ export class RequestStatistics {
 
   private async buildStatisticsSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
     return this.runExclusive(async () => {
+      logger.info(
+        {
+          memory: reportMemoryUsage(),
+          amenityCount: this.amenityStats.size,
+          uniqueClients: this.uniqueClients.size
+        },
+        'statistics snapshot build started'
+      );
       this.refreshPeriodCounters(now);
 
       const generatedAt = new Date(now).toISOString();
@@ -836,12 +924,17 @@ export class RequestStatistics {
       const monthStartIso = new Date(this.monthStart).toISOString();
 
       const amenities: AmenityStatistics[] = [];
-      const globalGeohashCounts = new Map<string, number>();
+      let globalGeohashCounts = new Map<string, number>();
+      let amenityCounter = 0;
 
       for (const stats of this.amenityStats.values()) {
         const cacheItems = this.cacheMetrics.countCachedTiles(stats.amenity);
         for (const [hash, count] of stats.geohashCounts) {
           globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
+        }
+
+        if (globalGeohashCounts.size > this.geohashCoverageCompactionThreshold) {
+          globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
         }
 
         const averageTilesPerRequest =
@@ -860,9 +953,16 @@ export class RequestStatistics {
           lastRequestAt:
             stats.lastRequestAt > 0 ? new Date(stats.lastRequestAt).toISOString() : undefined
         });
+
+        amenityCounter += 1;
+        if (amenityCounter % COVERAGE_YIELD_INTERVAL === 0) {
+          await yieldToEventLoop();
+        }
       }
 
       amenities.sort((a, b) => b.requests - a.requests || a.amenity.localeCompare(b.amenity));
+
+      globalGeohashCounts = this.compactGeohashCounts(globalGeohashCounts);
 
       const hotspots = [...globalGeohashCounts.entries()]
         .sort((a, b) => b[1] - a[1])
@@ -953,8 +1053,24 @@ export class RequestStatistics {
 
   private async buildCacheCoverageSnapshot(now = Date.now()): Promise<CacheCoverageSnapshot> {
     const start = Date.now();
+    const storedRevision = await this.snapshotStore.get(CACHE_COVERAGE_REVISION_KEY);
+    const nextRevision = storedRevision ? Number(storedRevision) : null;
+    if (
+      Number.isFinite(nextRevision) &&
+      this.cacheCoverageSnapshot &&
+      this.cacheCoverageRevision === nextRevision
+    ) {
+      return this.cacheCoverageSnapshot;
+    }
     const generatedAt = new Date(now).toISOString();
-    const coverageEntries = this.cacheMetrics.getCacheCoverage({ maxEntries: this.maxCacheCoverageEntries });
+    logger.info({ memory: reportMemoryUsage() }, 'cache coverage snapshot build started');
+    const coverageEntries = this.cacheMetrics.getCacheCoverage({
+      maxEntries: this.maxCacheCoverageEntries
+    });
+    logger.info(
+      { memory: reportMemoryUsage(), inputEntries: coverageEntries.length },
+      'cache coverage snapshot input loaded'
+    );
     const cacheCoverage = await this.aggregateCacheCoverage(coverageEntries);
 
     logger.info(
@@ -968,7 +1084,12 @@ export class RequestStatistics {
       'cache coverage snapshot built'
     );
 
-    return { generatedAt, cacheCoverage };
+    const snapshot = { generatedAt, cacheCoverage };
+    if (Number.isFinite(nextRevision)) {
+      this.cacheCoverageRevision = nextRevision;
+    }
+    this.cacheCoverageSnapshot = snapshot;
+    return snapshot;
   }
 
   private async captureGeohashCoverageState(now: number): Promise<AmenityCoverageState[]> {
@@ -983,7 +1104,12 @@ export class RequestStatistics {
 
   private async buildGeohashCoverageSnapshot(now = Date.now()): Promise<GeohashCoverageSnapshot> {
     const start = Date.now();
+    logger.info({ memory: reportMemoryUsage() }, 'geohash coverage snapshot build started');
     const amenityState = await this.captureGeohashCoverageState(now);
+    logger.info(
+      { memory: reportMemoryUsage(), ...summarizeAmenityState(amenityState) },
+      'geohash coverage snapshot input captured'
+    );
     const { amenityCoverage } = await this.buildGeohashCoverage(amenityState);
     const generatedAt = new Date(now).toISOString();
 
@@ -1098,11 +1224,17 @@ export class RequestStatistics {
 export type StatsWorkerCommand =
   | { type: 'record'; payload: RecordRequestOptions }
   | { type: 'refresh'; target: StatisticsRefreshTarget }
+  | { type: 'markDirty'; target: StatisticsRefreshTarget }
   | { type: 'staleRefreshUpdate'; overview: StaleRefreshQueueOverview }
   | {
       type: 'staleRefreshTask';
       amenity: string;
       groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
+      planOptions: {
+        coarsePrecision: number;
+        finePrecision: number;
+        targetTilesPerRequest?: number;
+      };
       statsPayload: RecordRequestOptions;
     };
 
@@ -1336,19 +1468,84 @@ export class StatisticsWorkerClient {
       });
   }
 
+  public markDirty(target: StatisticsRefreshTarget = 'all'): void {
+    if (!this.useWorker) {
+      void this.readyPromise
+        .then(() => {
+          if (!this.inlineStatistics) return;
+          switch (target) {
+            case 'statistics':
+              this.inlineStatistics.markStatisticsDirty();
+              return;
+            case 'cacheCoverage':
+              this.inlineStatistics.markCacheCoverageDirty();
+              return;
+            case 'geohashCoverage':
+              this.inlineStatistics.markGeohashCoverageDirty();
+              return;
+            case 'all':
+            default:
+              this.inlineStatistics.markStatisticsDirty();
+              this.inlineStatistics.markCacheCoverageDirty();
+              this.inlineStatistics.markGeohashCoverageDirty();
+          }
+        })
+        .catch((error) => {
+          logger.warn({ err: error }, 'failed to mark inline statistics dirty');
+        });
+      return;
+    }
+
+    void this.readyPromise
+      .then(() => {
+        const command: StatsWorkerCommand = { type: 'markDirty', target };
+        if (!this.worker) {
+          logger.warn('statistics worker not initialized');
+          return;
+        }
+        this.worker.postMessage(command);
+      })
+      .catch((error) => {
+        logger.warn({ err: error }, 'failed to post mark dirty command to statistics worker');
+      });
+  }
+
+  public markCacheCoverageDirty(): void {
+    this.markDirty('cacheCoverage');
+  }
+
+  public markGeohashCoverageDirty(): void {
+    this.markDirty('geohashCoverage');
+  }
+
+  public markStatisticsDirty(): void {
+    this.markDirty('statistics');
+  }
+
   public enqueueStaleRefreshTask(task: {
     amenity: string;
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
     statsPayload: RecordRequestOptions;
   }): void {
+    const planOptions = {
+      coarsePrecision: this.config.staleRefreshCoarsePrecision,
+      finePrecision: this.config.tilePrecision,
+      targetTilesPerRequest: this.config.staleRefreshTargetTilesPerRequest
+    };
+
     if (!this.useWorker) {
       void this.readyPromise
         .then(() =>
-          this.inlineStaleRefreshQueue?.enqueue(async () => {
-            await this.runStaleRefreshTask(task);
-          }, {
-            tileGroups: task.groups.length,
-            tiles: task.groups.reduce((total, group) => total + group.tiles.length, 0)
+          this.inlineStaleRefreshQueue?.enqueue({
+            amenity: task.amenity,
+            groups: task.groups,
+            planOptions,
+            run: async (groups) => {
+              await this.runStaleRefreshTask({ amenity: task.amenity, groups });
+            },
+            onSettled: async () => {
+              await this.inlineStatistics?.recordRequest(task.statsPayload);
+            }
           })
         )
         .catch((error) => {
@@ -1363,6 +1560,7 @@ export class StatisticsWorkerClient {
           type: 'staleRefreshTask',
           amenity: task.amenity,
           groups: task.groups,
+          planOptions,
           statsPayload: task.statsPayload
         };
         this.worker?.postMessage(command);
@@ -1412,10 +1610,6 @@ export class StatisticsWorkerClient {
       now,
       { refreshIntervalMs: this.refreshIntervalMs }
     );
-
-    if (result.pending) {
-      this.refresh('statistics');
-    }
 
     return result;
   }
@@ -1480,7 +1674,6 @@ export class StatisticsWorkerClient {
   private async runStaleRefreshTask(task: {
     amenity: string;
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
-    statsPayload: RecordRequestOptions;
   }): Promise<void> {
     if (!this.inlineStatistics || !this.inlineStore) {
       return;
@@ -1509,6 +1702,6 @@ export class StatisticsWorkerClient {
         });
     }
 
-    await this.inlineStatistics.recordRequest(task.statsPayload);
+    this.inlineStatistics.markCacheCoverageDirty();
   }
 }

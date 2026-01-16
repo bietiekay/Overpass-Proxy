@@ -6,13 +6,15 @@ import {
   extractAmenityValue,
   extractBoundingBox,
   hasAmenityFilter,
-  hasJsonOutput
+  hasJsonOutput,
+  isValidBoundingBox,
+  type BoundingBox
 } from './bbox.js';
 import type { AppConfig } from './config.js';
 import { TooManyTilesError } from './errors.js';
 import { applyConditionalHeaders } from './headers.js';
 import { logger } from './logger.js';
-import type { TileStore } from './store.js';
+import type { CacheCoverageBoundsOptions, TileStore } from './store.js';
 import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox, type OverpassResponse } from './store.js';
 import { planTileFetches } from './fetchPlan.js';
@@ -32,6 +34,134 @@ interface InterpreterDeps {
 }
 
 type InterpreterRequest = FastifyRequest;
+
+const MIN_CACHE_COVERAGE_PRECISION = 3;
+
+const readNumberValue = (value: unknown): number | null => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const parsed = readNumberValue(entry);
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+};
+
+const parseCacheCoveragePrecision = (value: unknown, maxPrecision: number): number | null => {
+  const parsed = readNumberValue(value);
+  if (parsed === null) {
+    return null;
+  }
+  const rounded = Math.round(parsed);
+  if (!Number.isFinite(rounded)) {
+    return null;
+  }
+  return Math.min(Math.max(rounded, MIN_CACHE_COVERAGE_PRECISION), Math.max(maxPrecision, 1));
+};
+
+const parseBoundingBoxInput = (value: unknown): BoundingBox | null => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const parts = value.split(/[, ]+/).filter((part) => part.length > 0);
+    if (parts.length === 4) {
+      const numbers = parts.map((part) => Number(part));
+      if (numbers.every((num) => Number.isFinite(num))) {
+        const [south, west, north, east] = numbers;
+        return isValidBoundingBox(south, west, north, east) ? { south, west, north, east } : null;
+      }
+    }
+  }
+
+  if (Array.isArray(value) && value.length === 4) {
+    const numbers = value.map((entry) => readNumberValue(entry));
+    if (numbers.every((entry) => entry !== null)) {
+      const [south, west, north, east] = numbers as number[];
+      return isValidBoundingBox(south, west, north, east) ? { south, west, north, east } : null;
+    }
+  }
+
+  if (typeof value === 'object') {
+    const candidate = value as Record<string, unknown>;
+    const south = readNumberValue(candidate.south);
+    const west = readNumberValue(candidate.west);
+    const north = readNumberValue(candidate.north);
+    const east = readNumberValue(candidate.east);
+    if ([south, west, north, east].every((entry) => entry !== null)) {
+      const bbox = { south: south as number, west: west as number, north: north as number, east: east as number };
+      return isValidBoundingBox(bbox.south, bbox.west, bbox.north, bbox.east) ? bbox : null;
+    }
+  }
+
+  return null;
+};
+
+const extractInvalidateBoundingBox = (request: InterpreterRequest): BoundingBox | null => {
+  const queryParams = request.query as Record<string, unknown>;
+  const queryBbox = parseBoundingBoxInput(queryParams?.bbox);
+  if (queryBbox) {
+    return queryBbox;
+  }
+
+  const queryDirect = parseBoundingBoxInput({
+    south: queryParams?.south,
+    west: queryParams?.west,
+    north: queryParams?.north,
+    east: queryParams?.east
+  });
+  if (queryDirect) {
+    return queryDirect;
+  }
+
+  if (request.body && typeof request.body === 'object') {
+    const body = request.body as Record<string, unknown>;
+    const bodyBbox = parseBoundingBoxInput(body.bbox);
+    if (bodyBbox) {
+      return bodyBbox;
+    }
+    return parseBoundingBoxInput(body);
+  }
+
+  return null;
+};
+
+const extractSecretValue = (request: InterpreterRequest): string | null => {
+  const queryParams = request.query as Record<string, unknown>;
+  const rawQuerySecret = queryParams?.secret;
+  if (typeof rawQuerySecret === 'string' && rawQuerySecret.trim().length > 0) {
+    return rawQuerySecret.trim();
+  }
+  if (Array.isArray(rawQuerySecret)) {
+    const candidate = rawQuerySecret.find((value) => typeof value === 'string' && value.trim().length > 0);
+    if (candidate) {
+      return candidate.trim();
+    }
+  }
+
+  if (request.body && typeof request.body === 'object') {
+    const rawBodySecret = (request.body as Record<string, unknown>).secret;
+    if (typeof rawBodySecret === 'string' && rawBodySecret.trim().length > 0) {
+      return rawBodySecret.trim();
+    }
+  }
+
+  return null;
+};
 
 const requestBodyToQuery = (request: InterpreterRequest): string | null => {
   if (request.method === 'GET') {
@@ -159,6 +289,9 @@ const handleCacheable = async (
   const cached = await deps.store.readTiles(tiles, normalisedAmenity);
   const missing = tiles.filter((tile) => !cached.has(tile.hash));
   const stale = tiles.filter((tile) => cached.get(tile.hash)?.stale ?? false);
+  if (missing.length > 0 || stale.length > 0) {
+    deps.stats.markCacheCoverageDirty();
+  }
 
   const responsesByTile = new Map<string, { response: OverpassResponse; fetchedAt: number }>();
   const recordResponse = (tileHash: string, payload: { response: OverpassResponse; fetchedAt: number }) => {
@@ -189,6 +322,7 @@ const handleCacheable = async (
     });
 
     await deps.store.writeTiles(entries, normalisedAmenity);
+    deps.stats.markCacheCoverageDirty();
   };
 
   const planOptions = {
@@ -448,6 +582,85 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
       reply.code(202);
     }
     reply.send(snapshot);
+  });
+
+  app.get('/api/statistics/cacheCoverage/area', async (request, reply) => {
+    const queryParams = request.query as Record<string, unknown>;
+    const bbox =
+      parseBoundingBoxInput(queryParams?.bbox) ??
+      parseBoundingBoxInput({
+        south: queryParams?.south,
+        west: queryParams?.west,
+        north: queryParams?.north,
+        east: queryParams?.east
+      });
+
+    if (!bbox) {
+      reply.code(400);
+      reply.send({ error: 'Bounding box required' });
+      return;
+    }
+
+    const precision = parseCacheCoveragePrecision(queryParams?.precision, deps.config.tilePrecision);
+    if (!precision) {
+      reply.code(400);
+      reply.send({ error: 'Precision required' });
+      return;
+    }
+
+    const maxEntries = readNumberValue(queryParams?.maxEntries);
+    const coverageOptions: CacheCoverageBoundsOptions = {
+      bbox,
+      precision,
+      maxEntries: maxEntries ?? undefined
+    };
+    const coverage = deps.store.getCacheCoverageForBounds(coverageOptions);
+
+    reply.header('Content-Type', 'application/json');
+    reply.send({
+      generatedAt: new Date().toISOString(),
+      bbox,
+      precision,
+      cacheCoverage: coverage
+    });
+  });
+
+  app.post('/api/cache/invalidate', async (request, reply) => {
+    if (!deps.config.cacheInvalidateSecret) {
+      reply.code(403);
+      reply.send({ error: 'Cache invalidation secret is not configured' });
+      return;
+    }
+
+    const secret = extractSecretValue(request as InterpreterRequest);
+    if (!secret || secret !== deps.config.cacheInvalidateSecret) {
+      reply.code(403);
+      reply.send({ error: 'Invalid secret keyword' });
+      return;
+    }
+
+    const bbox = extractInvalidateBoundingBox(request as InterpreterRequest);
+    if (!bbox) {
+      reply.code(400);
+      reply.send({ error: 'Bounding box required' });
+      return;
+    }
+
+    const tiles = tilesForBoundingBox(bbox, deps.config.tilePrecision);
+    if (tiles.length > deps.config.maxTilesPerRequest) {
+      reply.code(413);
+      reply.send({ error: `Invalidate request requires ${tiles.length} tiles` });
+      return;
+    }
+
+    const result = await deps.store.invalidateTiles(tiles);
+    reply.header('Content-Type', 'application/json');
+    reply.send({
+      ok: true,
+      bbox,
+      tileCount: tiles.length,
+      ...result
+    });
   });
 
   const transparentEndpoints = ['/api/status', '/api/timestamp', '/api/timestamp/*', '/api/kill_my_queries'];

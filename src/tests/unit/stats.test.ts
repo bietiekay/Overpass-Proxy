@@ -353,7 +353,19 @@ describe('RequestStatistics', () => {
       timestamp: new Date('2024-01-01T11:00:00Z').getTime()
     });
 
-    const refreshedSnapshot = await stats.getSnapshot(new Date('2024-01-01T11:01:00Z').getTime());
+    // Wait for background refresh to complete (getSnapshot triggers refresh in background)
+    // Poll until the snapshot is updated
+    let refreshedSnapshot = await stats.getSnapshot(new Date('2024-01-01T11:01:00Z').getTime());
+    let attempts = 0;
+    while (
+      refreshedSnapshot.generatedAt === firstSnapshot.generatedAt &&
+      attempts < 50
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      refreshedSnapshot = await stats.getSnapshot(new Date('2024-01-01T11:01:00Z').getTime());
+      attempts += 1;
+    }
+
     expect(refreshedSnapshot.generatedAt).not.toBe(firstSnapshot.generatedAt);
     expect(refreshedSnapshot.totalRequests).toBe(firstSnapshot.totalRequests + 1);
   });

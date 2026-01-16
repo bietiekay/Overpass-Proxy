@@ -3,7 +3,12 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import type { AppConfig } from '../../config.js';
-import { fetchTile, createUpstreamMetricsProvider, proxyTransparent } from '../../upstream.js';
+import {
+  fetchTile,
+  createUpstreamMetricsProvider,
+  proxyTransparent,
+  getUpstreamPoolForTesting
+} from '../../upstream.js';
 import { logger } from '../../logger.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 
@@ -39,6 +44,8 @@ const baseConfig: AppConfig = {
   tilePrecision: 5,
   upstreamTilePrecision: 3,
   maxTilesPerRequest: 100,
+  staleRefreshCoarsePrecision: 3,
+  staleRefreshTargetTilesPerRequest: 64,
   nodeEnv: 'test',
   upstreamFailureCooldownSeconds: 60,
   upstreamBackoffBaseSeconds: 1,
@@ -53,7 +60,9 @@ const baseConfig: AppConfig = {
   transparentOnly: false,
   trustProxy: false,
   upstreamOrigin: 'https://overpass-turbo.eu',
-  upstreamReferer: 'https://overpass-turbo.eu/'
+  upstreamReferer: 'https://overpass-turbo.eu/',
+  serveStaleFromCache: true,
+  cacheInvalidateSecret: null
 };
 
 const mockReply = () => {
@@ -98,6 +107,35 @@ afterEach(() => {
 });
 
 describe('upstream failover', () => {
+  it('avoids retrying rate-limited responses and uses backoff delay', async () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const config: AppConfig = { ...baseConfig, upstreamUrls: [...baseConfig.upstreamUrls] };
+      postMock.mockResolvedValue({ body: JSON.stringify({ elements: [] }) });
+
+      await fetchTile(config, bbox, 'toilets');
+
+      const [, options] = postMock.mock.calls[0];
+      const retry = options.retry;
+      expect(retry.statusCodes).not.toContain(429);
+
+      const delay = retry.calculateDelay({
+        attemptCount: 1,
+        computedValue: 1,
+        error: new RequestErrorMock(503)
+      });
+      const noDelay = retry.calculateDelay({
+        attemptCount: 1,
+        computedValue: 1,
+        error: new RequestErrorMock(429)
+      });
+
+      expect(delay).toBeGreaterThan(0);
+      expect(noDelay).toBe(0);
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
 
   it('propagates client errors without marking upstream as failed', async () => {
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
@@ -320,6 +358,39 @@ describe('upstream failover', () => {
     expect(restored.status).toBe('cooldown');
     expect(restored.backoffUntil).toBeDefined();
     vi.useRealTimers();
+  });
+
+  it('times out stalled probes to avoid blocking the probe loop', async () => {
+    vi.useFakeTimers();
+    try {
+      const config: AppConfig = {
+        ...baseConfig,
+        upstreamUrls: ['http://probe.example/api'],
+        upstreamProbeIntervalSeconds: 0,
+        upstreamProbeTimeoutSeconds: 1,
+        upstreamStickinessTtlSeconds: 0
+      };
+
+      const pool = getUpstreamPoolForTesting(config);
+      await (pool as unknown as { ensureReady: () => Promise<void> }).ensureReady();
+      const poolWithFailure = pool as unknown as {
+        markFailure: (url: string) => void;
+        probeOnce: () => Promise<void>;
+        probeUpstream: (url: string) => Promise<void>;
+      };
+
+      poolWithFailure.markFailure('http://probe.example/api');
+      const probeSpy = vi
+        .spyOn(poolWithFailure, 'probeUpstream')
+        .mockImplementation(() => new Promise(() => {}));
+
+      const probePromise = poolWithFailure.probeOnce();
+      await vi.advanceTimersByTimeAsync(1100);
+      await expect(probePromise).resolves.toBeUndefined();
+      expect(probeSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
