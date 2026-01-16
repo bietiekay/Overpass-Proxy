@@ -138,6 +138,7 @@ export class InMemoryRedis extends EventEmitter {
       duration?: number,
       condition?: string
     ) => ReturnType<InMemoryRedis['pipeline']>;
+    del: (key: string) => ReturnType<InMemoryRedis['pipeline']>;
     exec: () => Promise<Array<[Error | null, unknown]>>;
   } {
     const commands: Array<() => Promise<unknown>> = [];
@@ -156,6 +157,10 @@ export class InMemoryRedis extends EventEmitter {
         condition?: string
       ) {
         commands.push(() => parent.set(key, value, mode, duration, condition));
+        return pipeline;
+      },
+      del(key: string) {
+        commands.push(() => parent.del(key));
         return pipeline;
       },
       async exec() {
