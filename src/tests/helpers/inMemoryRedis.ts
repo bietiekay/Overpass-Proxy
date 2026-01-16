@@ -61,6 +61,17 @@ export class InMemoryRedis extends EventEmitter {
     return next;
   }
 
+  async incr(key: string): Promise<number> {
+    return this.incrby(key, 1);
+  }
+
+  async decrby(key: string, decrement: number): Promise<number> {
+    const current = Number(this.store.get(key) ?? 0);
+    const next = current - decrement;
+    this.store.set(key, String(next));
+    return next;
+  }
+
   async pttl(key: string): Promise<number> {
     if (!this.store.has(key)) {
       return -2;

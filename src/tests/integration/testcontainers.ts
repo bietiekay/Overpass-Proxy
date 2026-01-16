@@ -1,5 +1,6 @@
 import { execSync } from 'node:child_process';
 
+import { got } from 'got';
 import Redis from 'ioredis';
 import { GenericContainer, type StartedTestContainer } from 'testcontainers';
 
@@ -38,10 +39,31 @@ export const createTestEnvironment = async (): Promise<TestEnvironment> => {
     await mockOverpass.start(0);
     const address = mockOverpass.app.server.address();
     const port = typeof address === 'object' && address ? address.port : 0;
+    const upstreamUrl = `http://127.0.0.1:${port}/api/interpreter`;
+
+    // Wait for server to be ready by making a test request
+    // This ensures the server is actually listening and responding
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        const response = await got.post(upstreamUrl, {
+          form: { data: '[out:json];node["amenity"="toilets"](0,0,1,1);out;' },
+          throwHttpErrors: false,
+          timeout: { request: 1000 }
+        });
+        if (response.statusCode === 200) {
+          break;
+        }
+      } catch (error) {
+        if (attempt === 9) {
+          throw new Error(`Mock upstream server not ready after 10 attempts: ${error}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
 
     return {
       redis,
-      upstreamUrls: [`http://127.0.0.1:${port}/api/interpreter`],
+      upstreamUrls: [upstreamUrl],
       hits: mockOverpass.hits,
       setResponder: mockOverpass.setResponder,
       resetResponder: mockOverpass.resetResponder,
@@ -58,10 +80,31 @@ export const createTestEnvironment = async (): Promise<TestEnvironment> => {
   await mockOverpass.start(0);
   const address = mockOverpass.app.server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
+  const upstreamUrl = `http://127.0.0.1:${port}/api/interpreter`;
+
+  // Wait for server to be ready by making a test request
+  // This ensures the server is actually listening and responding
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      const response = await got.post(upstreamUrl, {
+        form: { data: '[out:json];node["amenity"="toilets"](0,0,1,1);out;' },
+        throwHttpErrors: false,
+        timeout: { request: 1000 }
+      });
+      if (response.statusCode === 200) {
+        break;
+      }
+    } catch (error) {
+      if (attempt === 9) {
+        throw new Error(`Mock upstream server not ready after 10 attempts: ${error}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
 
   return {
     redis: mockRedis as unknown as Redis,
-    upstreamUrls: [`http://127.0.0.1:${port}/api/interpreter`],
+    upstreamUrls: [upstreamUrl],
     hits: mockOverpass.hits,
     setResponder: mockOverpass.setResponder,
     resetResponder: mockOverpass.resetResponder,

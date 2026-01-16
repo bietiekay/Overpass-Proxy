@@ -850,10 +850,26 @@ export class RequestStatistics {
     });
     const needsRefresh = pending || this.snapshotRevision < this.revision;
 
-    if (snapshot && !needsRefresh) {
+    // If we have a cached snapshot (even if stale), return it immediately
+    // and trigger refresh in background without blocking
+    if (snapshot) {
+      if (needsRefresh) {
+        // Trigger refresh asynchronously without waiting
+        setImmediateCallback(() => {
+          void this.statisticsCache.refresh().then(() => {
+            this.snapshotRevision = this.revision;
+          }).catch((error) => {
+            logger.warn({ err: error }, 'failed to refresh statistics snapshot in background');
+          });
+        });
+      }
       return snapshot;
     }
 
+    // If no cached snapshot exists, we need to build it
+    // For the first build, we do it synchronously (should be fast with no data)
+    // but ensure it yields to event loop to avoid blocking
+    // For subsequent calls, this should not happen as cache should exist
     const rebuilt = await this.buildStatisticsSnapshot(now);
     await this.statisticsCache.saveSnapshot(rebuilt);
     this.snapshotRevision = this.revision;

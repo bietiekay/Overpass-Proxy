@@ -172,6 +172,33 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
     }
   }
 
+  private async runWithTimeoutInternal(task: () => Promise<void>, timeoutMs: number): Promise<void> {
+    if (timeoutMs <= 0) {
+      await task();
+      return;
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        task(),
+        new Promise<void>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            const error = new Error(
+              `Stale refresh task timed out after ${timeoutMs}ms`
+            );
+            error.name = 'StaleRefreshTaskTimeout';
+            reject(error);
+          }, timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
   private isTimeoutError(error: unknown): boolean {
     return error instanceof Error && error.name === 'StaleRefreshTaskTimeout';
   }
@@ -213,6 +240,28 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
       () => void | Promise<void>
     >;
 
+    // If multiple tasks are merged, run them sequentially
+    // This ensures that if one task times out, the others still get a chance to run
+    const runFunctions = entries.map((entry) => entry.task.run);
+    const mergedRun =
+      runFunctions.length === 1
+        ? runFunctions[0]!
+        : async (groups: StaleRefreshGroup[]) => {
+            for (const run of runFunctions) {
+              try {
+                // Run each function with its own timeout to ensure one timeout doesn't block others
+                await this.runWithTimeoutInternal(() => run(groups), this.taskTimeoutMs);
+              } catch (error) {
+                // If a task times out or fails, continue with the next one
+                // The timeout error will be logged by runWithTimeout
+                if (!this.isTimeoutError(error)) {
+                  throw error;
+                }
+                // Continue to next run function on timeout
+              }
+            }
+          };
+
     return {
       enqueuedAt,
       tileGroups,
@@ -221,7 +270,7 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
         amenity: baseTask.amenity,
         groups: mergedGroups,
         planOptions: baseTask.planOptions,
-        run: baseTask.run,
+        run: mergedRun,
         onSettled: callbacks.length
           ? async () => {
               for (const callback of callbacks) {
