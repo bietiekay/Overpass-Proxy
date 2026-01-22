@@ -436,17 +436,18 @@ class SnapshotCache<T extends { generatedAt: string }> {
     const stale = this.isStale(now);
     
     // Check if refresh is stuck (running too long)
+    const refreshStartTime = this.refreshStartTime;
     const isRefreshStuck =
       this.refreshPromise !== null &&
-      this.refreshStartTime !== null &&
-      now - this.refreshStartTime > this.buildTimeoutMs;
+      refreshStartTime !== null &&
+      now - refreshStartTime > this.buildTimeoutMs;
     
     if (isRefreshStuck) {
       logger.warn(
         {
           key: this.key,
           label: this.label,
-          durationMs: now - this.refreshStartTime
+          durationMs: now - refreshStartTime
         },
         'detected stuck statistics snapshot build, resetting'
       );
