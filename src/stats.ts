@@ -245,8 +245,8 @@ export interface SnapshotReadOptions {
 export const readCachedSnapshot = async <T extends { generatedAt: string }>(
   store: SnapshotCacheStore,
   key: string,
-  _now = Date.now(),
-  _options: SnapshotReadOptions = {}
+  now = Date.now(),
+  options: SnapshotReadOptions = {}
 ): Promise<{ snapshot: T | null; pending: boolean }> => {
   const raw = await store.get(key);
   if (!raw) {
@@ -257,6 +257,26 @@ export const readCachedSnapshot = async <T extends { generatedAt: string }>(
     const snapshot = JSON.parse(raw) as T;
     const generatedAt = Date.parse(snapshot.generatedAt);
     const invalid = !Number.isFinite(generatedAt);
+    
+    // Check if snapshot is too old (stale)
+    // If refreshIntervalMs is provided and snapshot is older than 2x the interval, consider it stale
+    if (!invalid && options.refreshIntervalMs && options.refreshIntervalMs > 0) {
+      const ageMs = now - generatedAt;
+      const maxAgeMs = options.refreshIntervalMs * 2;
+      if (ageMs > maxAgeMs) {
+        logger.warn(
+          {
+            key,
+            ageMs,
+            maxAgeMs,
+            generatedAt: snapshot.generatedAt
+          },
+          'cached snapshot is too old, marking as pending to force refresh'
+        );
+        return { snapshot, pending: true };
+      }
+    }
+    
     return { snapshot, pending: invalid };
   } catch (error) {
     logger.warn({ err: error, key }, 'failed to parse cached snapshot');
@@ -344,9 +364,13 @@ export class SharedStaleRefreshMetrics implements StaleRefreshQueueMetricsProvid
 class SnapshotCache<T extends { generatedAt: string }> {
   private refreshPromise: Promise<void> | null = null;
 
+  private refreshStartTime: number | null = null;
+
   private lastGeneratedAt: number | null = null;
 
   private dirty = false;
+
+  private readonly buildTimeoutMs: number;
 
   constructor(
     private readonly store: SnapshotCacheStore,
@@ -355,7 +379,10 @@ class SnapshotCache<T extends { generatedAt: string }> {
     private readonly ttlMs: number,
     private readonly refreshIntervalMs: number,
     private readonly label: string
-  ) {}
+  ) {
+    // Set timeout to 10 minutes for statistics builds to prevent infinite hangs
+    this.buildTimeoutMs = 10 * 60 * 1000;
+  }
 
   public start(): void {
     this.maybeRefresh();
@@ -366,14 +393,30 @@ class SnapshotCache<T extends { generatedAt: string }> {
 
   public async refresh(): Promise<void> {
     if (this.refreshPromise) {
-      return this.refreshPromise;
+      // Check if the refresh has been running too long (stuck)
+      if (this.refreshStartTime && Date.now() - this.refreshStartTime > this.buildTimeoutMs) {
+        logger.warn(
+          {
+            key: this.key,
+            label: this.label,
+            durationMs: Date.now() - this.refreshStartTime
+          },
+          'statistics snapshot build appears stuck, resetting'
+        );
+        this.refreshPromise = null;
+        this.refreshStartTime = null;
+      } else {
+        return this.refreshPromise;
+      }
     }
 
+    this.refreshStartTime = Date.now();
     this.refreshPromise = this.buildAndStore();
     try {
       await this.refreshPromise;
     } finally {
       this.refreshPromise = null;
+      this.refreshStartTime = null;
     }
   }
 
@@ -391,6 +434,27 @@ class SnapshotCache<T extends { generatedAt: string }> {
   ): Promise<{ snapshot: T | null; pending: boolean }> {
     const snapshot = await this.read();
     const stale = this.isStale(now);
+    
+    // Check if refresh is stuck (running too long)
+    const isRefreshStuck =
+      this.refreshPromise !== null &&
+      this.refreshStartTime !== null &&
+      now - this.refreshStartTime > this.buildTimeoutMs;
+    
+    if (isRefreshStuck) {
+      logger.warn(
+        {
+          key: this.key,
+          label: this.label,
+          durationMs: now - this.refreshStartTime
+        },
+        'detected stuck statistics snapshot build, resetting'
+      );
+      this.refreshPromise = null;
+      this.refreshStartTime = null;
+      this.dirty = true; // Mark as dirty to trigger a new build
+    }
+    
     if (stale && !options.skipRefresh) {
       this.maybeRefresh();
     }
@@ -419,11 +483,29 @@ class SnapshotCache<T extends { generatedAt: string }> {
   }
 
   private async buildAndStore(): Promise<void> {
+    const startTime = Date.now();
     try {
-      const snapshot = await this.builder();
+      // Wrap builder in timeout to prevent infinite hangs
+      const snapshot = await Promise.race([
+        this.builder(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Statistics snapshot build timeout')), this.buildTimeoutMs)
+        )
+      ]);
       await this.storeSnapshot(snapshot);
+      const durationMs = Date.now() - startTime;
+      logger.info(
+        { key: this.key, label: this.label, durationMs },
+        'statistics snapshot built and stored successfully'
+      );
     } catch (error) {
-      logger.warn({ err: error, key: this.key, label: this.label }, 'failed to refresh statistics snapshot');
+      const durationMs = Date.now() - startTime;
+      logger.warn(
+        { err: error, key: this.key, label: this.label, durationMs },
+        'failed to refresh statistics snapshot'
+      );
+      // Clear the dirty flag on error to allow retry
+      this.dirty = false;
     }
   }
 
@@ -452,11 +534,27 @@ class SnapshotCache<T extends { generatedAt: string }> {
       return;
     }
     if (this.refreshPromise) {
-      return;
+      // Check if refresh is stuck
+      if (this.refreshStartTime && Date.now() - this.refreshStartTime > this.buildTimeoutMs) {
+        logger.warn(
+          {
+            key: this.key,
+            label: this.label,
+            durationMs: Date.now() - this.refreshStartTime
+          },
+          'statistics snapshot build appears stuck in maybeRefresh, resetting'
+        );
+        this.refreshPromise = null;
+        this.refreshStartTime = null;
+      } else {
+        return;
+      }
     }
 
+    this.refreshStartTime = Date.now();
     this.refreshPromise = this.buildAndStore().finally(() => {
       this.refreshPromise = null;
+      this.refreshStartTime = null;
     });
   }
 }
@@ -991,10 +1089,31 @@ export class RequestStatistics {
       const staleRefreshQueue = this.staleRefreshQueue?.describeQueue();
 
       // Calculate total stale tiles from cache coverage
-      const cacheCoverage = this.cacheMetrics.getCacheCoverage({
-        maxEntries: this.maxCacheCoverageEntries
-      });
-      const totalStaleTiles = cacheCoverage.reduce((sum, entry) => sum + (entry.staleEntries ?? 0), 0);
+      // Wrap in try-catch to prevent hangs from blocking the entire snapshot
+      let totalStaleTiles = 0;
+      try {
+        const cacheCoverageStart = Date.now();
+        const cacheCoverage = this.cacheMetrics.getCacheCoverage({
+          maxEntries: this.maxCacheCoverageEntries
+        });
+        const cacheCoverageDuration = Date.now() - cacheCoverageStart;
+        if (cacheCoverageDuration > 30000) {
+          logger.warn(
+            {
+              durationMs: cacheCoverageDuration,
+              entries: cacheCoverage.length
+            },
+            'getCacheCoverage took longer than expected'
+          );
+        }
+        totalStaleTiles = cacheCoverage.reduce((sum, entry) => sum + (entry.staleEntries ?? 0), 0);
+      } catch (error) {
+        logger.warn(
+          { err: error },
+          'failed to get cache coverage for statistics snapshot, using 0 for totalStaleTiles'
+        );
+        totalStaleTiles = 0;
+      }
 
       return {
         generatedAt,
