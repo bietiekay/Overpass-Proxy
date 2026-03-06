@@ -3,7 +3,7 @@ import type { Redis } from 'ioredis';
 import got from 'got';
 import type { Method, RetryOptions } from 'got';
 
-import type { BoundingBox } from './bbox.js';
+import { hasJsonOutput, type BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
 import type { OverpassResponse } from './store.js';
@@ -734,6 +734,41 @@ interface UpstreamCallOptions {
   }) => void;
 }
 
+const extractInterpreterQuery = (request: FastifyRequest): string | null => {
+  if (request.method === 'GET' || request.method === 'HEAD') {
+    const requestUrl = new URL(request.url, 'http://proxy.local');
+    return requestUrl.searchParams.get('data') ?? requestUrl.searchParams.get('q');
+  }
+
+  if (typeof request.body === 'string') {
+    try {
+      const params = new URLSearchParams(request.body);
+      return params.get('data') ?? params.get('q');
+    } catch {
+      return null;
+    }
+  }
+
+  if (Buffer.isBuffer(request.body)) {
+    try {
+      const params = new URLSearchParams(request.body.toString('utf8'));
+      return params.get('data') ?? params.get('q');
+    } catch {
+      return null;
+    }
+  }
+
+  if (request.body && typeof request.body === 'object') {
+    const body = request.body as Record<string, unknown>;
+    const value = body.data ?? body.q;
+    if (typeof value === 'string') {
+      return value;
+    }
+  }
+
+  return null;
+};
+
 const sleep = async (ms: number): Promise<void> => {
   if (ms <= 0) {
     return;
@@ -792,6 +827,53 @@ const summariseUpstreamBody = (body: string, maxLength = 200): string => {
   return `${compact.slice(0, maxLength - 1)}...`;
 };
 
+const decodeXmlEntities = (value: string): string =>
+  value.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (match, entity: string) => {
+    const normalised = entity.toLowerCase();
+    switch (normalised) {
+      case 'amp':
+        return '&';
+      case 'lt':
+        return '<';
+      case 'gt':
+        return '>';
+      case 'quot':
+        return '"';
+      case 'apos':
+        return "'";
+      default:
+        if (normalised.startsWith('#x')) {
+          const parsed = Number.parseInt(normalised.slice(2), 16);
+          return Number.isFinite(parsed) ? String.fromCodePoint(parsed) : match;
+        }
+        if (normalised.startsWith('#')) {
+          const parsed = Number.parseInt(normalised.slice(1), 10);
+          return Number.isFinite(parsed) ? String.fromCodePoint(parsed) : match;
+        }
+        return match;
+    }
+  });
+
+const parseXmlAttributes = (source: string): Record<string, string> => {
+  const attributes: Record<string, string> = {};
+  const pattern = /([^\s=]+)\s*=\s*("([^"]*)"|'([^']*)')/g;
+  let match: RegExpExecArray | null = pattern.exec(source);
+  while (match) {
+    const [, key, , doubleQuoted, singleQuoted] = match;
+    attributes[key] = decodeXmlEntities(doubleQuoted ?? singleQuoted ?? '');
+    match = pattern.exec(source);
+  }
+  return attributes;
+};
+
+const parseXmlNumber = (value: string | undefined): number | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
 const extractMarkupMessage = (body: string): string | null => {
   const patterns = [
     /<remark\b[^>]*>([\s\S]*?)<\/remark>/i,
@@ -820,6 +902,126 @@ const isMarkupResponse = (body: string, contentTypeHeader: string | undefined): 
   return body.trimStart().startsWith('<');
 };
 
+const parseOverpassXml = (body: string): OverpassResponse | null => {
+  const rootMatch = body.match(/<osm\b([^>]*)>([\s\S]*)<\/osm>/i);
+  if (!rootMatch) {
+    return null;
+  }
+
+  const [, rootAttributesSource, innerBody] = rootMatch;
+  const rootAttributes = parseXmlAttributes(rootAttributesSource);
+  const elements: OverpassResponse['elements'] = [];
+  const elementPattern = /<(node|way|relation)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/\1>)/gi;
+  let elementMatch: RegExpExecArray | null = elementPattern.exec(innerBody);
+
+  while (elementMatch) {
+    const [, type, attributeSource, childSource = ''] = elementMatch;
+    const attributes = parseXmlAttributes(attributeSource);
+    const id = parseXmlNumber(attributes.id);
+    if (id === undefined) {
+      elementMatch = elementPattern.exec(innerBody);
+      continue;
+    }
+
+    const element: OverpassResponse['elements'][number] = {
+      type: type as OverpassResponse['elements'][number]['type'],
+      id
+    };
+
+    if (type === 'node') {
+      const lat = parseXmlNumber(attributes.lat);
+      const lon = parseXmlNumber(attributes.lon);
+      if (lat !== undefined) {
+        element.lat = lat;
+      }
+      if (lon !== undefined) {
+        element.lon = lon;
+      }
+    }
+
+    const tags: Record<string, string> = {};
+    const tagPattern = /<tag\b([^>]*)\/>/gi;
+    let tagMatch: RegExpExecArray | null = tagPattern.exec(childSource);
+    while (tagMatch) {
+      const tagAttributes = parseXmlAttributes(tagMatch[1] ?? '');
+      const key = tagAttributes.k;
+      const value = tagAttributes.v;
+      if (key !== undefined && value !== undefined) {
+        tags[key] = value;
+      }
+      tagMatch = tagPattern.exec(childSource);
+    }
+    if (Object.keys(tags).length > 0) {
+      element.tags = tags;
+    }
+
+    if (type === 'way') {
+      const nodes: number[] = [];
+      const nodePattern = /<nd\b([^>]*)\/>/gi;
+      let nodeMatch: RegExpExecArray | null = nodePattern.exec(childSource);
+      while (nodeMatch) {
+        const nodeAttributes = parseXmlAttributes(nodeMatch[1] ?? '');
+        const ref = parseXmlNumber(nodeAttributes.ref);
+        if (ref !== undefined) {
+          nodes.push(ref);
+        }
+        nodeMatch = nodePattern.exec(childSource);
+      }
+      if (nodes.length > 0) {
+        element.nodes = nodes;
+      }
+    }
+
+    if (type === 'relation') {
+      const members: NonNullable<OverpassResponse['elements'][number]['members']> = [];
+      const memberPattern = /<member\b([^>]*)\/>/gi;
+      let memberMatch: RegExpExecArray | null = memberPattern.exec(childSource);
+      while (memberMatch) {
+        const memberAttributes = parseXmlAttributes(memberMatch[1] ?? '');
+        const memberType = memberAttributes.type;
+        const ref = parseXmlNumber(memberAttributes.ref);
+        if (
+          ref !== undefined &&
+          (memberType === 'node' || memberType === 'way' || memberType === 'relation')
+        ) {
+          members.push({
+            type: memberType,
+            ref,
+            role: memberAttributes.role ?? ''
+          });
+        }
+        memberMatch = memberPattern.exec(childSource);
+      }
+      if (members.length > 0) {
+        element.members = members;
+      }
+    }
+
+    elements.push(element);
+    elementMatch = elementPattern.exec(innerBody);
+  }
+
+  const metaMatch = innerBody.match(/<meta\b([^>]*)\/>/i);
+  const metaAttributes = metaMatch ? parseXmlAttributes(metaMatch[1] ?? '') : {};
+  const response: OverpassResponse = {
+    elements
+  };
+  const version = parseXmlNumber(rootAttributes.version);
+  if (version !== undefined) {
+    response.version = version;
+  }
+  if (rootAttributes.generator) {
+    response.generator = rootAttributes.generator;
+  }
+  if (metaAttributes.osm_base || metaAttributes.areas) {
+    response.osm3s = {
+      ...(metaAttributes.osm_base ? { timestamp_osm_base: metaAttributes.osm_base } : {}),
+      ...(metaAttributes.areas ? { timestamp_areas_base: metaAttributes.areas } : {})
+    };
+  }
+  return response;
+};
+
 const parseUpstreamResponse = (
   body: string,
   upstreamUrl: string,
@@ -830,6 +1032,11 @@ const parseUpstreamResponse = (
     parsed = JSON.parse(body);
   } catch (error) {
     if (isMarkupResponse(body, contentTypeHeader)) {
+      const xmlResponse = parseOverpassXml(body);
+      if (xmlResponse && !extractMarkupMessage(body)) {
+        return xmlResponse;
+      }
+
       const markupMessage = extractMarkupMessage(body) ?? summariseUpstreamBody(body);
       const suffix = markupMessage ? `: ${markupMessage}` : '';
       throw new Error(`Upstream returned markup instead of JSON from ${upstreamUrl}${suffix}`);
@@ -1053,6 +1260,9 @@ export const proxyTransparent = async (
         const start = Date.now();
 
         const interpreterPath = upstreamUrl.pathname.endsWith('/api/interpreter');
+        const interpreterQuery = interpreterPath ? extractInterpreterQuery(request) : null;
+        const requestedJsonResponse =
+          interpreterPath && typeof interpreterQuery === 'string' && hasJsonOutput(interpreterQuery);
         const searchEntries = Array.from(upstreamUrl.searchParams.entries());
         const hasInterpreterQueryPayload = searchEntries.some(
           ([key]) => key === 'data' || key === 'q'
@@ -1224,6 +1434,25 @@ export const proxyTransparent = async (
           },
           'transparent proxy request completed'
         );
+
+        const contentTypeValue = response.headers?.['content-type'];
+        const contentTypeHeader = Array.isArray(contentTypeValue) ? contentTypeValue[0] : contentTypeValue;
+        if (requestedJsonResponse && response.statusCode >= 200 && response.statusCode < 300) {
+          const parsed = parseUpstreamResponse(
+            response.rawBody.toString('utf8'),
+            upstreamUrl.toString(),
+            contentTypeHeader
+          );
+          reply.status(response.statusCode);
+          for (const [key, value] of Object.entries(response.headers)) {
+            if (typeof value === 'string' && key.toLowerCase() !== 'content-type') {
+              reply.header(key, value);
+            }
+          }
+          reply.header('content-type', 'application/json');
+          reply.send(parsed);
+          return;
+        }
 
         reply.status(response.statusCode);
         for (const [key, value] of Object.entries(response.headers)) {

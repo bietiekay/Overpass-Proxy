@@ -18,6 +18,7 @@
 
 ### Fixed
 - Cacheable tile fetches now send canonical `"[out:json][timeout:120];"` queries and explicitly request JSON from upstreams.
+- Cacheable and transparent `out:json` interpreter requests now accept valid Overpass XML upstream responses and normalize them back to JSON for clients, while XML `<remark>`/error payloads still trigger failover and backoff.
 - Upstream tile fetching now treats XML/HTML/text error bodies as upstream failures with clearer diagnostics, allowing failover to the next configured upstream instead of surfacing only a raw JSON parse error.
 - Statistics snapshot refreshes no longer time out on near-global cache datasets just to compute top-level cache totals or stale tile counts.
 

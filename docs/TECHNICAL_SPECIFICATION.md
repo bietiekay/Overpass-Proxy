@@ -84,12 +84,14 @@
   - `createUpstreamMetricsProvider` for statistics integration.【src/upstream.ts】
 - **Key logic:**
   - Builds canonical Overpass query with `node/way/relation` amenity filter and bbox, using `[out:json][timeout:120];` and an explicit `Accept: application/json` upstream header.
+  - If an upstream still answers a valid Overpass XML document for an `out:json` interpreter request, the connector parses the XML into the internal JSON response model so downstream cache assembly and client responses remain JSON-shaped.【src/upstream.ts, src/tests/unit/upstream.test.ts】
   - Retry policies with exponential backoff for retryable status/error codes; avoid retrying 429 responses.【src/upstream.ts】
   - Upstream pool tracks backoff, cooldowns, daily limits; selection avoids blocked or cooling upstreams.【src/upstream.ts, specification.md】
 - **State & lifecycle:**
   - Upstream pool state can be persisted in Redis for continuity (via `UpstreamStateStorage`).【src/upstream.ts】
 - **Failure modes:**
   - Some Overpass upstreams can still return XML/HTML/text bodies for tile fetch failures even when JSON was requested; the connector classifies these as upstream failures, extracts a short diagnostic when possible, and tries the next upstream before surfacing an error.【src/upstream.ts, src/tests/unit/upstream.test.ts】
+  - Valid Overpass XML result documents are not treated as failures; only XML error payloads such as `<remark>` continue to trigger failover/backoff.【src/upstream.ts, src/tests/unit/upstream.test.ts】
   - Upstream errors propagate to caller; interpreter may respond 503 if unresolved tiles remain.【src/interpreter.ts, src/upstream.ts】
 - **Evidence pointers:** `src/upstream.ts`, `specification.md`, `src/tests/unit/upstream.test.ts`.
 

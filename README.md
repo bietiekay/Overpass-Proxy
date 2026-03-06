@@ -44,6 +44,14 @@ The proxy implements the core Overpass API endpoints:
 
 Requests preserve HTTP methods, headers, payloads, and status codes. `/api/interpreter` requires JSON amenity queries with a bounding box; the proxy satisfies the response locally when tiles are cached and fetches amenity tiles upstream on cache misses.
 
+### Upstream response formats
+
+- Cacheable `out:json` tile fetches explicitly ask upstreams for JSON, but some Overpass backends can still answer with valid OSM XML.
+- When an upstream returns valid Overpass XML for an `out:json` interpreter request, the proxy now parses the XML and still returns JSON to the client.
+- XML error payloads such as `<remark>` remain upstream failures. They continue to trigger failover/backoff instead of being treated as successful empty results.
+- The same JSON normalization also applies to transparently proxied `/api/interpreter` requests when the incoming query requests `out:json`.
+- Live check on 2026-03-06 against `https://overpass.private.coffee/api/interpreter`: `out:json` requests returned `HTTP 200` with `Content-Type: application/json`, and `out:xml` requests returned `HTTP 200` with `Content-Type: application/osm3s+xml`. This confirms that the upstream serves real Overpass XML even though the specific `out:json` -> XML fallback was not reproducible during that check.
+
 ## Configuration
 
 Environment variables are read at startup. Defaults are shown below:
@@ -110,6 +118,7 @@ workflow is:
   `UPSTREAM_FAILURE_COOLDOWN_SECONDS`). When the pool is empty only because all upstreams are in backoff, the proxy can
   temporarily replan the same miss into smaller bbox groups using `UPSTREAM_RECOVERY_COARSE_PRECISION` and
   `UPSTREAM_RECOVERY_TARGET_TILES_PER_REQUEST` so the first recovered upstream is hit with lighter refill work.
+- **Response normalization:** if a cacheable upstream answers a valid Overpass XML document instead of JSON, the proxy converts it into the internal Overpass JSON shape before tile clipping and cache persistence. XML error documents with `<remark>`/`<error>` are still treated as failures.
 
 ### Upstream recovery behavior
 

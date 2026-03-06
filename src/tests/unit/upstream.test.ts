@@ -85,6 +85,10 @@ const mockReply = () => {
       reply.statusCode = code;
       return reply as unknown as FastifyReply;
     }),
+    code: vi.fn((code: number) => {
+      reply.statusCode = code;
+      return reply as unknown as FastifyReply;
+    }),
     header: vi.fn((key: string, value: string) => {
       headers[key] = value;
       return reply as unknown as FastifyReply;
@@ -193,30 +197,95 @@ describe('upstream failover', () => {
     }
   });
 
-  it('fails over when an upstream returns XML markup instead of JSON', async () => {
+  it('parses upstream XML responses into the JSON response model', async () => {
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
 
     try {
       const config: AppConfig = { ...baseConfig, upstreamUrls: [...baseConfig.upstreamUrls] };
-      postMock
-        .mockResolvedValueOnce({
-          body: '<?xml version="1.0" encoding="UTF-8"?><osm><remark>runtime error</remark></osm>',
-          headers: { 'content-type': 'text/xml; charset=utf-8' }
-        })
-        .mockResolvedValueOnce({ body: JSON.stringify({ elements: ['json-ok'] }) });
+      postMock.mockResolvedValueOnce({
+        body: `<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="Overpass API">
+  <note>The data included in this document is from www.openstreetmap.org.</note>
+  <meta osm_base="2026-03-06T20:00:00Z" areas="2026-03-06T19:30:00Z" />
+  <node id="1" lat="52.5" lon="13.4">
+    <tag k="amenity" v="toilets" />
+    <tag k="name" v="Cafe &amp; Bar" />
+  </node>
+  <way id="2">
+    <nd ref="1" />
+    <tag k="amenity" v="toilets" />
+  </way>
+  <relation id="3">
+    <member type="way" ref="2" role="outer" />
+    <tag k="amenity" v="toilets" />
+  </relation>
+</osm>`,
+        headers: { 'content-type': 'text/xml; charset=utf-8' }
+      });
 
       const result = await fetchTile(config, bbox, 'toilets');
-      expect(result).toEqual({ elements: ['json-ok'] });
-      expect(postMock).toHaveBeenNthCalledWith(
-        1,
+      expect(result).toEqual({
+        version: 0.6,
+        generator: 'Overpass API',
+        osm3s: {
+          timestamp_osm_base: '2026-03-06T20:00:00Z',
+          timestamp_areas_base: '2026-03-06T19:30:00Z'
+        },
+        elements: [
+          {
+            type: 'node',
+            id: 1,
+            lat: 52.5,
+            lon: 13.4,
+            tags: { amenity: 'toilets', name: 'Cafe & Bar' }
+          },
+          {
+            type: 'way',
+            id: 2,
+            nodes: [1],
+            tags: { amenity: 'toilets' }
+          },
+          {
+            type: 'relation',
+            id: 3,
+            members: [{ type: 'way', ref: 2, role: 'outer' }],
+            tags: { amenity: 'toilets' }
+          }
+        ]
+      });
+      expect(postMock).toHaveBeenCalledTimes(1);
+      expect(postMock).toHaveBeenCalledWith(
         'http://one.example/api/interpreter',
         expect.any(Object)
       );
-      expect(postMock).toHaveBeenNthCalledWith(
-        2,
-        'http://two.example/api/interpreter',
-        expect.any(Object)
-      );
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
+  it('accepts empty upstream XML responses as valid empty results', async () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    try {
+      const config: AppConfig = { ...baseConfig, upstreamUrls: [...baseConfig.upstreamUrls] };
+      postMock.mockResolvedValueOnce({
+        body: `<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="Overpass API">
+  <note>The data included in this document is from www.openstreetmap.org.</note>
+  <meta osm_base="2026-03-06T20:00:00Z" />
+</osm>`,
+        headers: { 'content-type': 'application/xml' }
+      });
+
+      await expect(fetchTile(config, bbox, 'toilets')).resolves.toEqual({
+        version: 0.6,
+        generator: 'Overpass API',
+        osm3s: {
+          timestamp_osm_base: '2026-03-06T20:00:00Z'
+        },
+        elements: []
+      });
+      expect(postMock).toHaveBeenCalledTimes(1);
     } finally {
       randomSpy.mockRestore();
     }
@@ -520,7 +589,7 @@ describe('upstream failover', () => {
 
 describe('proxyTransparent', () => {
   it('re-encodes interpreter GET requests as form POST with client headers', async () => {
-    const rawBody = Buffer.from('ok');
+    const rawBody = Buffer.from(JSON.stringify({ elements: [] }));
     gotMock.mockResolvedValueOnce({
       statusCode: 200,
       headers: { 'content-type': 'application/json' },
@@ -556,14 +625,56 @@ describe('proxyTransparent', () => {
     expect(options.headers['accept-language']).toBe('en-US,en;q=0.9');
     expect(reply.statusCode).toBe(200);
     expect(reply.sent).toBe(true);
-    expect(reply.payload).toBe(rawBody);
+    expect(reply.payload).toEqual({ elements: [] });
+  });
+
+  it('normalises interpreter XML responses to JSON when the client requested out:json', async () => {
+    gotMock.mockResolvedValueOnce({
+      statusCode: 200,
+      headers: { 'content-type': 'application/xml; charset=utf-8', etag: '"upstream-etag"' },
+      rawBody: Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="Overpass API">
+  <meta osm_base="2026-03-06T20:00:00Z" />
+  <node id="1" lat="52.5" lon="13.4">
+    <tag k="amenity" v="toilets" />
+  </node>
+</osm>`)
+    });
+
+    const request = {
+      method: 'GET',
+      url: '/api/interpreter?data=[out:json];node(1,1,2,2);out;',
+      headers: {
+        accept: 'application/json'
+      },
+      ip: '127.0.0.1'
+    };
+
+    const reply = mockReply();
+
+    await proxyTransparent(request as unknown as FastifyRequest, reply as FastifyReply, {
+      ...baseConfig,
+      upstreamUrls: ['http://one.example/api/interpreter']
+    });
+
+    expect(reply.statusCode).toBe(200);
+    expect(reply.headers['content-type']).toBe('application/json');
+    expect(reply.headers.etag).toBe('"upstream-etag"');
+    expect(reply.payload).toEqual({
+      version: 0.6,
+      generator: 'Overpass API',
+      osm3s: {
+        timestamp_osm_base: '2026-03-06T20:00:00Z'
+      },
+      elements: [{ type: 'node', id: 1, lat: 52.5, lon: 13.4, tags: { amenity: 'toilets' } }]
+    });
   });
 
   it('adds missing interpreter browser headers when absent', async () => {
-    const rawBody = Buffer.from('ok');
+    const rawBody = Buffer.from(JSON.stringify({ elements: [] }));
     gotMock.mockResolvedValueOnce({
       statusCode: 200,
-      headers: {},
+      headers: { 'content-type': 'application/json' },
       rawBody
     });
 
@@ -591,5 +702,6 @@ describe('proxyTransparent', () => {
     expect(options.headers['sec-ch-ua']).toContain('Chromium');
     expect(options.headers['sec-fetch-mode']).toBe('cors');
     expect(options.headers['priority']).toBe('u=1, i');
+    expect(reply.payload).toEqual({ elements: [] });
   });
 });
