@@ -11,6 +11,10 @@
 - Transparent proxy requests keep fail-fast upstream behavior instead of entering the availability-wait loop.
 - Integration test defaults now use short backoff/probe windows so shared test servers do not stay blocked behind stale upstream state.
 
+### Fixed
+- Cacheable tile fetches now send canonical `"[out:json][timeout:120];"` queries and explicitly request JSON from upstreams.
+- Upstream tile fetching now treats XML/HTML/text error bodies as upstream failures with clearer diagnostics, allowing failover to the next configured upstream instead of surfacing only a raw JSON parse error.
+
 ## 1.5.0 - 2026-03-06
 
 ### Added

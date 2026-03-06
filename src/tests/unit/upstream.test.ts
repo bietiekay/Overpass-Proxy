@@ -4,6 +4,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import type { AppConfig } from '../../config.js';
 import {
+  buildTileQuery,
   fetchTile,
   createUpstreamMetricsProvider,
   proxyTransparent,
@@ -111,6 +112,10 @@ afterEach(() => {
 });
 
 describe('upstream failover', () => {
+  it('builds tile queries with canonical Overpass settings syntax', () => {
+    expect(buildTileQuery(bbox, 'toilets')).toMatch(/^\[out:json\]\[timeout:120\];/);
+  });
+
   it('avoids retrying rate-limited responses and uses backoff delay', async () => {
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
     try {
@@ -176,7 +181,41 @@ describe('upstream failover', () => {
       expect(postMock).toHaveBeenCalledTimes(1);
       expect(postMock).toHaveBeenCalledWith(
         'http://one.example/api/interpreter',
-        expect.objectContaining({ headers: expect.any(Object) })
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Accept: 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded'
+          })
+        })
+      );
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
+  it('fails over when an upstream returns XML markup instead of JSON', async () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    try {
+      const config: AppConfig = { ...baseConfig, upstreamUrls: [...baseConfig.upstreamUrls] };
+      postMock
+        .mockResolvedValueOnce({
+          body: '<?xml version="1.0" encoding="UTF-8"?><osm><remark>runtime error</remark></osm>',
+          headers: { 'content-type': 'text/xml; charset=utf-8' }
+        })
+        .mockResolvedValueOnce({ body: JSON.stringify({ elements: ['json-ok'] }) });
+
+      const result = await fetchTile(config, bbox, 'toilets');
+      expect(result).toEqual({ elements: ['json-ok'] });
+      expect(postMock).toHaveBeenNthCalledWith(
+        1,
+        'http://one.example/api/interpreter',
+        expect.any(Object)
+      );
+      expect(postMock).toHaveBeenNthCalledWith(
+        2,
+        'http://two.example/api/interpreter',
+        expect.any(Object)
       );
     } finally {
       randomSpy.mockRestore();
@@ -255,6 +294,25 @@ describe('upstream failover', () => {
       for (const entry of payload.upstreams) {
         expect(entry.reason).toContain('backoff');
       }
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
+  it('surfaces a helpful error when every upstream returns markup', async () => {
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+
+    try {
+      const config: AppConfig = { ...baseConfig, upstreamUrls: [...baseConfig.upstreamUrls] };
+      postMock.mockResolvedValue({
+        body: '<?xml version="1.0" encoding="UTF-8"?><osm><remark>runtime error: query failed</remark></osm>',
+        headers: { 'content-type': 'application/xml' }
+      });
+
+      await expect(fetchTile(config, bbox, 'toilets')).rejects.toThrow(
+        'Upstream returned markup instead of JSON from http://two.example/api/interpreter: runtime error: query failed'
+      );
+      expect(postMock).toHaveBeenCalledTimes(config.upstreamUrls.length);
     } finally {
       randomSpy.mockRestore();
     }

@@ -12,8 +12,7 @@ import type { UpstreamMetricsProvider, UpstreamStatisticsEntry } from './stats.j
 
 export const buildTileQuery = (bbox: BoundingBox, amenity: string): string => {
   const escapedAmenity = amenity.replace(/"/g, '\\"');
-  return `[
-  out:json][timeout:120];
+  return `[out:json][timeout:120];
 (
   node["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
   way["amenity"="${escapedAmenity}"](${bbox.south},${bbox.west},${bbox.north},${bbox.east});
@@ -734,6 +733,81 @@ const sleep = async (ms: number): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, ms));
 };
 
+const summariseUpstreamBody = (body: string, maxLength = 200): string => {
+  const compact = body.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return '';
+  }
+
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+
+  return `${compact.slice(0, maxLength - 1)}...`;
+};
+
+const extractMarkupMessage = (body: string): string | null => {
+  const patterns = [
+    /<remark\b[^>]*>([\s\S]*?)<\/remark>/i,
+    /<error\b[^>]*>([\s\S]*?)<\/error>/i,
+    /<message\b[^>]*>([\s\S]*?)<\/message>/i,
+    /<title\b[^>]*>([\s\S]*?)<\/title>/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = body.match(pattern);
+    const candidate = match?.[1]?.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return null;
+};
+
+const isMarkupResponse = (body: string, contentTypeHeader: string | undefined): boolean => {
+  const contentType = contentTypeHeader?.toLowerCase() ?? '';
+  if (contentType.includes('xml') || contentType.includes('html')) {
+    return true;
+  }
+
+  return body.trimStart().startsWith('<');
+};
+
+const parseUpstreamResponse = (
+  body: string,
+  upstreamUrl: string,
+  contentTypeHeader?: string
+): OverpassResponse => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch (error) {
+    if (isMarkupResponse(body, contentTypeHeader)) {
+      const markupMessage = extractMarkupMessage(body) ?? summariseUpstreamBody(body);
+      const suffix = markupMessage ? `: ${markupMessage}` : '';
+      throw new Error(`Upstream returned markup instead of JSON from ${upstreamUrl}${suffix}`);
+    }
+
+    const preview = summariseUpstreamBody(body);
+    const suffix = preview ? ` Body preview: ${preview}` : '';
+    throw new Error(
+      `Failed to parse upstream response from ${upstreamUrl}: ${(error as Error).message}${suffix}`
+    );
+  }
+
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as OverpassResponse).elements)) {
+    const remark =
+      typeof (parsed as { remark?: unknown }).remark === 'string'
+        ? (parsed as { remark: string }).remark.trim()
+        : '';
+    const suffix = remark ? `: ${remark}` : '';
+    throw new Error(`Upstream response missing elements array from ${upstreamUrl}${suffix}`);
+  }
+
+  return parsed as OverpassResponse;
+};
+
 const withUpstream = async <T>(
   config: AppConfig,
   optionsOrFn: UpstreamCallOptions | ((baseUrl: string) => Promise<T>),
@@ -897,27 +971,17 @@ export const fetchTile = async (
       const response = await got.post(upstreamUrl, {
         body: new URLSearchParams({ data: query }).toString(),
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json'
         },
         timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 },
         throwHttpErrors: true,
         retry: buildUpstreamRetryOptions(true)
       });
       logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(response.body);
-      } catch (error) {
-        throw new Error(
-          `Failed to parse upstream response from ${upstreamUrl}: ${(error as Error).message}`
-        );
-      }
-
-      if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as OverpassResponse).elements)) {
-        throw new Error(`Upstream response missing elements array from ${upstreamUrl}`);
-      }
-
-      return parsed as OverpassResponse;
+      const contentTypeValue = response.headers?.['content-type'];
+      const contentTypeHeader = Array.isArray(contentTypeValue) ? contentTypeValue[0] : contentTypeValue;
+      return parseUpstreamResponse(response.body, upstreamUrl, contentTypeHeader);
     }
   );
 };
