@@ -6,7 +6,7 @@ import { extractBoundingBox } from '../../bbox.js';
 import { buildServer } from '../../index.js';
 import { tileKey, tilesForBoundingBox } from '../../tiling.js';
 import * as upstream from '../../upstream.js';
-import { RequestStatistics } from '../../stats.js';
+import { RequestStatistics, STATISTICS_SNAPSHOT_KEY } from '../../stats.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 import { createMockOverpass } from './mock-overpass.js';
 import { createTestEnvironment } from './testcontainers.js';
@@ -20,18 +20,42 @@ const uppercaseAmenityQuery = '[out:json];node["amenity"="TOILETS"](52.5,13.3,52
 const waitForCoverage = async (path: string) => {
   let lastResponse: Response | undefined;
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    // eslint-disable-next-line no-await-in-loop
     const response = await request(baseUrl).get(path);
     lastResponse = response;
     if (response.statusCode === 200) {
       return response;
     }
     expect(response.statusCode).toBe(202);
-    // eslint-disable-next-line no-await-in-loop
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
   throw new Error(`coverage not ready at ${path}, last status ${lastResponse?.statusCode}`);
+};
+
+const waitForStatisticsReady = async (
+  url: string,
+  previousGeneratedAt: string
+): Promise<Response> => {
+  let lastResponse: Response | undefined;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const response = await request(url).get('/api/statistics');
+    lastResponse = response;
+    if (
+      response.statusCode === 200 &&
+      response.body.pending !== true &&
+      response.body.generatedAt &&
+      response.body.generatedAt !== previousGeneratedAt
+    ) {
+      return response;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(
+    `statistics did not become ready; last status ${lastResponse?.statusCode}, body ${JSON.stringify(
+      lastResponse?.body
+    )}`
+  );
 };
 
 let stopEnv: (() => Promise<void>) | undefined;
@@ -1149,10 +1173,6 @@ describe('integration', () => {
       // After successful fetch, tiles are available, so status may be HIT or MISS
       // depending on implementation - let's check it's one of the valid states
       expect(['MISS', 'HIT']).toContain(missResponse.headers['x-cache']);
-      
-      // If it's HIT, that's because tiles were successfully fetched and are now cached
-      // For the test, we'll verify the second request is definitely HIT
-      const cacheStatus = missResponse.headers['x-cache'] as string;
 
       // HIT - second request (should be from cache, no new upstream calls)
       const hitsBeforeSecond = env.hits.length;
@@ -1313,9 +1333,8 @@ describe('transparent proxy', () => {
 
   it('preserves POST body when proxying non-cacheable requests', async () => {
     const mockOverpass = createMockOverpass();
-    let capturedBody: string | undefined;
     // Use setResponder to capture the request without overriding the route
-    mockOverpass.setResponder((bbox, amenity) => {
+    mockOverpass.setResponder((_bbox, _amenity) => {
       // This won't capture body directly, so we'll check hits instead
       return undefined; // Let default handler run
     });
@@ -1671,9 +1690,7 @@ describe('transparent proxy', () => {
 
   it('handles OPTIONS preflight requests', async () => {
     const mockOverpass = createMockOverpass();
-    let capturedMethod: string | undefined;
-    mockOverpass.app.all('/api/status', async (req, reply) => {
-      capturedMethod = req.method;
+    mockOverpass.app.all('/api/status', async (_req, reply) => {
       reply.send({ status: 'ok' });
     });
     await mockOverpass.start(0);
@@ -2004,6 +2021,56 @@ describe('statistics edge cases', () => {
       if (response.statusCode === 202) {
         expect(response.body.pending).toBe(true);
       }
+    } finally {
+      await app.close();
+      await env.stop();
+    }
+  });
+
+  it('self-heals stale statistics snapshots instead of staying pending', async () => {
+    const env = await createTestEnvironment();
+    await env.redis.flushall();
+
+    // This behavior is specific to worker-mode snapshot reading. In-memory Redis tests
+    // run inline mode and bypass readCachedSnapshot aging checks.
+    if (env.redis instanceof InMemoryRedis) {
+      await env.stop();
+      return;
+    }
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls: env.upstreamUrls,
+        tilePrecision: 5
+      },
+      redisClient: env.redis
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      const staleGeneratedAt = '2020-01-01T00:00:00.000Z';
+      await env.redis.set(
+        STATISTICS_SNAPSHOT_KEY,
+        JSON.stringify({ generatedAt: staleGeneratedAt, totalRequests: 0 })
+      );
+
+      const firstResponse = await request(url).get('/api/statistics');
+      expect([200, 202]).toContain(firstResponse.statusCode);
+      if (firstResponse.statusCode === 202) {
+        expect(firstResponse.body.pending).toBe(true);
+      }
+
+      const readyResponse =
+        firstResponse.statusCode === 200 && firstResponse.body.generatedAt !== staleGeneratedAt
+          ? firstResponse
+          : await waitForStatisticsReady(url, staleGeneratedAt);
+      expect(readyResponse.body.pending).not.toBe(true);
+      expect(readyResponse.body.generatedAt).not.toBe(staleGeneratedAt);
+      expect(typeof readyResponse.body.totalRequests).toBe('number');
     } finally {
       await app.close();
       await env.stop();
@@ -2999,7 +3066,6 @@ describe('upstream retry behavior', () => {
 
     try {
       primaryUpstream.setResponder?.(() => ({ status: 429 }));
-      const initialPrimaryHits = primaryUpstream.hits.length;
       const initialSecondaryHits = secondaryUpstream.hits.length;
 
       const response = await request(url)
@@ -3118,7 +3184,6 @@ describe('upstream retry behavior', () => {
 
       // Reset primary to succeed, but it should be in cooldown
       primaryUpstream.resetResponder?.();
-      const secondaryHitsBeforeSecond = secondaryUpstream.hits.length;
 
       // Second request should still use secondary (primary in cooldown)
       const secondResponse = await request(url)

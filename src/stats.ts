@@ -138,6 +138,7 @@ const MIN_STATS_COVERAGE_GEOHASH_PRECISION = 3;
 export const STATISTICS_SNAPSHOT_KEY = 'statistics:snapshot';
 export const CACHE_COVERAGE_SNAPSHOT_KEY = 'statistics:cacheCoverageSnapshot';
 export const GEOHASH_COVERAGE_SNAPSHOT_KEY = 'statistics:geohashCoverageSnapshot';
+const MIN_REFRESH_TRIGGER_INTERVAL_MS = 5_000;
 
 const yieldToEventLoop = async (): Promise<void> =>
   new Promise((resolve) => setImmediateCallback(resolve));
@@ -362,7 +363,7 @@ export class SharedStaleRefreshMetrics implements StaleRefreshQueueMetricsProvid
 }
 
 class SnapshotCache<T extends { generatedAt: string }> {
-  private refreshPromise: Promise<void> | null = null;
+  private refreshPromise: Promise<boolean> | null = null;
 
   private refreshStartTime: number | null = null;
 
@@ -371,6 +372,8 @@ class SnapshotCache<T extends { generatedAt: string }> {
   private dirty = false;
 
   private readonly buildTimeoutMs: number;
+
+  private refreshFailureCount = 0;
 
   constructor(
     private readonly store: SnapshotCacheStore,
@@ -391,7 +394,7 @@ class SnapshotCache<T extends { generatedAt: string }> {
     }
   }
 
-  public async refresh(): Promise<void> {
+  public async refresh(): Promise<boolean> {
     if (this.refreshPromise) {
       // Check if the refresh has been running too long (stuck)
       if (this.refreshStartTime && Date.now() - this.refreshStartTime > this.buildTimeoutMs) {
@@ -399,7 +402,10 @@ class SnapshotCache<T extends { generatedAt: string }> {
           {
             key: this.key,
             label: this.label,
-            durationMs: Date.now() - this.refreshStartTime
+            target: this.label,
+            durationMs: Date.now() - this.refreshStartTime,
+            ageMs: this.currentSnapshotAgeMs(),
+            failureCount: this.refreshFailureCount
           },
           'statistics snapshot build appears stuck, resetting'
         );
@@ -413,7 +419,7 @@ class SnapshotCache<T extends { generatedAt: string }> {
     this.refreshStartTime = Date.now();
     this.refreshPromise = this.buildAndStore();
     try {
-      await this.refreshPromise;
+      return await this.refreshPromise;
     } finally {
       this.refreshPromise = null;
       this.refreshStartTime = null;
@@ -447,7 +453,10 @@ class SnapshotCache<T extends { generatedAt: string }> {
         {
           key: this.key,
           label: this.label,
-          durationMs: now - refreshStartTime
+          target: this.label,
+          durationMs: now - refreshStartTime,
+          ageMs: this.currentSnapshotAgeMs(now),
+          failureCount: this.refreshFailureCount
         },
         'detected stuck statistics snapshot build, resetting'
       );
@@ -483,7 +492,7 @@ class SnapshotCache<T extends { generatedAt: string }> {
     }
   }
 
-  private async buildAndStore(): Promise<void> {
+  private async buildAndStore(): Promise<boolean> {
     const startTime = Date.now();
     try {
       // Wrap builder in timeout to prevent infinite hangs
@@ -494,19 +503,35 @@ class SnapshotCache<T extends { generatedAt: string }> {
         )
       ]);
       await this.storeSnapshot(snapshot);
+      this.refreshFailureCount = 0;
       const durationMs = Date.now() - startTime;
       logger.info(
-        { key: this.key, label: this.label, durationMs },
+        {
+          key: this.key,
+          label: this.label,
+          target: this.label,
+          durationMs,
+          ageMs: this.currentSnapshotAgeMs()
+        },
         'statistics snapshot built and stored successfully'
       );
+      return true;
     } catch (error) {
+      this.refreshFailureCount += 1;
       const durationMs = Date.now() - startTime;
       logger.warn(
-        { err: error, key: this.key, label: this.label, durationMs },
+        {
+          err: error,
+          key: this.key,
+          label: this.label,
+          target: this.label,
+          durationMs,
+          ageMs: this.currentSnapshotAgeMs(),
+          failureCount: this.refreshFailureCount
+        },
         'failed to refresh statistics snapshot'
       );
-      // Clear the dirty flag on error to allow retry
-      this.dirty = false;
+      return false;
     }
   }
 
@@ -541,7 +566,10 @@ class SnapshotCache<T extends { generatedAt: string }> {
           {
             key: this.key,
             label: this.label,
-            durationMs: Date.now() - this.refreshStartTime
+            target: this.label,
+            durationMs: Date.now() - this.refreshStartTime,
+            ageMs: this.currentSnapshotAgeMs(),
+            failureCount: this.refreshFailureCount
           },
           'statistics snapshot build appears stuck in maybeRefresh, resetting'
         );
@@ -557,6 +585,13 @@ class SnapshotCache<T extends { generatedAt: string }> {
       this.refreshPromise = null;
       this.refreshStartTime = null;
     });
+  }
+
+  private currentSnapshotAgeMs(now = Date.now()): number | undefined {
+    if (!this.lastGeneratedAt) {
+      return undefined;
+    }
+    return Math.max(0, now - this.lastGeneratedAt);
   }
 }
 
@@ -961,11 +996,16 @@ export class RequestStatistics {
       if (needsRefresh) {
         // Trigger refresh asynchronously without waiting
         setImmediateCallback(() => {
-          void this.statisticsCache.refresh().then(() => {
-            this.snapshotRevision = this.revision;
-          }).catch((error) => {
-            logger.warn({ err: error }, 'failed to refresh statistics snapshot in background');
-          });
+          void this.statisticsCache
+            .refresh()
+            .then((succeeded) => {
+              if (succeeded) {
+                this.snapshotRevision = this.revision;
+              }
+            })
+            .catch((error) => {
+              logger.warn({ err: error }, 'failed to refresh statistics snapshot in background');
+            });
         });
       }
       return snapshot;
@@ -1233,7 +1273,7 @@ export class RequestStatistics {
     return snapshot;
   }
 
-  private async captureGeohashCoverageState(now: number): Promise<AmenityCoverageState[]> {
+  private async captureGeohashCoverageState(_now: number): Promise<AmenityCoverageState[]> {
     return this.runExclusive(async () => {
       return [...this.amenityStats.values()].map((stats) => ({
         amenity: stats.amenity,
@@ -1387,6 +1427,14 @@ export type StatisticsRefreshTarget =
   | 'cacheCoverage'
   | 'geohashCoverage';
 
+type RefreshThrottleTarget = Exclude<StatisticsRefreshTarget, 'all'>;
+
+const REFRESH_THROTTLE_TARGETS: RefreshThrottleTarget[] = [
+  'statistics',
+  'cacheCoverage',
+  'geohashCoverage'
+];
+
 export interface StatisticsWorkerOptions {
   config: AppConfig;
   redis: Redis;
@@ -1423,6 +1471,20 @@ export class StatisticsWorkerClient {
   private readonly redis: Redis;
 
   private pendingRecordPosts = 0;
+
+  private readonly refreshCooldownMs = MIN_REFRESH_TRIGGER_INTERVAL_MS;
+
+  private readonly lastRefreshTriggerAt: Record<RefreshThrottleTarget, number> = {
+    statistics: 0,
+    cacheCoverage: 0,
+    geohashCoverage: 0
+  };
+
+  private readonly suppressedRefreshCount: Record<RefreshThrottleTarget, number> = {
+    statistics: 0,
+    cacheCoverage: 0,
+    geohashCoverage: 0
+  };
 
   constructor(options: StatisticsWorkerOptions) {
     const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
@@ -1540,6 +1602,62 @@ export class StatisticsWorkerClient {
     });
   }
 
+  private static parseSnapshotAgeMs(
+    snapshot: { generatedAt: string } | null,
+    now: number
+  ): number | undefined {
+    if (!snapshot) {
+      return undefined;
+    }
+    const generatedAt = Date.parse(snapshot.generatedAt);
+    if (!Number.isFinite(generatedAt)) {
+      return undefined;
+    }
+    return Math.max(0, now - generatedAt);
+  }
+
+  private getAffectedRefreshTargets(target: StatisticsRefreshTarget): RefreshThrottleTarget[] {
+    switch (target) {
+      case 'statistics':
+        return ['statistics'];
+      case 'cacheCoverage':
+      case 'geohashCoverage':
+        return ['cacheCoverage', 'geohashCoverage'];
+      case 'all':
+      default:
+        return REFRESH_THROTTLE_TARGETS;
+    }
+  }
+
+  private consumeRefreshBudget(
+    target: StatisticsRefreshTarget,
+    now: number
+  ): { allowed: boolean; waitMs: number; affectedTargets: RefreshThrottleTarget[] } {
+    const affectedTargets = this.getAffectedRefreshTargets(target);
+    let waitMs = 0;
+
+    for (const affectedTarget of affectedTargets) {
+      const nextAllowedAt = this.lastRefreshTriggerAt[affectedTarget] + this.refreshCooldownMs;
+      if (now < nextAllowedAt) {
+        waitMs = Math.max(waitMs, nextAllowedAt - now);
+      }
+    }
+
+    if (waitMs > 0) {
+      for (const affectedTarget of affectedTargets) {
+        this.suppressedRefreshCount[affectedTarget] += 1;
+      }
+      return { allowed: false, waitMs, affectedTargets };
+    }
+
+    for (const affectedTarget of affectedTargets) {
+      this.lastRefreshTriggerAt[affectedTarget] = now;
+      this.suppressedRefreshCount[affectedTarget] = 0;
+    }
+
+    return { allowed: true, waitMs: 0, affectedTargets };
+  }
+
   public recordRequest(payload: RecordRequestOptions): void {
     if (!this.useWorker) {
       void this.readyPromise
@@ -1568,21 +1686,56 @@ export class StatisticsWorkerClient {
       });
   }
 
-  public refresh(target: StatisticsRefreshTarget = 'all'): void {
+  public refresh(
+    target: StatisticsRefreshTarget = 'all',
+    reason = 'manual',
+    metadata: Record<string, unknown> = {}
+  ): void {
+    const now = Date.now();
+    const budget = this.consumeRefreshBudget(target, now);
+    if (!budget.allowed) {
+      const primaryTarget = budget.affectedTargets[0];
+      if (
+        primaryTarget &&
+        (this.suppressedRefreshCount[primaryTarget] === 1 ||
+          this.suppressedRefreshCount[primaryTarget] % 25 === 0)
+      ) {
+        logger.warn(
+          {
+            target,
+            affectedTargets: budget.affectedTargets,
+            reason,
+            waitMs: budget.waitMs,
+            cooldownMs: this.refreshCooldownMs,
+            suppressedCount: this.suppressedRefreshCount[primaryTarget],
+            ...metadata
+          },
+          'statistics refresh request skipped due to cooldown'
+        );
+      }
+      return;
+    }
+
     if (!this.useWorker) {
       void this.readyPromise
         .then(async () => {
           if (!this.inlineStatistics) return;
           switch (target) {
             case 'statistics':
+              this.inlineStatistics.markStatisticsDirty();
               await this.inlineStatistics.getSnapshot();
               return;
             case 'cacheCoverage':
             case 'geohashCoverage':
+              this.inlineStatistics.markCacheCoverageDirty();
+              this.inlineStatistics.markGeohashCoverageDirty();
               await this.inlineStatistics.refreshCoverageCaches();
               return;
             case 'all':
             default:
+              this.inlineStatistics.markStatisticsDirty();
+              this.inlineStatistics.markCacheCoverageDirty();
+              this.inlineStatistics.markGeohashCoverageDirty();
               await Promise.all([
                 this.inlineStatistics.getSnapshot(),
                 this.inlineStatistics.refreshCoverageCaches()
@@ -1590,7 +1743,7 @@ export class StatisticsWorkerClient {
           }
         })
         .catch((error) => {
-          logger.warn({ err: error }, 'failed to refresh inline statistics');
+          logger.warn({ err: error, target, reason, ...metadata }, 'failed to refresh inline statistics');
         });
       return;
     }
@@ -1605,7 +1758,10 @@ export class StatisticsWorkerClient {
         this.worker.postMessage(command);
       })
       .catch((error) => {
-        logger.warn({ err: error }, 'failed to post refresh command to statistics worker');
+        logger.warn(
+          { err: error, target, reason, ...metadata },
+          'failed to post refresh command to statistics worker'
+        );
       });
   }
 
@@ -1752,6 +1908,11 @@ export class StatisticsWorkerClient {
       { refreshIntervalMs: this.refreshIntervalMs }
     );
 
+    if (result.pending) {
+      const ageMs = StatisticsWorkerClient.parseSnapshotAgeMs(result.snapshot, now);
+      this.refresh('statistics', 'statistics snapshot pending', ageMs !== undefined ? { ageMs } : {});
+    }
+
     return result;
   }
 
@@ -1770,7 +1931,8 @@ export class StatisticsWorkerClient {
     );
 
     if (result.pending) {
-      this.refresh('cacheCoverage');
+      const ageMs = StatisticsWorkerClient.parseSnapshotAgeMs(result.snapshot, now);
+      this.refresh('cacheCoverage', 'cache coverage snapshot pending', ageMs !== undefined ? { ageMs } : {});
     }
 
     if (result.snapshot) {
@@ -1795,7 +1957,12 @@ export class StatisticsWorkerClient {
     );
 
     if (result.pending) {
-      this.refresh('geohashCoverage');
+      const ageMs = StatisticsWorkerClient.parseSnapshotAgeMs(result.snapshot, now);
+      this.refresh(
+        'geohashCoverage',
+        'geohash coverage snapshot pending',
+        ageMs !== undefined ? { ageMs } : {}
+      );
     }
 
     if (result.snapshot) {

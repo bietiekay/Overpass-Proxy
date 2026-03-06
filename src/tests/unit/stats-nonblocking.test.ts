@@ -1,7 +1,6 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import type { BoundingBox } from '../../bbox.js';
-import { tilesForBoundingBox } from '../../tiling.js';
 import {
   type PersistedStatisticsState,
   type StatisticsStorage,

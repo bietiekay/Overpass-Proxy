@@ -100,9 +100,7 @@ describe('RequestStatistics', () => {
 
   it('includes stale refresh queue details when a provider is supplied', async () => {
     const storage = new InMemoryStatisticsStorage();
-    let describeCalls = 0;
     const describeQueue = () => {
-      describeCalls += 1;
       return {
       queuedRequests: 1,
       queuedTileGroups: 2,
@@ -464,5 +462,59 @@ describe('RequestStatistics', () => {
     const snapshot = await stats.getSnapshot();
     expect('cacheCoverage' in snapshot).toBe(false);
     expect('geohashCoverage' in snapshot).toBe(false);
+  });
+
+  it('retries statistics snapshot refresh after a transient build failure', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    let describeCalls = 0;
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => []
+      },
+      storage,
+      {
+        describeUpstreams: () => {
+          describeCalls += 1;
+          if (describeCalls === 2) {
+            throw new Error('transient upstream metrics failure');
+          }
+          return [];
+        }
+      }
+    );
+
+    const initial = await stats.getSnapshot(new Date('2024-01-01T10:00:00Z').getTime());
+
+    await stats.recordRequest({
+      amenity: 'toilets',
+      clientIp: '1.1.1.1',
+      bbox,
+      cacheStatus: 'HIT',
+      tileCount: 1,
+      timestamp: new Date('2024-01-01T11:00:00Z').getTime()
+    });
+
+    // Trigger background refresh; first attempt fails.
+    const stale = await stats.getSnapshot(new Date('2024-01-01T11:01:00Z').getTime());
+    expect(stale.generatedAt).toBe(initial.generatedAt);
+
+    // Allow the failed refresh attempt to settle before triggering retry.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    let refreshed = await stats.getSnapshot(new Date('2024-01-01T11:02:00Z').getTime());
+    let attempts = 0;
+    while (refreshed.generatedAt === initial.generatedAt && attempts < 50) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      refreshed = await stats.getSnapshot(new Date('2024-01-01T11:02:00Z').getTime());
+      attempts += 1;
+    }
+
+    expect(refreshed.generatedAt).not.toBe(initial.generatedAt);
+    expect(refreshed.totalRequests).toBe(1);
+    expect(describeCalls).toBeGreaterThanOrEqual(3);
   });
 });
