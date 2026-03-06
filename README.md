@@ -150,6 +150,8 @@ This starts the proxy along with Redis and a mock Overpass service used for inte
 
 The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, while `GET /api/statistics/cacheCoverage/area` returns cache coverage scoped to a bounding box at a requested geohash precision for zoomed-in maps. Per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
+Statistics snapshots now self-heal when cached payloads age out: a pending read from `/api/statistics` triggers an asynchronous rebuild in the background instead of remaining indefinitely pending. Refresh triggers are throttled per target to protect interpreter request latency during repeated dashboard polling.
+
 Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities.
 
 ### Cache invalidation tool
@@ -234,12 +236,14 @@ The test suite is designed to work both with and without Docker:
 - **Watch (`npm run test:watch`)** – same as above but in watch mode for quick iteration.
 - **Docker-backed (`npm run test:docker`)** – opts into Testcontainers so Redis runs inside Docker when available.
 - **Coverage (`npm run test:ci`)** – default non-Docker execution with coverage reporting.
+- **Statistics latency gate (`npm run test:perf:statistics`)** – compares `/api/interpreter` p95 latency at baseline vs. while statistics refresh is continuously triggered, and fails if the delta exceeds the configured budget (default `10ms`, configurable with `PERF_MAX_P95_DELTA_MS`).
 
 ```bash
 npm test             # unit + integration without Docker
 npm run test:watch   # watch mode without Docker
 npm run test:docker  # run the suite with Docker dependencies
 npm run test:ci      # coverage-enabled run without Docker
+npm run test:perf:statistics # p95 delta gate for stats refresh impact
 ```
 
 ## Example requests

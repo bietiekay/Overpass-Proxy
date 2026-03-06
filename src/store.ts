@@ -306,7 +306,7 @@ class TilePresenceCache {
 
     return new Promise((resolve) => {
       let settled = false;
-      let timeout: NodeJS.Timeout | undefined;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
 
       const complete = () => {
         if (settled) {

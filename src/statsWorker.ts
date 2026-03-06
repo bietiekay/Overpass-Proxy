@@ -77,6 +77,7 @@ const bootstrap = async (): Promise<void> => {
     );
 
     const refreshStatisticsSnapshot = async (): Promise<void> => {
+      statistics.markStatisticsDirty();
       await statistics.getSnapshot();
     };
 
@@ -95,6 +96,7 @@ const bootstrap = async (): Promise<void> => {
     const handleRefresh = async (target: StatisticsRefreshTarget): Promise<void> => {
       switch (target) {
         case 'statistics':
+          statistics.markStatisticsDirty();
           await statistics.getSnapshot();
           return;
         case 'cacheCoverage':
@@ -103,6 +105,7 @@ const bootstrap = async (): Promise<void> => {
           return;
         case 'all':
         default:
+          statistics.markStatisticsDirty();
           await Promise.all([statistics.getSnapshot(), statistics.refreshCoverageCaches()]);
           return;
       }
