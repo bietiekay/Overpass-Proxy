@@ -69,6 +69,7 @@ const buildUpstreamRetryOptions = (allowPost: boolean): Partial<RetryOptions> =>
 interface UpstreamState {
   backoffUntil: number;
   backoffAttempts: number;
+  backoffReason?: string;
   blockedUntil: number;
   requestsToday: number;
   dayStart: number;
@@ -175,6 +176,7 @@ class UpstreamPool {
     return {
       backoffUntil: 0,
       backoffAttempts: 0,
+      backoffReason: undefined,
       blockedUntil: 0,
       requestsToday: 0,
       dayStart,
@@ -381,7 +383,7 @@ class UpstreamPool {
     } catch (error) {
       if (error instanceof Error && error.name === 'UpstreamProbeTimeout') {
         logger.debug({ err: error, upstream: url, timeoutMs: this.probeTimeoutMs }, 'probe timed out');
-        this.markFailure(url);
+        this.markFailure(url, `probe timed out after ${this.probeTimeoutMs}ms`);
       } else {
         logger.debug({ err: error, upstream: url }, 'probe failed');
       }
@@ -413,22 +415,25 @@ class UpstreamPool {
       if (response.statusCode < 500 && response.statusCode !== 429) {
         state.backoffAttempts = 0;
         state.backoffUntil = 0;
+        state.backoffReason = undefined;
         state.ewmaLatencyMs = this.updateEwma(state.ewmaLatencyMs, duration);
         state.ewmaSuccess = this.updateEwma(state.ewmaSuccess, 1);
         state.lastSuccessAt = now;
         await this.save();
         return;
       }
+      this.markFailure(
+        url,
+        response.statusCode === 429
+          ? 'probe received HTTP 429 Too Many Requests'
+          : `probe received HTTP ${response.statusCode}`
+      );
+      return;
     } catch (error) {
       logger.debug({ err: error, upstream: url }, 'probe failed');
+      this.markFailure(url, `probe failed: ${extractBackoffReason(error) ?? 'unknown error'}`);
+      return;
     }
-
-    // extend backoff a little on probe failure
-    state.backoffAttempts = Math.max(1, state.backoffAttempts);
-    state.backoffUntil = now + Math.min(this.backoffMaxMs, this.backoffBaseMs * 2 ** state.backoffAttempts);
-    state.totalFailures += 1;
-    state.lastFailureAt = now;
-    await this.save();
   }
 
   public async ensureReady(): Promise<void> {
@@ -530,7 +535,7 @@ class UpstreamPool {
 
       let reason = 'available';
       if (state.backoffUntil > now) {
-        reason = `in backoff until ${new Date(state.backoffUntil).toISOString()}`;
+        reason = formatBackoffDescription(state.backoffUntil, state.backoffReason);
       } else if (state.blockedUntil > now) {
         reason = `daily limit reached until ${new Date(state.blockedUntil).toISOString()}`;
       } else if (dailyLimit >= 0 && state.requestsToday >= dailyLimit) {
@@ -590,7 +595,7 @@ class UpstreamPool {
     return chosen;
   }
 
-  markFailure(url: string): void {
+  markFailure(url: string, reason?: string): void {
     const state = this.states.get(url);
     if (!state) {
       return;
@@ -600,6 +605,7 @@ class UpstreamPool {
     state.backoffAttempts += 1;
     const delayMs = Math.min(this.backoffMaxMs, this.backoffBaseMs * 2 ** (state.backoffAttempts - 1));
     state.backoffUntil = now + delayMs;
+    state.backoffReason = normaliseBackoffReason(reason);
     state.totalFailures += 1;
     state.lastFailureAt = now;
     state.ewmaSuccess = this.updateEwma(state.ewmaSuccess, 0);
@@ -614,6 +620,7 @@ class UpstreamPool {
 
     state.backoffAttempts = 0;
     state.backoffUntil = 0;
+    state.backoffReason = undefined;
     state.lastSuccessAt = Date.now();
     if (durationMs !== undefined) {
       state.ewmaLatencyMs = this.updateEwma(state.ewmaLatencyMs, durationMs);
@@ -633,7 +640,7 @@ class UpstreamPool {
 
       if (state.backoffUntil > now) {
         status = 'cooldown';
-        reason = `in backoff until ${new Date(state.backoffUntil).toISOString()}`;
+        reason = formatBackoffDescription(state.backoffUntil, state.backoffReason);
       } else if (state.blockedUntil > now) {
         status = 'blocked';
         reason = `daily limit reached until ${new Date(state.blockedUntil).toISOString()}`;
@@ -646,6 +653,7 @@ class UpstreamPool {
         upstream: url,
         status,
         reason,
+        backoffReason: state.backoffReason,
         requestsToday: state.requestsToday,
         dayStart: new Date(state.dayStart).toISOString(),
         blockedUntil: state.blockedUntil > now ? new Date(state.blockedUntil).toISOString() : undefined,
@@ -731,6 +739,44 @@ const sleep = async (ms: number): Promise<void> => {
     return;
   }
   await new Promise((resolve) => setTimeout(resolve, ms));
+};
+
+const normaliseBackoffReason = (reason: string | undefined, maxLength = 160): string | undefined => {
+  const compact = reason?.replace(/\s+/g, ' ').trim();
+  if (!compact) {
+    return undefined;
+  }
+
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+
+  return `${compact.slice(0, maxLength - 1)}...`;
+};
+
+const formatBackoffDescription = (until: number, reason?: string): string => {
+  const untilIso = new Date(until).toISOString();
+  return reason ? `in backoff until ${untilIso} (${reason})` : `in backoff until ${untilIso}`;
+};
+
+const extractBackoffReason = (error: unknown): string | undefined => {
+  const statusCode = (error as { response?: { statusCode?: number } })?.response?.statusCode;
+  if (typeof statusCode === 'number') {
+    if (statusCode === 429) {
+      return 'HTTP 429 Too Many Requests';
+    }
+    return `HTTP ${statusCode}`;
+  }
+
+  if (error instanceof Error) {
+    return normaliseBackoffReason(error.message) ?? normaliseBackoffReason(error.name);
+  }
+
+  if (typeof error === 'string') {
+    return normaliseBackoffReason(error);
+  }
+
+  return undefined;
 };
 
 const summariseUpstreamBody = (body: string, maxLength = 200): string => {
@@ -866,7 +912,7 @@ const withUpstream = async <T>(
         }
 
         lastError = error;
-        pool.markFailure(upstream);
+        pool.markFailure(upstream, extractBackoffReason(error));
         logger.error(
           {
             err: error,

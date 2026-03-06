@@ -118,6 +118,8 @@ workflow is:
 - Once an upstream has actually been tried and failed for the current request, the proxy stops waiting and returns the normal error path.
 - Transparent proxy requests keep fail-fast behavior; they do not sit in the availability-wait loop.
 - Background stale refresh keeps the stale response path fast for callers and warms the cache gently after the response has already been sent.
+- A fully stale-covered request can still return `200` with `X-Cache: STALE` while the upstream pool is empty; requests with unresolved tiles still return `503`.
+- Backoff metadata is persisted in Redis, including a human-readable `backoffReason`, so cooldown state and its cause survive restarts and appear in statistics snapshots.
 - **Persistence:** successful upstream responses are clipped to each fine tile’s exact bbox and written with `fetchedAt` and
   `expiresAt` using Redis pipelines. Presence counters that drive `GET /api/statistics/cacheCoverage` are updated alongside the
   tile payloads.
@@ -222,6 +224,7 @@ The proxy ships with a lightweight cache invalidation tool at `GET /cache-invali
 - Toggles for amenities, coverage types, and stale tile views.
 - Refresh controls with progress feedback to avoid heavy re-fetching during navigation.
 - Panel for upstream health and cache summary statistics.
+- Cooldown rows expose the stored backoff cause separately from the generic status text.
 
 **Why it exists**
 

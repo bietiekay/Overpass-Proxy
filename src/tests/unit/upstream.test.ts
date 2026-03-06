@@ -293,6 +293,7 @@ describe('upstream failover', () => {
       expect(payload.upstreams).toHaveLength(config.upstreamUrls.length);
       for (const entry of payload.upstreams) {
         expect(entry.reason).toContain('backoff');
+        expect(entry.reason).toContain('fail-all');
       }
     } finally {
       randomSpy.mockRestore();
@@ -472,12 +473,14 @@ describe('upstream failover', () => {
 
     const provider = await createUpstreamMetricsProvider(config, redis);
     expect(provider.describeUpstreams()[0].status).toBe('cooldown');
+    expect(provider.describeUpstreams()[0].backoffReason).toBe('persist-failure');
 
     const configClone: AppConfig = { ...config };
     const restoredProvider = await createUpstreamMetricsProvider(configClone, redis);
     const restored = restoredProvider.describeUpstreams()[0];
     expect(restored.status).toBe('cooldown');
     expect(restored.backoffUntil).toBeDefined();
+    expect(restored.backoffReason).toBe('persist-failure');
     vi.useRealTimers();
   });
 

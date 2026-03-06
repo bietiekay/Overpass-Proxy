@@ -106,6 +106,7 @@ export interface UpstreamStatisticsEntry {
   upstream: string;
   status: UpstreamStatus;
   reason: string;
+  backoffReason?: string;
   requestsToday: number;
   dayStart: string;
   blockedUntil?: string;

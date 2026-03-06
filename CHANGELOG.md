@@ -6,10 +6,13 @@
 - Bounded upstream-availability waiting for cache-miss interpreter requests when all upstreams are temporarily in backoff.
 - Recovery fetch replanning with smaller bbox groups to reduce refill pressure on the first upstream that becomes available again.
 - Integration coverage for immediate stale-cache responses during temporary upstream exhaustion.
+- Persisted upstream `backoffReason` metadata for logs, statistics snapshots, and post-restart debugging.
 
 ### Changed
 - Transparent proxy requests keep fail-fast upstream behavior instead of entering the availability-wait loop.
 - Integration test defaults now use short backoff/probe windows so shared test servers do not stay blocked behind stale upstream state.
+- Statistics map upstream cards now display the stored backoff cause as a dedicated field.
+- Documentation now calls out that fully stale-covered requests can still return `200` while the upstream pool is empty, whereas unresolved coverage returns `503`.
 
 ### Fixed
 - Cacheable tile fetches now send canonical `"[out:json][timeout:120];"` queries and explicitly request JSON from upstreams.

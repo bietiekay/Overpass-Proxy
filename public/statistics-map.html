@@ -258,6 +258,12 @@
       font-size: 0.9rem;
     }
 
+    .upstream-meta-label {
+      color: rgba(255, 255, 255, 0.68);
+      font-weight: 600;
+      margin-right: 0.3rem;
+    }
+
     .badge {
       display: inline-flex;
       align-items: center;
@@ -695,6 +701,7 @@
           upstream: 'https://demo-overpass-2.example.com',
           status: 'cooldown',
           reason: 'Recent errors, cooling down',
+          backoffReason: 'HTTP 429 Too Many Requests',
           requestsToday: 40,
           dayStart: new Date().toISOString(),
           backoffUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
@@ -1348,6 +1355,13 @@
         const reason = document.createElement('div');
         reason.textContent = entry.reason ?? 'No status message';
         meta.appendChild(reason);
+
+        if (entry.backoffReason) {
+          const backoffReason = document.createElement('div');
+          backoffReason.innerHTML =
+            `<span class="upstream-meta-label">Backoff cause:</span>${entry.backoffReason}`;
+          meta.appendChild(backoffReason);
+        }
 
         const counters = [
           entry.requestsToday !== undefined
