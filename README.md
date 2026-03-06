@@ -236,14 +236,18 @@ The test suite is designed to work both with and without Docker:
 - **Watch (`npm run test:watch`)** – same as above but in watch mode for quick iteration.
 - **Docker-backed (`npm run test:docker`)** – opts into Testcontainers so Redis runs inside Docker when available.
 - **Coverage (`npm run test:ci`)** – default non-Docker execution with coverage reporting.
+- **Build smoke test (`npm run test:build`)** – compiles the TypeScript project once (`tsc`) and fails on type/build errors.
 - **Statistics latency gate (`npm run test:perf:statistics`)** – compares `/api/interpreter` p95 latency at baseline vs. while statistics refresh is continuously triggered, and fails if the delta exceeds the configured budget (default `10ms`, configurable with `PERF_MAX_P95_DELTA_MS`).
+- **Full local gate (`npm run verify`)** – runs lint, build smoke test, and test suite in sequence.
 
 ```bash
 npm test             # unit + integration without Docker
 npm run test:watch   # watch mode without Docker
 npm run test:docker  # run the suite with Docker dependencies
 npm run test:ci      # coverage-enabled run without Docker
+npm run test:build   # compile TypeScript once
 npm run test:perf:statistics # p95 delta gate for stats refresh impact
+npm run verify       # lint + build + tests
 ```
 
 ## Example requests

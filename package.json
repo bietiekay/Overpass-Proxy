@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test:build": "npm run build",
     "lint": "eslint \"src/**/*.ts\"",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
@@ -13,7 +14,8 @@
     "test:watch": "cross-env USE_DOCKER=0 vitest",
     "test:docker": "cross-env USE_DOCKER=1 vitest run",
     "test:ci": "cross-env USE_DOCKER=0 vitest run --coverage",
-    "test:perf:statistics": "tsx src/tests/perf/statistics-refresh-latency.ts"
+    "test:perf:statistics": "tsx src/tests/perf/statistics-refresh-latency.ts",
+    "verify": "npm run lint && npm run test:build && npm test"
   },
   "engines": {
     "node": ">=20"

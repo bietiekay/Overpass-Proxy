@@ -1,5 +1,6 @@
 import { pino, type LoggerOptions, type LevelWithSilent, type Logger, type LogFn } from 'pino';
-import type { ProcessEnv } from 'node:process';
+
+type EnvMap = Record<string, string | undefined>;
 
 const mapVerbosity = (value: string): LevelWithSilent | null => {
   switch (value) {
@@ -18,7 +19,7 @@ const mapVerbosity = (value: string): LevelWithSilent | null => {
 };
 
 export const resolveLogLevel = (
-  env: ProcessEnv = process.env
+  env: EnvMap = process.env
 ): LevelWithSilent => {
   const verbosity = env.LOG_VERBOSITY?.toLowerCase().trim();
   const mapped = verbosity ? mapVerbosity(verbosity) : null;
@@ -39,7 +40,7 @@ export const resolveLogLevel = (
 };
 
 export const createLoggerOptions = (
-  env: ProcessEnv = process.env
+  env: EnvMap = process.env
 ): LoggerOptions => {
   const options: LoggerOptions = {
     level: resolveLogLevel(env)
