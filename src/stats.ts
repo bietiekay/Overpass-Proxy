@@ -131,6 +131,7 @@ export interface UpstreamMetricsProvider {
 export const DEFAULT_COVERAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 export const DEFAULT_COVERAGE_CACHE_TTL_MS = 30 * 60 * 1000;
 export const COVERAGE_YIELD_INTERVAL = 250;
+const BUILD_TIMESLICE_MS = 8;
 export const DEFAULT_CACHE_COVERAGE_MAX_ENTRIES = 25000;
 export const DEFAULT_GEOHASH_COVERAGE_MAX_ENTRIES = 10000;
 export const COMPACTION_THRESHOLD_MULTIPLIER = 1.25;
@@ -143,6 +144,19 @@ const MIN_REFRESH_TRIGGER_INTERVAL_MS = 5_000;
 
 const yieldToEventLoop = async (): Promise<void> =>
   new Promise((resolve) => setImmediateCallback(resolve));
+
+class YieldController {
+  private nextYieldDeadline = Date.now() + BUILD_TIMESLICE_MS;
+
+  public async maybeYield(): Promise<void> {
+    if (Date.now() < this.nextYieldDeadline) {
+      return;
+    }
+
+    await yieldToEventLoop();
+    this.nextYieldDeadline = Date.now() + BUILD_TIMESLICE_MS;
+  }
+}
 
 const normaliseLimit = (value: number | undefined, fallback: number): number =>
   Math.max(1, value ?? fallback);
@@ -752,6 +766,8 @@ export class RequestStatistics {
 
   private cacheCoverageLastBuiltAt: number | null = null;
 
+  private totalStaleTiles = 0;
+
   private readonly coverageRefreshIntervalMs: number;
 
   private constructor(
@@ -1071,12 +1087,13 @@ export class RequestStatistics {
 
       const amenities: AmenityStatistics[] = [];
       let globalGeohashCounts = new Map<string, number>();
-      let amenityCounter = 0;
+      const yieldController = new YieldController();
 
       for (const stats of this.amenityStats.values()) {
         const cacheItems = this.cacheMetrics.countCachedTiles(stats.amenity);
         for (const [hash, count] of stats.geohashCounts) {
           globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
+          await yieldController.maybeYield();
         }
 
         if (globalGeohashCounts.size > this.geohashCoverageCompactionThreshold) {
@@ -1099,11 +1116,7 @@ export class RequestStatistics {
           lastRequestAt:
             stats.lastRequestAt > 0 ? new Date(stats.lastRequestAt).toISOString() : undefined
         });
-
-        amenityCounter += 1;
-        if (amenityCounter % COVERAGE_YIELD_INTERVAL === 0) {
-          await yieldToEventLoop();
-        }
+        await yieldController.maybeYield();
       }
 
       amenities.sort((a, b) => b.requests - a.requests || a.amenity.localeCompare(b.amenity));
@@ -1130,33 +1143,6 @@ export class RequestStatistics {
       const upstreams = this.upstreamMetrics?.describeUpstreams() ?? [];
       const staleRefreshQueue = this.staleRefreshQueue?.describeQueue();
 
-      // Calculate total stale tiles from cache coverage
-      // Wrap in try-catch to prevent hangs from blocking the entire snapshot
-      let totalStaleTiles = 0;
-      try {
-        const cacheCoverageStart = Date.now();
-        const cacheCoverage = this.cacheMetrics.getCacheCoverage({
-          maxEntries: this.maxCacheCoverageEntries
-        });
-        const cacheCoverageDuration = Date.now() - cacheCoverageStart;
-        if (cacheCoverageDuration > 30000) {
-          logger.warn(
-            {
-              durationMs: cacheCoverageDuration,
-              entries: cacheCoverage.length
-            },
-            'getCacheCoverage took longer than expected'
-          );
-        }
-        totalStaleTiles = cacheCoverage.reduce((sum, entry) => sum + (entry.staleEntries ?? 0), 0);
-      } catch (error) {
-        logger.warn(
-          { err: error },
-          'failed to get cache coverage for statistics snapshot, using 0 for totalStaleTiles'
-        );
-        totalStaleTiles = 0;
-      }
-
       return {
         generatedAt,
         dayStart: dayStartIso,
@@ -1169,7 +1155,7 @@ export class RequestStatistics {
         totalUniqueClients: this.uniqueClients.size,
         totalTilesRequested: this.totalTiles,
         totalCachedTiles: this.cacheMetrics.countTotalCachedTiles(),
-        totalStaleTiles,
+        totalStaleTiles: this.totalStaleTiles,
         cachedAmenities: this.cacheMetrics.countCachedAmenities(),
         cachedAmenityTypes: this.cacheMetrics.countCachedAmenityTypes(),
         cacheHitRate,
@@ -1196,6 +1182,7 @@ export class RequestStatistics {
   ): Promise<CacheCoverageEntry[]> {
     let coverage = new Map<string, CacheCoverageEntry>();
     let processed = 0;
+    const yieldController = new YieldController();
 
     for (const entry of entries) {
       coverage.set(entry.geohash, mergeCacheCoverageEntry(coverage.get(entry.geohash), entry));
@@ -1210,7 +1197,7 @@ export class RequestStatistics {
       }
 
       if (processed % COVERAGE_YIELD_INTERVAL === 0) {
-        await yieldToEventLoop();
+        await yieldController.maybeYield();
       }
     }
 
@@ -1253,6 +1240,10 @@ export class RequestStatistics {
       'cache coverage snapshot input loaded'
     );
     const cacheCoverage = await this.aggregateCacheCoverage(coverageEntries);
+    this.totalStaleTiles = cacheCoverage.reduce(
+      (sum, entry) => sum + (entry.staleEntries ?? 0),
+      0
+    );
 
     logger.info(
       {
@@ -1260,6 +1251,7 @@ export class RequestStatistics {
         outputEntries: cacheCoverage.length,
         maxEntries: this.maxCacheCoverageEntries,
         compactionThreshold: this.cacheCoverageCompactionThreshold,
+        totalStaleTiles: this.totalStaleTiles,
         durationMs: Date.now() - start
       },
       'cache coverage snapshot built'
@@ -1319,6 +1311,7 @@ export class RequestStatistics {
     let globalGeohashCounts = new Map<string, number>();
 
     let amenityCounter = 0;
+    const yieldController = new YieldController();
     for (const stats of amenityState) {
       const geohashCoverage: GeohashCoverageEntry[] = [];
 
@@ -1333,7 +1326,7 @@ export class RequestStatistics {
         }
 
         if (coverageCounter % COVERAGE_YIELD_INTERVAL === 0) {
-          await yieldToEventLoop();
+          await yieldController.maybeYield();
         }
       }
 
@@ -1363,7 +1356,7 @@ export class RequestStatistics {
 
       amenityCounter += 1;
       if (amenityCounter % COVERAGE_YIELD_INTERVAL === 0) {
-        await yieldToEventLoop();
+        await yieldController.maybeYield();
       }
     }
 

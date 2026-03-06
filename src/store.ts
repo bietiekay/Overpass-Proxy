@@ -101,6 +101,16 @@ class TilePresenceCache {
 
   private readonly listeners = new Map<string, Set<PresenceListener>>();
 
+  private readonly presentTileCounts = new Map<string, number>();
+
+  private readonly presentAmenityItemCounts = new Map<string, number>();
+
+  private totalPresentTiles = 0;
+
+  private totalPresentAmenityItems = 0;
+
+  private amenitiesWithPresentTiles = 0;
+
   constructor(private readonly defaultMissingTtlMs: number) {}
 
   private getAmenityEntries(amenity: string): Map<string, PresenceEntry> {
@@ -133,12 +143,84 @@ class TilePresenceCache {
       entry.expiresAt = Number.POSITIVE_INFINITY;
       return entry;
     }
+    this.deleteEntry(amenity, tileHash);
+    return undefined;
+  }
+
+  private updatePresentCounts(amenity: string, tileDelta: number, amenityItemDelta: number): void {
+    if (tileDelta !== 0) {
+      const previousTiles = this.presentTileCounts.get(amenity) ?? 0;
+      const nextTiles = previousTiles + tileDelta;
+      if (previousTiles === 0 && nextTiles > 0) {
+        this.amenitiesWithPresentTiles += 1;
+      } else if (previousTiles > 0 && nextTiles <= 0) {
+        this.amenitiesWithPresentTiles = Math.max(0, this.amenitiesWithPresentTiles - 1);
+      }
+
+      if (nextTiles > 0) {
+        this.presentTileCounts.set(amenity, nextTiles);
+      } else {
+        this.presentTileCounts.delete(amenity);
+      }
+
+      this.totalPresentTiles = Math.max(0, this.totalPresentTiles + tileDelta);
+    }
+
+    if (amenityItemDelta !== 0) {
+      const previousItems = this.presentAmenityItemCounts.get(amenity) ?? 0;
+      const nextItems = previousItems + amenityItemDelta;
+      if (nextItems > 0) {
+        this.presentAmenityItemCounts.set(amenity, nextItems);
+      } else {
+        this.presentAmenityItemCounts.delete(amenity);
+      }
+
+      this.totalPresentAmenityItems = Math.max(0, this.totalPresentAmenityItems + amenityItemDelta);
+    }
+  }
+
+  private addToAggregates(amenity: string, entry: PresenceEntry): void {
+    if (entry.state !== 'present') {
+      return;
+    }
+
+    this.updatePresentCounts(amenity, 1, entry.amenityCount);
+  }
+
+  private removeFromAggregates(amenity: string, entry: PresenceEntry): void {
+    if (entry.state !== 'present') {
+      return;
+    }
+
+    this.updatePresentCounts(amenity, -1, -entry.amenityCount);
+  }
+
+  private setEntry(amenity: string, tileHash: string, entry: PresenceEntry): void {
+    const amenityEntries = this.getAmenityEntries(amenity);
+    const existing = amenityEntries.get(tileHash);
+    if (existing) {
+      this.removeFromAggregates(amenity, existing);
+    }
+
+    amenityEntries.set(tileHash, entry);
+    this.addToAggregates(amenity, entry);
+  }
+
+  private deleteEntry(amenity: string, tileHash: string): void {
     const amenityEntries = this.entries.get(amenity);
-    amenityEntries?.delete(tileHash);
-    if (amenityEntries && amenityEntries.size === 0) {
+    if (!amenityEntries) {
+      return;
+    }
+
+    const existing = amenityEntries.get(tileHash);
+    if (existing) {
+      this.removeFromAggregates(amenity, existing);
+    }
+
+    amenityEntries.delete(tileHash);
+    if (amenityEntries.size === 0) {
       this.entries.delete(amenity);
     }
-    return undefined;
   }
 
   public markPresent(
@@ -149,7 +231,7 @@ class TilePresenceCache {
     stale = false
   ): void {
     const entry: PresenceEntry = { state: 'present', expiresAt, amenityCount, stale };
-    this.getAmenityEntries(amenity).set(tileHash, entry);
+    this.setEntry(amenity, tileHash, entry);
     this.notify(amenity, tileHash);
   }
 
@@ -161,7 +243,7 @@ class TilePresenceCache {
       amenityCount: 0,
       stale: false
     };
-    this.getAmenityEntries(amenity).set(tileHash, entry);
+    this.setEntry(amenity, tileHash, entry);
     this.notify(amenity, tileHash);
   }
 
@@ -175,88 +257,19 @@ class TilePresenceCache {
   }
 
   public countPresent(amenity: string): number {
-    const amenityEntries = this.entries.get(amenity);
-    if (!amenityEntries) {
-      return 0;
-    }
-
-    let count = 0;
-    for (const [tileHash, entry] of amenityEntries) {
-      const current = this.clearIfExpired(amenity, tileHash, entry);
-        if (current?.state === 'present') {
-          count += 1;
-        }
-    }
-
-    if (count === 0 && amenityEntries.size === 0) {
-      this.entries.delete(amenity);
-    }
-
-    return count;
+    return this.presentTileCounts.get(amenity) ?? 0;
   }
 
   public countPresentAmenities(): number {
-    let amenitiesWithCache = 0;
-
-    for (const [amenity, entries] of this.entries) {
-      let hasPresent = false;
-
-      for (const [tileHash, entry] of entries) {
-        const current = this.clearIfExpired(amenity, tileHash, entry);
-        if (current?.state === 'present') {
-          hasPresent = true;
-          break;
-        }
-      }
-
-      if (entries.size === 0) {
-        this.entries.delete(amenity);
-      }
-
-      if (hasPresent) {
-        amenitiesWithCache += 1;
-      }
-    }
-
-    return amenitiesWithCache;
+    return this.amenitiesWithPresentTiles;
   }
 
   public countAllPresent(): number {
-    let total = 0;
-
-    for (const [amenity, entries] of this.entries) {
-      for (const [tileHash, entry] of entries) {
-        const current = this.clearIfExpired(amenity, tileHash, entry);
-        if (current?.state === 'present') {
-          total += 1;
-        }
-      }
-
-      if (entries.size === 0) {
-        this.entries.delete(amenity);
-      }
-    }
-
-    return total;
+    return this.totalPresentTiles;
   }
 
   public countAmenityItems(): number {
-    let total = 0;
-
-    for (const [amenity, entries] of this.entries) {
-      for (const [tileHash, entry] of entries) {
-        const current = this.clearIfExpired(amenity, tileHash, entry);
-        if (current?.state === 'present') {
-          total += current.amenityCount;
-        }
-      }
-
-      if (entries.size === 0) {
-        this.entries.delete(amenity);
-      }
-    }
-
-    return total;
+    return this.totalPresentAmenityItems;
   }
 
   private addListener(key: string, listener: PresenceListener): void {

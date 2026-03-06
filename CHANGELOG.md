@@ -13,10 +13,13 @@
 - Integration test defaults now use short backoff/probe windows so shared test servers do not stay blocked behind stale upstream state.
 - Statistics map upstream cards now display the stored backoff cause as a dedicated field.
 - Documentation now calls out that fully stale-covered requests can still return `200` while the upstream pool is empty, whereas unresolved coverage returns `503`.
+- Statistics snapshot rebuilds are now time-sliced and no longer re-scan full cache coverage during `/api/statistics` refreshes.
+- Cache inventory counters now use incremental in-memory aggregates so statistics reads stay constant-time even with very large Redis caches.
 
 ### Fixed
 - Cacheable tile fetches now send canonical `"[out:json][timeout:120];"` queries and explicitly request JSON from upstreams.
 - Upstream tile fetching now treats XML/HTML/text error bodies as upstream failures with clearer diagnostics, allowing failover to the next configured upstream instead of surfacing only a raw JSON parse error.
+- Statistics snapshot refreshes no longer time out on near-global cache datasets just to compute top-level cache totals or stale tile counts.
 
 ## 1.5.0 - 2026-03-06
 

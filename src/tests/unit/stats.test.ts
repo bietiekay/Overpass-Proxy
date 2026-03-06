@@ -464,6 +464,58 @@ describe('RequestStatistics', () => {
     expect('geohashCoverage' in snapshot).toBe(false);
   });
 
+  it('builds statistics snapshots without scanning cache coverage', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 7,
+        countCachedAmenities: () => 19,
+        countCachedAmenityTypes: () => 3,
+        countTotalCachedTiles: () => 11,
+        getCacheCoverage: () => {
+          throw new Error('statistics snapshot must not scan cache coverage');
+        }
+      },
+      storage
+    );
+
+    await stats.recordRequest({
+      amenity: 'toilets',
+      clientIp: '1.1.1.1',
+      bbox,
+      cacheStatus: 'HIT',
+      tileCount: 1,
+      timestamp: new Date('2024-01-01T11:00:00Z').getTime()
+    });
+
+    const snapshot = await stats.getSnapshot(new Date('2024-01-01T11:01:00Z').getTime());
+    expect(snapshot.totalCachedTiles).toBe(11);
+    expect(snapshot.cachedAmenities).toBe(19);
+    expect(snapshot.cachedAmenityTypes).toBe(3);
+    expect(snapshot.totalStaleTiles).toBe(0);
+  });
+
+  it('reuses stale tile totals from the coverage snapshot', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => 0,
+        getCacheCoverage: () => [
+          { geohash: 'u33d0', entries: 2, amenityItems: 5, staleEntries: 4, staleAmenityItems: 7 },
+          { geohash: 'u33d1', entries: 1, amenityItems: 2, staleEntries: 3, staleAmenityItems: 4 }
+        ]
+      },
+      storage
+    );
+
+    await stats.refreshCoverageCaches(new Date('2024-01-01T10:00:00Z').getTime());
+    const snapshot = await stats.getSnapshot(new Date('2024-01-01T10:01:00Z').getTime());
+    expect(snapshot.totalStaleTiles).toBe(7);
+  });
+
   it('retries statistics snapshot refresh after a transient build failure', async () => {
     const storage = new InMemoryStatisticsStorage();
     let describeCalls = 0;

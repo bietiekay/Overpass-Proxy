@@ -39,7 +39,24 @@ describe('TileStore', () => {
     vi.useFakeTimers();
     const store = new TileStore(redis as unknown as Redis, { ttlSeconds: 1, swrSeconds: 1 });
     try {
-      await store.writeTile(tile, { elements: [], generator: 'test', osm3s: {}, version: 0.6 }, 'toilets');
+      await store.writeTile(
+        tile,
+        {
+          elements: [
+            {
+              type: 'node',
+              id: 1,
+              lat: 0.5,
+              lon: 0.5,
+              tags: { amenity: 'toilets' }
+            }
+          ],
+          generator: 'test',
+          osm3s: {},
+          version: 0.6
+        },
+        'toilets'
+      );
 
       const key = tileKey(tile.hash, 'toilets');
       expect(await redis.pttl(key)).toBe(-1);
@@ -49,6 +66,10 @@ describe('TileStore', () => {
       const values = await store.readTiles([tile], 'toilets');
       expect(values.get(tile.hash)?.stale).toBe(true);
       expect(await redis.pttl(key)).toBe(-1);
+      expect(store.countCachedTiles('toilets')).toBe(1);
+      expect(store.countCachedAmenityTypes()).toBe(1);
+      expect(store.countCachedAmenities()).toBe(1);
+      expect(store.countTotalCachedTiles()).toBe(1);
     } finally {
       vi.useRealTimers();
     }
