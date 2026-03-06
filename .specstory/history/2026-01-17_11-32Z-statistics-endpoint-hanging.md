@@ -1522,3 +1522,310 @@ All tests pass (193 tests), and the fix is ready for deployment. After restartin
 
 ---
 
+_**User (2026-01-22 13:38Z)**_
+
+Error: src/stats.ts(449,29): error TS2531: Object is possibly 'null'.
+
+---
+
+_**Agent (model default, mode Agent)**_
+
+
+
+---
+
+
+Checking and fixing the TypeScript error:
+
+
+---
+
+<tool-use data-tool-type="read" data-tool-name="read_file">
+<details><summary>Tool use: **read_file** • Read file: /Users/bietiekay/code/Overpass-Proxy/src/stats.ts</summary>
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="generic" data-tool-name="read_lints">
+<details>
+          <summary>Tool use: **read_lints** • Read lints for 1 file</summary>
+      
+Lint paths:
+
+- `src/stats.ts`
+
+Lint results
+
+
+**No lint errors found**
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+Reviewing the full context to fix the TypeScript error:
+
+
+---
+
+<tool-use data-tool-type="read" data-tool-name="read_file">
+<details><summary>Tool use: **read_file** • Read file: /Users/bietiekay/code/Overpass-Proxy/src/stats.ts</summary>
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /Users/bietiekay/code/Overpass-Proxy && npx tsc --noEmit 2>&1 | grep "stats.ts"</summary>
+
+```bash
+cd /Users/bietiekay/code/Overpass-Proxy && npx tsc --noEmit 2>&1 | grep "stats.ts"
+```
+
+```
+src/stats.ts(449,29): error TS2531: Object is possibly 'null'.
+
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+Fixing the TypeScript error: TypeScript doesn't narrow the type in the compound condition. Storing the value in a local variable:
+
+
+---
+
+<tool-use data-tool-type="write" data-tool-name="search_replace">
+
+<details><summary>Tool use: **search_replace** • Edit file: /Users/bietiekay/code/Overpass-Proxy/src/stats.ts</summary>
+
+**Chunk 1**
+Lines added: 3, lines removed: 2
+
+```diff
+@@ -437,8 +437,9 @@
+      
+      // Check if refresh is stuck (running too long)
++     const refreshStartTime = this.refreshStartTime;
+      const isRefreshStuck =
+        this.refreshPromise !== null &amp;&amp;
+-       this.refreshStartTime !== null &amp;&amp;
+-       now - this.refreshStartTime &gt; this.buildTimeoutMs;
++       refreshStartTime !== null &amp;&amp;
++       now - refreshStartTime &gt; this.buildTimeoutMs;
+      
+      if (isRefreshStuck) {
+```
+
+**Chunk 2**
+Lines added: 1, lines removed: 1
+
+```diff
+@@ -447,5 +448,5 @@
+            key: this.key,
+            label: this.label,
+-           durationMs: now - this.refreshStartTime
++           durationMs: now - refreshStartTime
+          },
+          'detected stuck statistics snapshot build, resetting'
+```
+
+</details>
+
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /Users/bietiekay/code/Overpass-Proxy && npx tsc --noEmit 2>&1 | grep "stats.ts" || echo "No TypeScript errors found"</summary>
+
+```bash
+cd /Users/bietiekay/code/Overpass-Proxy && npx tsc --noEmit 2>&1 | grep "stats.ts" || echo "No TypeScript errors found"
+```
+
+```
+No TypeScript errors found
+
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+Checking for similar issues elsewhere in the file:
+
+
+---
+
+<tool-use data-tool-type="search" data-tool-name="grep">
+<details>
+<summary>Tool use: **grep** • Grep for "this\.refreshStartTime" in "/Users/bietiekay/code/Overpass-Proxy/src/stats.ts" • 12 matches</summary>
+
+Output mode: content
+
+
+| File | Content | Line |
+|------|------|------|
+| `src/stats.ts` | `if (this.refreshStartTime && Date.now() - this.refreshStartTime > this.buildTimeoutMs) \{` | L397 |
+| `src/stats.ts` | `durationMs: Date.now() - this.refreshStartTime` | L402 |
+| `src/stats.ts` | `this.refreshStartTime = null;` | L407 |
+| `src/stats.ts` | `this.refreshStartTime = Date.now();` | L413 |
+| `src/stats.ts` | `this.refreshStartTime = null;` | L419 |
+| `src/stats.ts` | `const refreshStartTime = this.refreshStartTime;` | L439 |
+| `src/stats.ts` | `this.refreshStartTime = null;` | L455 |
+| `src/stats.ts` | `if (this.refreshStartTime && Date.now() - this.refreshStartTime > this.buildTimeoutMs) \{` | L539 |
+| `src/stats.ts` | `durationMs: Date.now() - this.refreshStartTime` | L544 |
+| `src/stats.ts` | `this.refreshStartTime = null;` | L549 |
+| `src/stats.ts` | `this.refreshStartTime = Date.now();` | L555 |
+| `src/stats.ts` | `this.refreshStartTime = null;` | L558 |
+
+
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /Users/bietiekay/code/Overpass-Proxy && npx tsc --noEmit</summary>
+
+```bash
+cd /Users/bietiekay/code/Overpass-Proxy && npx tsc --noEmit
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+TypeScript error fixed. Verifying tests still pass:
+
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /Users/bietiekay/code/Overpass-Proxy && npm test 2>&1 | tail -20</summary>
+
+```bash
+cd /Users/bietiekay/code/Overpass-Proxy && npm test 2>&1 | tail -20
+```
+
+```
+     ✓ returns stale cache immediately and queues refresh when configured  1669ms
+     ✓ serves stale cache entries when refresh fails upstream  1120ms
+     ✓ falls back to another upstream when refreshing stale tiles in the background  1224ms
+     ✓ serves stale cache entries when no upstreams are available  1116ms
+     ✓ fails when stale cache does not fully cover the requested bbox and no upstreams are available  1121ms
+     ✓ reports the stale refresh queue overview in statistics  1923ms
+     ✓ ETag changes when response content changes  1107ms
+     ✓ X-Cache header values for all states  1112ms
+     ✓ forwards upstream status codes correctly  1968ms
+     ✓ returns 503 when upstream fails and tiles remain unresolved  1982ms
+     ✓ retries on 503 upstream error  1733ms
+     ✓ retries on 502 upstream error  2154ms
+     ✓ retries on 500 upstream error  1703ms
+     ✓ retries on network errors  2133ms
+
+ Test Files  14 passed (14)
+      Tests  193 passed (193)
+   Start at  14:49:26
+   Duration  26.56s (transform 1.00s, setup 0ms, import 2.53s, tests 25.76s, environment 1ms)
+
+
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+TypeScript error fixed. Committing the fix:
+
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /Users/bietiekay/code/Overpass-Proxy && git add src/stats.ts && git commit -m "fix: resolve TypeScript null check error in stuck build detection
+
+TypeScript couldn't narrow the type of refreshStartTime in the compound
+condition. Store it in a local variable to allow proper type narrowing."</summary>
+
+```bash
+cd /Users/bietiekay/code/Overpass-Proxy && git add src/stats.ts && git commit -m "fix: resolve TypeScript null check error in stuck build detection
+
+TypeScript couldn't narrow the type of refreshStartTime in the compound
+condition. Store it in a local variable to allow proper type narrowing."
+```
+
+```
+[testing 14428e2] fix: resolve TypeScript null check error in stuck build detection
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+```
+</details>
+</tool-use>
+
+---
+
+<tool-use data-tool-type="shell" data-tool-name="run_terminal_cmd">
+<details><summary>Tool use: **run_terminal_cmd** • Run command: cd /Users/bietiekay/code/Overpass-Proxy && git log -1 --oneline</summary>
+
+```bash
+cd /Users/bietiekay/code/Overpass-Proxy && git log -1 --oneline
+```
+
+```
+14428e2 fix: resolve TypeScript null check error in stuck build detection
+
+```
+</details>
+</tool-use>
+
+---
+
+
+
+---
+
+
+TypeScript error fixed and committed.
+
+**Issue:** TypeScript couldn't narrow the type of `this.refreshStartTime` in the compound condition check.
+
+**Fix:** Stored `this.refreshStartTime` in a local variable `refreshStartTime` before the check, allowing proper type narrowing.
+
+**Verification:**
+- TypeScript compilation passes
+- All 193 tests pass
+- Fix committed as `14428e2`
+
+The code now compiles without errors and maintains the same functionality.
+
+---
+
