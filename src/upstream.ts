@@ -100,6 +100,16 @@ interface UpstreamPoolOptions {
   probeTimeoutMs: number;
 }
 
+export interface UpstreamAvailabilitySnapshot {
+  availableNow: boolean;
+  exhaustedByLimit: boolean;
+  availableCount: number;
+  cooldownCount: number;
+  blockedCount: number;
+  nextAvailableInMs: number | null;
+  nextAvailableAt?: string;
+}
+
 class UpstreamStateStorage {
   constructor(private readonly redis: Redis, private readonly key = 'upstreams:state') {}
 
@@ -473,6 +483,42 @@ class UpstreamPool {
     return true;
   }
 
+  public getAvailability(dailyLimit: number, now = Date.now()): UpstreamAvailabilitySnapshot {
+    let availableCount = 0;
+    let cooldownCount = 0;
+    let blockedCount = 0;
+    let nextAvailableAt: number | null = null;
+
+    for (const state of this.states.values()) {
+      this.refreshState(state, now);
+
+      if (state.backoffUntil > now) {
+        cooldownCount += 1;
+        if (nextAvailableAt === null || state.backoffUntil < nextAvailableAt) {
+          nextAvailableAt = state.backoffUntil;
+        }
+        continue;
+      }
+
+      if (state.blockedUntil > now || (dailyLimit >= 0 && state.requestsToday >= dailyLimit)) {
+        blockedCount += 1;
+        continue;
+      }
+
+      availableCount += 1;
+    }
+
+    return {
+      availableNow: availableCount > 0,
+      exhaustedByLimit: availableCount === 0 && this.isExhaustedByLimit(dailyLimit, now),
+      availableCount,
+      cooldownCount,
+      blockedCount,
+      nextAvailableInMs: nextAvailableAt === null ? null : Math.max(0, nextAvailableAt - now),
+      nextAvailableAt: nextAvailableAt === null ? undefined : new Date(nextAvailableAt).toISOString()
+    };
+  }
+
   describeUnavailability(
     excluded: Set<string>,
     dailyLimit: number,
@@ -649,6 +695,15 @@ const getPool = (config: AppConfig, redis?: Redis): UpstreamPool => {
 export const getUpstreamPoolForTesting = (config: AppConfig, redis?: Redis) =>
   getPool(config, redis);
 
+export const getUpstreamAvailabilitySnapshot = async (
+  config: AppConfig,
+  redis?: Redis
+): Promise<UpstreamAvailabilitySnapshot> => {
+  const pool = getPool(config, redis);
+  await pool.ensureReady();
+  return pool.getAvailability(config.upstreamDailyLimit);
+};
+
 const shouldMarkFailure = (error: unknown): boolean => {
   if (error instanceof Error && error.name === 'RequestError') {
     const statusCode = (error as { response?: { statusCode?: number } })?.response?.statusCode;
@@ -663,7 +718,21 @@ interface UpstreamCallOptions {
   redis?: Redis;
   clientKey?: string;
   logContext?: Record<string, unknown>;
+  waitForAvailability?: boolean;
+  onAvailabilityWait?: (details: {
+    waitMs: number;
+    nextAvailableInMs: number;
+    nextAvailableAt?: string;
+    attempts: number;
+  }) => void;
 }
+
+const sleep = async (ms: number): Promise<void> => {
+  if (ms <= 0) {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, ms));
+};
 
 const withUpstream = async <T>(
   config: AppConfig,
@@ -689,45 +758,99 @@ const withUpstream = async <T>(
   let lastError: unknown;
   const dailyLimit = config.upstreamDailyLimit;
   const clientKey = options.clientKey;
+  const waitBudgetMs = Math.max(0, Math.floor(config.upstreamExhaustedWaitSeconds * 1000));
+  const waitGraceMs = Math.max(0, Math.floor(config.upstreamExhaustedGraceSeconds * 1000));
+  const waitDeadline = Date.now() + waitBudgetMs;
+  const shouldWaitForAvailability = options.waitForAvailability ?? true;
+  let waitAttempts = 0;
 
-  while (attempted.size < pool.size) {
-    const upstream = pool.next(attempted, dailyLimit, clientKey);
-    if (!upstream) {
+  while (true) {
+    while (attempted.size < pool.size) {
+      const upstream = pool.next(attempted, dailyLimit, clientKey);
+      if (!upstream) {
+        break;
+      }
+
+      const acquireResult = pool.tryAcquire(upstream, dailyLimit);
+      if (acquireResult !== 'acquired') {
+        attempted.add(upstream);
+        if (acquireResult === 'limit') {
+          lastError = new Error(`Upstream daily request limit reached for ${upstream}`);
+        }
+        continue;
+      }
+
+      const start = Date.now();
+      try {
+        const result = await fn(upstream);
+        pool.markSuccess(upstream, Date.now() - start);
+        return result;
+      } catch (error) {
+        attempted.add(upstream);
+        if (!shouldMarkFailure(error)) {
+          throw error;
+        }
+
+        lastError = error;
+        pool.markFailure(upstream);
+        logger.error(
+          {
+            err: error,
+            upstream,
+            backoffSeconds: config.upstreamBackoffBaseSeconds,
+            request: options.logContext ?? undefined
+          },
+          'upstream request failed'
+        );
+      }
+    }
+
+    const availability = pool.getAvailability(dailyLimit);
+    if (availability.exhaustedByLimit) {
       break;
     }
 
-    const acquireResult = pool.tryAcquire(upstream, dailyLimit);
-    if (acquireResult !== 'acquired') {
-      attempted.add(upstream);
-      if (acquireResult === 'limit') {
-        lastError = new Error(`Upstream daily request limit reached for ${upstream}`);
-      }
+    if (!shouldWaitForAvailability || lastError !== undefined) {
+      break;
+    }
+
+    if (availability.availableNow) {
+      attempted.clear();
       continue;
     }
 
-    const start = Date.now();
-    try {
-      const result = await fn(upstream);
-      pool.markSuccess(upstream, Date.now() - start);
-      return result;
-    } catch (error) {
-      attempted.add(upstream);
-      if (!shouldMarkFailure(error)) {
-        throw error;
-      }
-
-      lastError = error;
-      pool.markFailure(upstream);
-      logger.error(
-        {
-          err: error,
-          upstream,
-          backoffSeconds: config.upstreamBackoffBaseSeconds,
-          request: options.logContext ?? undefined
-        },
-        'upstream request failed'
-      );
+    const nextAvailableInMs = availability.nextAvailableInMs;
+    const remainingWaitMs = waitDeadline - Date.now();
+    if (remainingWaitMs <= 0 || nextAvailableInMs === null) {
+      break;
     }
+
+    const waitMs = Math.min(remainingWaitMs, nextAvailableInMs + waitGraceMs);
+    if (waitMs <= 0) {
+      attempted.clear();
+      continue;
+    }
+
+    waitAttempts += 1;
+    options.onAvailabilityWait?.({
+      waitMs,
+      nextAvailableInMs,
+      nextAvailableAt: availability.nextAvailableAt,
+      attempts: waitAttempts
+    });
+    logger.warn(
+      {
+        waitMs,
+        nextAvailableInMs,
+        nextAvailableAt: availability.nextAvailableAt,
+        attempts: waitAttempts,
+        upstreams: pool.describeUnavailability(attempted, dailyLimit),
+        request: options.logContext ?? undefined
+      },
+      'waiting for upstream availability'
+    );
+    await sleep(waitMs);
+    attempted.clear();
   }
 
   if (pool.isExhaustedByLimit(dailyLimit)) {
@@ -806,7 +929,7 @@ export const proxyTransparent = async (
   options?: UpstreamCallOptions
 ): Promise<void> => {
   try {
-    const proxyOptions: UpstreamCallOptions = { ...(options ?? {}) };
+    const proxyOptions: UpstreamCallOptions = { waitForAvailability: false, ...(options ?? {}) };
 
     await withUpstream(
       config,

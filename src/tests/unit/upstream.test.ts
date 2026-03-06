@@ -50,12 +50,16 @@ const baseConfig: AppConfig = {
   upstreamFailureCooldownSeconds: 60,
   upstreamBackoffBaseSeconds: 1,
   upstreamBackoffMaxSeconds: 10,
+  upstreamExhaustedWaitSeconds: 0,
+  upstreamExhaustedGraceSeconds: 0,
   upstreamEwmaAlpha: 0.5,
   upstreamStickinessTtlSeconds: 0,
   upstreamProbeIntervalSeconds: 0,
   upstreamProbeJitterSeconds: 0,
   upstreamProbeTimeoutSeconds: 2,
   upstreamRequestTimeoutSeconds: 30,
+  upstreamRecoveryCoarsePrecision: 4,
+  upstreamRecoveryTargetTilesPerRequest: 8,
   upstreamDailyLimit: -1,
   transparentOnly: false,
   trustProxy: false,
@@ -253,6 +257,65 @@ describe('upstream failover', () => {
       }
     } finally {
       randomSpy.mockRestore();
+    }
+  });
+
+  it('waits for a cooled-down upstream to become available again', async () => {
+    vi.useFakeTimers();
+
+    try {
+      const config: AppConfig = {
+        ...baseConfig,
+        upstreamUrls: ['http://one.example/api/interpreter'],
+        upstreamBackoffBaseSeconds: 1,
+        upstreamBackoffMaxSeconds: 1,
+        upstreamExhaustedWaitSeconds: 2,
+        upstreamExhaustedGraceSeconds: 0
+      };
+      const pool = getUpstreamPoolForTesting(config);
+      await (pool as unknown as { ensureReady: () => Promise<void> }).ensureReady();
+      (pool as unknown as { markFailure: (url: string) => void }).markFailure(
+        'http://one.example/api/interpreter'
+      );
+
+      postMock.mockResolvedValue({ body: JSON.stringify({ elements: ['after-wait'] }) });
+
+      const pending = fetchTile(config, bbox, 'toilets');
+      expect(postMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1100);
+      await expect(pending).resolves.toEqual({ elements: ['after-wait'] });
+      expect(postMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops waiting once the request-side wait budget is exhausted', async () => {
+    vi.useFakeTimers();
+
+    try {
+      const config: AppConfig = {
+        ...baseConfig,
+        upstreamUrls: ['http://one.example/api/interpreter'],
+        upstreamBackoffBaseSeconds: 5,
+        upstreamBackoffMaxSeconds: 5,
+        upstreamExhaustedWaitSeconds: 1,
+        upstreamExhaustedGraceSeconds: 0
+      };
+      const pool = getUpstreamPoolForTesting(config);
+      await (pool as unknown as { ensureReady: () => Promise<void> }).ensureReady();
+      (pool as unknown as { markFailure: (url: string) => void }).markFailure(
+        'http://one.example/api/interpreter'
+      );
+
+      const pending = fetchTile(config, bbox, 'toilets');
+      const rejection = expect(pending).rejects.toThrow('No upstream URLs available');
+      await vi.advanceTimersByTimeAsync(1100);
+      await rejection;
+      expect(postMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
     }
   });
 

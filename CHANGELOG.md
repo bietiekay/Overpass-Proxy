@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Bounded upstream-availability waiting for cache-miss interpreter requests when all upstreams are temporarily in backoff.
+- Recovery fetch replanning with smaller bbox groups to reduce refill pressure on the first upstream that becomes available again.
+- Integration coverage for immediate stale-cache responses during temporary upstream exhaustion.
+
+### Changed
+- Transparent proxy requests keep fail-fast upstream behavior instead of entering the availability-wait loop.
+- Integration test defaults now use short backoff/probe windows so shared test servers do not stay blocked behind stale upstream state.
+
 ## 1.5.0 - 2026-03-06
 
 ### Added

@@ -3,7 +3,9 @@ import request, { type Response } from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { extractBoundingBox } from '../../bbox.js';
+import { planTileFetches } from '../../fetchPlan.js';
 import { buildServer } from '../../index.js';
+import { logger } from '../../logger.js';
 import { tileKey, tilesForBoundingBox } from '../../tiling.js';
 import * as upstream from '../../upstream.js';
 import { RequestStatistics, STATISTICS_SNAPSHOT_KEY } from '../../stats.js';
@@ -83,7 +85,13 @@ beforeAll(async () => {
       upstreamUrls: env.upstreamUrls,
       cacheTtlSeconds: 1,
       swrSeconds: 1,
-      tilePrecision: 5
+      tilePrecision: 5,
+      upstreamBackoffBaseSeconds: 1,
+      upstreamBackoffMaxSeconds: 1,
+      upstreamExhaustedWaitSeconds: 2,
+      upstreamExhaustedGraceSeconds: 0,
+      upstreamProbeIntervalSeconds: 1,
+      upstreamProbeJitterSeconds: 0
     },
     redisClient: env.redis
   });
@@ -388,6 +396,240 @@ describe('integration', () => {
       expect(hits.length).toBeGreaterThan(0);
     } finally {
       resetResponder?.();
+      await app.close();
+    }
+  });
+
+  it('coalesces missing fine tile warnings when upstream fetch fails', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const bbox = extractBoundingBox(jsonQuery);
+    if (!bbox) {
+      throw new Error('expected bbox in jsonQuery');
+    }
+
+    const tilePrecision = 6;
+    const fineTileCount = tilesForBoundingBox(bbox, tilePrecision).length;
+    expect(fineTileCount).toBeGreaterThan(1);
+
+    const fetchTileSpy = vi.spyOn(upstream, 'fetchTile').mockRejectedValue(new Error('No upstream URLs available'));
+    const warnSpy = vi.spyOn(logger, 'warn');
+
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision,
+        upstreamTilePrecision: 3
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+    warnSpy.mockClear();
+
+    try {
+      const response = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(503);
+
+      expect(response.body).toEqual({ error: 'Requested area unavailable from cache' });
+
+      const groupWarnings = warnSpy.mock.calls.filter((call) => call[1] === 'failed to fetch missing tile group');
+      const fineTileWarnings = warnSpy.mock.calls.filter((call) => call[1] === 'fine tile missing after fetch');
+
+      expect(groupWarnings.length).toBeGreaterThan(0);
+      expect(fineTileWarnings.length).toBeGreaterThan(0);
+      expect(fineTileWarnings.length).toBeLessThan(fineTileCount);
+      expect(fineTileWarnings[0]?.[0]).toMatchObject({
+        outcome: 'waited',
+        missingTileCount: expect.any(Number),
+        missingTiles: expect.any(Array)
+      });
+    } finally {
+      warnSpy.mockRestore();
+      fetchTileSpy.mockRestore();
+      await app.close();
+    }
+  });
+
+  it('waits for a cooled-down upstream and completes concurrent requests', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const { app, config } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5,
+        upstreamBackoffBaseSeconds: 1,
+        upstreamBackoffMaxSeconds: 1,
+        upstreamExhaustedWaitSeconds: 2,
+        upstreamExhaustedGraceSeconds: 0
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+    const pool = upstream.getUpstreamPoolForTesting(config, redisClient);
+    await (pool as unknown as { ensureReady: () => Promise<void> }).ensureReady();
+    (pool as unknown as { markFailure: (url: string) => void }).markFailure(upstreamUrls[0]!);
+
+    try {
+      const startedAt = Date.now();
+      const [first, second] = await Promise.all([
+        request(url)
+          .post('/api/interpreter')
+          .set('Content-Type', 'application/x-www-form-urlencoded')
+          .send(formBody(jsonQuery))
+          .expect(200),
+        request(url)
+          .post('/api/interpreter')
+          .set('Content-Type', 'application/x-www-form-urlencoded')
+          .send(formBody(jsonQuery))
+          .expect(200)
+      ]);
+      const durationMs = Date.now() - startedAt;
+
+      expect(durationMs).toBeGreaterThanOrEqual(900);
+      expect(first.body.elements.length).toBeGreaterThan(0);
+      expect(second.body.elements.length).toBeGreaterThan(0);
+      expect(hits.length).toBeGreaterThan(0);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('serves stale cache immediately and refreshes it in the background while the pool is empty', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const { app, config } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision: 5,
+        serveStaleFromCache: true,
+        upstreamBackoffBaseSeconds: 1,
+        upstreamBackoffMaxSeconds: 1,
+        upstreamExhaustedWaitSeconds: 2,
+        upstreamExhaustedGraceSeconds: 0
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      const hitsAfterWarm = hits.length;
+      expect(hitsAfterWarm).toBeGreaterThan(0);
+
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+
+      const pool = upstream.getUpstreamPoolForTesting(config, redisClient);
+      await (pool as unknown as { ensureReady: () => Promise<void> }).ensureReady();
+      (pool as unknown as { markFailure: (url: string) => void }).markFailure(upstreamUrls[0]!);
+
+      const startedAt = Date.now();
+      const staleResponse = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+      const durationMs = Date.now() - startedAt;
+
+      expect(staleResponse.headers['x-cache']).toBe('STALE');
+      expect(durationMs).toBeLessThan(250);
+      expect(hits.length).toBe(hitsAfterWarm);
+
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      expect(hits.length).toBeGreaterThan(hitsAfterWarm);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('splits tile fetches into smaller groups while waiting for upstream availability', async () => {
+    await redisClient?.flushall();
+    hits.splice(0, hits.length);
+
+    const bbox = extractBoundingBox(jsonQuery);
+    if (!bbox) {
+      throw new Error('expected bbox in jsonQuery');
+    }
+
+    const tilePrecision = 6;
+    const tiles = tilesForBoundingBox(bbox, tilePrecision);
+    const normalGroups = planTileFetches(tiles, {
+      coarsePrecision: 3,
+      finePrecision: tilePrecision
+    });
+    const recoveryGroups = planTileFetches(tiles, {
+      coarsePrecision: 5,
+      finePrecision: tilePrecision,
+      targetTilesPerRequest: 8
+    });
+
+    expect(normalGroups).toHaveLength(1);
+    expect(recoveryGroups.length).toBeGreaterThan(1);
+
+    const { app, config } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        cacheTtlSeconds: 1,
+        swrSeconds: 1,
+        tilePrecision,
+        upstreamTilePrecision: 3,
+        upstreamRecoveryCoarsePrecision: 5,
+        upstreamRecoveryTargetTilesPerRequest: 8,
+        upstreamBackoffBaseSeconds: 1,
+        upstreamBackoffMaxSeconds: 1,
+        upstreamExhaustedWaitSeconds: 2,
+        upstreamExhaustedGraceSeconds: 0
+      },
+      redisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+    const pool = upstream.getUpstreamPoolForTesting(config, redisClient);
+    await (pool as unknown as { ensureReady: () => Promise<void> }).ensureReady();
+    (pool as unknown as { markFailure: (url: string) => void }).markFailure(upstreamUrls[0]!);
+
+    try {
+      const response = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(200);
+
+      expect(response.body.elements.length).toBeGreaterThan(0);
+      expect(hits.length).toBe(recoveryGroups.length);
+      expect(new Set(hits.map((entry) => entry.split(':')[0])).size).toBe(recoveryGroups.length);
+    } finally {
       await app.close();
     }
   });

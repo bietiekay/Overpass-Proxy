@@ -17,8 +17,8 @@ import { logger } from './logger.js';
 import type { CacheCoverageBoundsOptions, TileStore } from './store.js';
 import { tilesForBoundingBox, type TileInfo } from './tiling.js';
 import { filterElementsByBbox, type OverpassResponse } from './store.js';
-import { planTileFetches } from './fetchPlan.js';
-import { fetchTile, proxyTransparent } from './upstream.js';
+import { planTileFetches, type TileFetchGroup } from './fetchPlan.js';
+import { fetchTile, getUpstreamAvailabilitySnapshot, proxyTransparent } from './upstream.js';
 import {
   StatisticsWorkerClient,
   type CacheCoverageSnapshot,
@@ -329,12 +329,70 @@ const handleCacheable = async (
     coarsePrecision: deps.config.upstreamTilePrecision,
     finePrecision: deps.config.tilePrecision
   };
+  const recoveryPlanOptions = {
+    coarsePrecision: deps.config.upstreamRecoveryCoarsePrecision,
+    finePrecision: deps.config.tilePrecision,
+    targetTilesPerRequest: deps.config.upstreamRecoveryTargetTilesPerRequest
+  };
+  const missLockTtlMs = Math.max(
+    10_000,
+    Math.ceil(
+      (
+        deps.config.upstreamExhaustedWaitSeconds +
+        deps.config.upstreamExhaustedGraceSeconds +
+        deps.config.upstreamRequestTimeoutSeconds +
+        5
+      ) * 1000
+    )
+  );
+  const maybeSplitGroupForUpstreamRecovery = async (
+    group: TileFetchGroup,
+    phase: 'missing' | 'stale'
+  ): Promise<TileFetchGroup[]> => {
+    if (group.tiles.length <= 1) {
+      return [group];
+    }
+
+    const availability = await getUpstreamAvailabilitySnapshot(deps.config, deps.redis);
+    if (availability.availableNow || availability.exhaustedByLimit) {
+      return [group];
+    }
+
+    const smallerGroups = planTileFetches(group.tiles, recoveryPlanOptions);
+    if (smallerGroups.length <= 1) {
+      return [group];
+    }
+
+    logger.info(
+      {
+        phase,
+        originalTileCount: group.tiles.length,
+        splitTileGroups: smallerGroups.length,
+        nextAvailableInMs: availability.nextAvailableInMs,
+        recoveryCoarsePrecision: recoveryPlanOptions.coarsePrecision,
+        recoveryTargetTilesPerRequest: recoveryPlanOptions.targetTilesPerRequest
+      },
+      'splitting tile group while waiting for upstream availability'
+    );
+    return smallerGroups;
+  };
 
   const staleGroups = planTileFetches(stale, planOptions);
   const shouldDeferStaleRefresh = deps.config.serveStaleFromCache && stale.length > 0 && missing.length === 0;
   let queuedStaleRefresh: (() => void) | null = null;
   const refreshStaleTiles = async (updateResponses: boolean) => {
-    for (const group of staleGroups) {
+    const queue = [...staleGroups];
+    while (queue.length > 0) {
+      const group = queue.shift();
+      if (!group) {
+        continue;
+      }
+      const smallerGroups = await maybeSplitGroupForUpstreamRecovery(group, 'stale');
+      if (smallerGroups.length > 1) {
+        queue.unshift(...smallerGroups);
+        continue;
+      }
+
       const representative = group.tiles[0];
       if (!representative) continue;
 
@@ -385,20 +443,32 @@ const handleCacheable = async (
 
   const missingGroups = planTileFetches(missing, planOptions);
   let missingFetchFailed = false;
-  for (const group of missingGroups) {
+  const missingQueue = [...missingGroups];
+  while (missingQueue.length > 0) {
+    const group = missingQueue.shift();
+    if (!group) {
+      continue;
+    }
+    const smallerGroups = await maybeSplitGroupForUpstreamRecovery(group, 'missing');
+    if (smallerGroups.length > 1) {
+      missingQueue.unshift(...smallerGroups);
+      continue;
+    }
+
     const representative = group.tiles[0];
     if (!representative) continue;
     const outcome = await deps.store
       .withMissLock(representative, normalisedAmenity, async () => {
         const response = await fetchTile(deps.config, group.bounds, normalisedAmenity, upstreamOptions);
         await writeFineTilesFromGroup(response, group.tiles);
-      })
+      }, missLockTtlMs)
       .catch((error) => {
         missingFetchFailed = true;
         logger.warn({ err: error }, 'failed to fetch missing tile group');
         return 'waited';
       });
 
+    const missingFineTiles: string[] = [];
     for (const fine of group.tiles) {
       const fresh = await deps.store.readTile(fine, normalisedAmenity);
       if (fresh) {
@@ -407,8 +477,21 @@ const handleCacheable = async (
           fetchedAt: fresh.payload.fetchedAt
         });
       } else {
-        logger.warn({ tile: fine.hash, outcome }, 'fine tile missing after fetch');
+        missingFineTiles.push(fine.hash);
       }
+    }
+
+    if (missingFineTiles.length > 0) {
+      const missingTileSample = missingFineTiles.slice(0, 8);
+      logger.warn(
+        {
+          outcome,
+          missingTileCount: missingFineTiles.length,
+          missingTiles: missingTileSample,
+          omittedMissingTiles: Math.max(0, missingFineTiles.length - missingTileSample.length)
+        },
+        'fine tile missing after fetch'
+      );
     }
   }
 

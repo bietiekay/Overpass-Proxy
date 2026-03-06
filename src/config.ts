@@ -15,12 +15,16 @@ export interface AppConfig {
   upstreamFailureCooldownSeconds: number;
   upstreamBackoffBaseSeconds: number;
   upstreamBackoffMaxSeconds: number;
+  upstreamExhaustedWaitSeconds: number;
+  upstreamExhaustedGraceSeconds: number;
   upstreamEwmaAlpha: number;
   upstreamStickinessTtlSeconds: number;
   upstreamProbeIntervalSeconds: number;
   upstreamProbeJitterSeconds: number;
   upstreamProbeTimeoutSeconds: number;
   upstreamRequestTimeoutSeconds: number;
+  upstreamRecoveryCoarsePrecision: number;
+  upstreamRecoveryTargetTilesPerRequest: number;
   transparentOnly: boolean;
   upstreamDailyLimit: number;
   trustProxy: boolean;
@@ -62,15 +66,37 @@ export const loadConfig = (): AppConfig => {
   const tilePrecision = toNumber(env.TILE_PRECISION, 5);
   // target ~2 levels coarser to get ~32x coverage (to cover ~50 tiles minimum)
   const upstreamTilePrecision = toNumber(env.UPSTREAM_TILE_PRECISION, Math.max(2, tilePrecision - 2));
+  const upstreamRecoveryCoarsePrecision = Math.min(
+    tilePrecision,
+    Math.max(
+      1,
+      toNumber(
+        env.UPSTREAM_RECOVERY_COARSE_PRECISION,
+        Math.min(tilePrecision, Math.max(upstreamTilePrecision + 1, tilePrecision - 1))
+      )
+    )
+  );
   const cacheInvalidateSecret = env.CACHE_INVALIDATION_SECRET?.trim();
   const maxTilesPerRequest = toNumber(env.MAX_TILES_PER_REQUEST, 1024);
   const staleRefreshCoarsePrecision = Math.min(
     tilePrecision,
     Math.max(1, toNumber(env.STALE_REFRESH_COARSE_PRECISION, 3))
   );
+  const upstreamRecoveryTargetTilesPerRequest = Math.max(
+    1,
+    toNumber(env.UPSTREAM_RECOVERY_TARGET_TILES_PER_REQUEST, 8)
+  );
   const staleRefreshTargetTilesPerRequest = toNumber(
     env.STALE_REFRESH_TARGET_TILES_PER_REQUEST,
     Math.min(256, Math.max(32, Math.floor(maxTilesPerRequest / 4)))
+  );
+  const upstreamExhaustedWaitSeconds = Math.max(
+    0,
+    toNumber(env.UPSTREAM_EXHAUSTED_WAIT_SECONDS, 2)
+  );
+  const upstreamExhaustedGraceSeconds = Math.max(
+    0,
+    toNumber(env.UPSTREAM_EXHAUSTED_GRACE_SECONDS, 0)
   );
 
   const parseUpstreamUrls = (raw: string | undefined): string[] => {
@@ -104,6 +130,8 @@ export const loadConfig = (): AppConfig => {
     upstreamFailureCooldownSeconds: failureCooldownSeconds,
     upstreamBackoffBaseSeconds: toNumber(env.UPSTREAM_BACKOFF_BASE_SECONDS, failureCooldownSeconds),
     upstreamBackoffMaxSeconds: toNumber(env.UPSTREAM_BACKOFF_MAX_SECONDS, 600),
+    upstreamExhaustedWaitSeconds,
+    upstreamExhaustedGraceSeconds,
     upstreamEwmaAlpha: Math.min(1, Math.max(0.01, toNumber(env.UPSTREAM_EWMA_ALPHA, 0.3))),
     upstreamStickinessTtlSeconds: Math.max(0, toNumber(env.UPSTREAM_STICKINESS_TTL_SECONDS, 300)),
     upstreamProbeIntervalSeconds: Math.max(0, toNumber(env.UPSTREAM_PROBE_INTERVAL_SECONDS, 60)),
@@ -113,6 +141,8 @@ export const loadConfig = (): AppConfig => {
       1,
       toNumber(env.UPSTREAM_REQUEST_TIMEOUT_SECONDS, Math.min(30, failureCooldownSeconds))
     ),
+    upstreamRecoveryCoarsePrecision,
+    upstreamRecoveryTargetTilesPerRequest,
     transparentOnly: toBoolean(env.TRANSPARENT_ONLY, false),
     upstreamDailyLimit: toNumber(env.UPSTREAM_DAILY_LIMIT, -1),
     trustProxy: toBoolean(env.TRUST_PROXY, false),

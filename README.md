@@ -18,6 +18,7 @@ adding Redis-backed geohash tile caching for amenity-focused JSON bounding-box q
 - Fastify-based HTTP server exposing the `/api/*` Overpass endpoints
 - Strict amenity-only handling for `/api/interpreter`; non-JSON or non-amenity queries are rejected with helpful errors, and recognised amenity filters are preserved end-to-end
 - Redis-backed geohash tile caching for amenity Overpass JSON bbox queries with stale-while-revalidate refresh, segmented by requested amenity type and persisted via pipelined Redis bulk writes
+- Temporary upstream blackouts can pause cache-miss requests briefly and retry with smaller bbox groups once a backend recovers, while cache-hit and stale-cache responses stay immediate
 - Request statistics collected per amenity and exposed via JSON endpoints for observing hotspots, cache coverage, and per-amenity geohash coverage
 - Structured logging via Pino
 - Configurable per-upstream daily request limits with automatic 24-hour lockouts once a quota is reached
@@ -53,12 +54,16 @@ Environment variables are read at startup. Defaults are shown below:
 | `UPSTREAM_URL` | `https://overpass-api.de/api/interpreter` | Legacy single Overpass API endpoint (used when `UPSTREAM_URLS` is unset) |
 | `UPSTREAM_FAILURE_COOLDOWN_SECONDS` | `60` | Cooldown before retrying a failed upstream |
 | `UPSTREAM_REQUEST_TIMEOUT_SECONDS` | `30` | Timeout for individual upstream requests before failing over |
+| `UPSTREAM_EXHAUSTED_WAIT_SECONDS` | `2` | Maximum time a cache-miss request waits for the next upstream to leave backoff before returning an error |
+| `UPSTREAM_EXHAUSTED_GRACE_SECONDS` | `0` | Extra grace window added after the next upstream retry time before the waiting request gives up |
 | `REDIS_URL` | `redis://redis:6379` | Redis connection URL |
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
 | `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
+| `UPSTREAM_RECOVERY_COARSE_PRECISION` | `min(TILE_PRECISION, max(UPSTREAM_TILE_PRECISION + 1, TILE_PRECISION - 1))` | Finer grouping precision used when the upstream pool is temporarily empty and the proxy retries with smaller bbox requests |
+| `UPSTREAM_RECOVERY_TARGET_TILES_PER_REQUEST` | `8` | Target fine-tile count per upstream retry group during temporary upstream exhaustion |
 | `STALE_REFRESH_COARSE_PRECISION` | `3` | Coarse geohash precision for background stale refresh grouping |
 | `STALE_REFRESH_TARGET_TILES_PER_REQUEST` | `max(32, MAX_TILES_PER_REQUEST / 4)` | Target tile count per background stale refresh request |
 | `TRANSPARENT_ONLY` | `false` | Disable caching and proxy all requests upstream |
@@ -91,16 +96,28 @@ workflow is:
   so responses include the latest attempted writes. A per-tile lock (`tile:<amenity>:<hash>:lock`) held for `SWR_SECONDS`
   (default one tenth of `CACHE_TTL_SECONDS`, with a 30-second floor) prevents duplicate refreshes. If upstream fetches fail
   and the request cannot be fully resolved from cache, the proxy returns HTTP 503 with `X-Cache` and `X-Cache-Fetched-At`
-  headers rather than serving partial tiles.
+  headers rather than serving partial tiles. Cache hits and fully stale-covered responses are still returned immediately even
+  when every upstream is temporarily in backoff.
 - **Handling misses:** missing tiles trigger synchronous upstream fetches. An inflight lock (`:inflight`) keeps concurrent
   callers from stampeding the same fetch. Late callers reuse the fresh write once it lands or fall back to waiting until the
-  inflight window expires.
+  inflight window expires. If all upstreams are temporarily unavailable because they are cooling down, miss requests wait only
+  for the bounded `UPSTREAM_EXHAUSTED_WAIT_SECONDS` window before failing, instead of immediately returning 503.
 - **Upstream grouping:** tiles slated for refresh are clustered at `UPSTREAM_TILE_PRECISION` (default two geohash levels
   coarser than `TILE_PRECISION`) so one upstream bbox request can repopulate many fine-grained tiles. Background refreshes
   replan tiles using `STALE_REFRESH_COARSE_PRECISION` (default 3) and `STALE_REFRESH_TARGET_TILES_PER_REQUEST` (default a
   quarter of `MAX_TILES_PER_REQUEST`, min 32) to reduce redundant bbox fetches. Each grouped request uses the canonical
   amenity query and obeys `UPSTREAM_REQUEST_TIMEOUT_SECONDS` (default 30 seconds, bounded by
-  `UPSTREAM_FAILURE_COOLDOWN_SECONDS`).
+  `UPSTREAM_FAILURE_COOLDOWN_SECONDS`). When the pool is empty only because all upstreams are in backoff, the proxy can
+  temporarily replan the same miss into smaller bbox groups using `UPSTREAM_RECOVERY_COARSE_PRECISION` and
+  `UPSTREAM_RECOVERY_TARGET_TILES_PER_REQUEST` so the first recovered upstream is hit with lighter refill work.
+
+### Upstream recovery behavior
+
+- Cacheable misses may wait briefly for the earliest `backoffUntil` instead of failing immediately when every upstream is in cooldown.
+- The wait is request-bounded by `UPSTREAM_EXHAUSTED_WAIT_SECONDS` and only applies before any new upstream attempt has started.
+- Once an upstream has actually been tried and failed for the current request, the proxy stops waiting and returns the normal error path.
+- Transparent proxy requests keep fail-fast behavior; they do not sit in the availability-wait loop.
+- Background stale refresh keeps the stale response path fast for callers and warms the cache gently after the response has already been sent.
 - **Persistence:** successful upstream responses are clipped to each fine tile’s exact bbox and written with `fetchedAt` and
   `expiresAt` using Redis pipelines. Presence counters that drive `GET /api/statistics/cacheCoverage` are updated alongside the
   tile payloads.
