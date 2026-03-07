@@ -26,6 +26,7 @@ services:
       # STALE_REFRESH_COARSE_PRECISION: 3  # coarse precision for background stale refresh grouping
       # STALE_REFRESH_TARGET_TILES_PER_REQUEST: 256 # target tiles per background refresh request
       # CACHE_INVALIDATION_SECRET: 'change-me' # secret required to use /api/cache/invalidate
+      # CLIENT_AUTH_TOKEN: 'change-me'  # optional shared token for all /api/* routes; unset or blank disables it
 
       # Upstream health & load-balancing (EWMA + stickiness + backoff + probes)
       # UPSTREAM_EWMA_ALPHA: 0.3             # weight for new latency/success samples (0-1)

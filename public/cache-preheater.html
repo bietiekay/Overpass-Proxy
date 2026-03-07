@@ -150,6 +150,10 @@
           <input id="proxyUrl" type="url" placeholder="https://example.com" />
         </div>
         <div>
+          <label for="clientToken">Client-Token</label>
+          <input id="clientToken" type="password" placeholder="Optional API token" />
+        </div>
+        <div>
           <label for="amenity">Amenity</label>
           <input id="amenity" type="text" value="toilets" />
         </div>
@@ -227,7 +231,9 @@
     import { feature } from 'https://cdn.jsdelivr.net/npm/topojson-client@3/+esm';
 
     const byId = (id) => document.getElementById(id);
+    const clientAuthHeaderName = 'X-Overpass-Proxy-Token';
     const proxyUrlInput = byId('proxyUrl');
+    const clientTokenInput = byId('clientToken');
     const amenityInput = byId('amenity');
     const targetPrecisionInput = byId('targetPrecision');
     const concurrencyInput = byId('concurrency');
@@ -249,6 +255,15 @@
     const statusText = byId('statusText');
 
     proxyUrlInput.value = window.location.origin;
+
+    const buildApiHeaders = (baseHeaders = {}) => {
+      const headers = { ...baseHeaders };
+      const clientToken = clientTokenInput.value.trim();
+      if (clientToken) {
+        headers[clientAuthHeaderName] = clientToken;
+      }
+      return headers;
+    };
 
     let landGeometry = null;
     let abortController = null;
@@ -369,6 +384,7 @@
 
     const streamCacheCoverage = async (baseUrl, onEntry, signal) => {
       const response = await fetch(`${baseUrl.replace(/\/?$/, '')}/api/statistics/cacheCoverage`, {
+        headers: buildApiHeaders(),
         cache: 'no-store',
         signal
       });
@@ -633,7 +649,7 @@
       try {
         const response = await fetch(`${baseUrl.replace(/\/?$/, '')}/api/interpreter`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: buildApiHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
           body: new URLSearchParams({ data: query, amenity }),
           signal: controller.signal
         });

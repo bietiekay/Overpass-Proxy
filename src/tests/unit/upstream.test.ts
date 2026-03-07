@@ -67,7 +67,8 @@ const baseConfig: AppConfig = {
   upstreamOrigin: 'https://overpass-turbo.eu',
   upstreamReferer: 'https://overpass-turbo.eu/',
   serveStaleFromCache: true,
-  cacheInvalidateSecret: null
+  cacheInvalidateSecret: null,
+  clientAuthToken: null
 };
 
 const mockReply = () => {
@@ -703,5 +704,37 @@ describe('proxyTransparent', () => {
     expect(options.headers['sec-fetch-mode']).toBe('cors');
     expect(options.headers['priority']).toBe('u=1, i');
     expect(reply.payload).toEqual({ elements: [] });
+  });
+
+  it('does not forward the client auth header upstream', async () => {
+    const rawBody = Buffer.from(JSON.stringify({ elements: [] }));
+    gotMock.mockResolvedValueOnce({
+      statusCode: 200,
+      headers: { 'content-type': 'application/json' },
+      rawBody
+    });
+
+    const request = {
+      method: 'GET',
+      url: '/api/status',
+      headers: {
+        'x-overpass-proxy-token': 'shared-secret',
+        authorization: 'Bearer token123',
+        accept: 'application/json'
+      },
+      ip: '127.0.0.1'
+    };
+
+    const reply = mockReply();
+
+    await proxyTransparent(request as unknown as FastifyRequest, reply as FastifyReply, {
+      ...baseConfig,
+      upstreamUrls: ['http://one.example/api/status']
+    });
+
+    const [, options] = gotMock.mock.calls[0];
+    expect(options.headers['x-overpass-proxy-token']).toBeUndefined();
+    expect(options.headers.authorization).toBe('Bearer token123');
+    expect(options.headers.accept).toBe('application/json');
   });
 });

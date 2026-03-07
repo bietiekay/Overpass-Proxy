@@ -4,6 +4,12 @@ import { Redis } from 'ioredis';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
+import {
+  CLIENT_AUTH_HEADER_NAME,
+  isApiRequestPath,
+  readClientAuthToken,
+  sanitiseHeadersForLogs
+} from './clientAuth.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { registerInterpreterRoutes } from './interpreter.js';
 import { createLoggerOptions, createProgressLogger, logger } from './logger.js';
@@ -37,7 +43,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     reply.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     reply.header(
       'Access-Control-Allow-Headers',
-      'Content-Type, Accept, X-Requested-With, If-None-Match'
+      `Content-Type, Accept, X-Requested-With, If-None-Match, ${CLIENT_AUTH_HEADER_NAME}`
     );
     reply.header('Access-Control-Max-Age', '600');
     return payload;
@@ -87,16 +93,29 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     return { kind: typeof body, size: 0 };
   };
 
-  app.addHook('onRequest', async (request) => {
+  app.addHook('onRequest', async (request, reply) => {
     app.log.info(
       {
         method: request.method,
         url: request.url,
-        headers: request.headers,
+        headers: sanitiseHeadersForLogs(request.headers),
         remoteAddress: request.ip
       },
       'incoming request'
     );
+
+    if (
+      config.clientAuthToken !== null &&
+      request.method !== 'OPTIONS' &&
+      isApiRequestPath(request.url)
+    ) {
+      const clientToken = readClientAuthToken(request.headers);
+      if (clientToken !== config.clientAuthToken) {
+        reply.code(401);
+        reply.send({ error: 'Invalid or missing client token' });
+        return;
+      }
+    }
   });
 
   app.addHook('preValidation', async (request: FastifyRequest) => {

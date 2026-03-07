@@ -32,6 +32,7 @@ export interface AppConfig {
   upstreamReferer: string;
   serveStaleFromCache: boolean;
   cacheInvalidateSecret: string | null;
+  clientAuthToken: string | null;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -77,6 +78,7 @@ export const loadConfig = (): AppConfig => {
     )
   );
   const cacheInvalidateSecret = env.CACHE_INVALIDATION_SECRET?.trim();
+  const clientAuthToken = env.CLIENT_AUTH_TOKEN?.trim();
   const maxTilesPerRequest = toNumber(env.MAX_TILES_PER_REQUEST, 1024);
   const staleRefreshCoarsePrecision = Math.min(
     tilePrecision,
@@ -150,6 +152,7 @@ export const loadConfig = (): AppConfig => {
     upstreamReferer: env.UPSTREAM_REFERER ?? 'https://overpass-turbo.eu/',
     serveStaleFromCache: toBoolean(env.SERVE_STALE_FROM_CACHE, true),
     cacheInvalidateSecret:
-      cacheInvalidateSecret && cacheInvalidateSecret.length > 0 ? cacheInvalidateSecret : null
+      cacheInvalidateSecret && cacheInvalidateSecret.length > 0 ? cacheInvalidateSecret : null,
+    clientAuthToken: clientAuthToken && clientAuthToken.length > 0 ? clientAuthToken : null
   };
 };

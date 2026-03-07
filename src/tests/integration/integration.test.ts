@@ -18,6 +18,8 @@ const formBody = (query: string) => new URLSearchParams({ data: query }).toStrin
 const drinkingWaterQuery =
   '[out:json];node["amenity"="drinking_water"](52.5,13.3,52.6,13.4);out;';
 const uppercaseAmenityQuery = '[out:json];node["amenity"="TOILETS"](52.5,13.3,52.6,13.4);out;';
+const clientAuthHeaderName = 'X-Overpass-Proxy-Token';
+const clientAuthToken = 'shared-client-token';
 
 const waitForCoverage = async (path: string) => {
   let lastResponse: Response | undefined;
@@ -2416,6 +2418,269 @@ describe('validation', () => {
     
     // Accept 200 (success) or 502/503 (upstream unavailable in test env)
     expect([200, 502, 503]).toContain(response.statusCode);
+  });
+});
+
+describe('client token auth', () => {
+  const startProtectedServer = async (
+    overrides: Record<string, unknown> = {},
+    localRedisClient = redisClient
+  ) => {
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        tilePrecision: 5,
+        clientAuthToken,
+        ...(overrides as object)
+      },
+      redisClient: localRedisClient
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+    return { app, url };
+  };
+
+  it('starts successfully when client token auth is disabled', async () => {
+    const redis = new InMemoryRedis();
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        tilePrecision: 5,
+        clientAuthToken: null
+      },
+      redisClient: redis as unknown as Redis
+    });
+
+    try {
+      await app.ready();
+      await app.listen({ port: 0 });
+      const address = app.server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      expect(port).toBeGreaterThan(0);
+    } finally {
+      await app.close();
+      await redis.quit();
+    }
+  });
+
+  it('starts successfully when client token auth is enabled', async () => {
+    const redis = new InMemoryRedis();
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        tilePrecision: 5,
+        clientAuthToken
+      },
+      redisClient: redis as unknown as Redis
+    });
+
+    try {
+      await app.ready();
+      await app.listen({ port: 0 });
+      const address = app.server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      expect(port).toBeGreaterThan(0);
+    } finally {
+      await app.close();
+      await redis.quit();
+    }
+  });
+
+  it('keeps interpreter access unchanged when client token auth is disabled', async () => {
+    const redis = new InMemoryRedis();
+    const { app } = await buildServer({
+      configOverrides: {
+        upstreamUrls,
+        tilePrecision: 5,
+        clientAuthToken: null
+      },
+      redisClient: redis as unknown as Redis
+    });
+
+    await app.ready();
+    await app.listen({ port: 0 });
+    const address = app.server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+
+    try {
+      const response = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery));
+
+      expect([200, 503]).toContain(response.statusCode);
+    } finally {
+      await app.close();
+      await redis.quit();
+    }
+  });
+
+  it('rejects interpreter requests without or with wrong token and allows the correct token', async () => {
+    const { app, url } = await startProtectedServer();
+
+    try {
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .send(formBody(jsonQuery))
+        .expect(401);
+
+      await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .set(clientAuthHeaderName, 'wrong-token')
+        .send(formBody(jsonQuery))
+        .expect(401);
+
+      const response = await request(url)
+        .post('/api/interpreter')
+        .set('Content-Type', 'application/x-www-form-urlencoded')
+        .set(clientAuthHeaderName, clientAuthToken)
+        .send(formBody(jsonQuery));
+
+      expect([200, 503]).toContain(response.statusCode);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('protects statistics endpoints and allows access with the correct token', async () => {
+    const { app, url } = await startProtectedServer();
+
+    try {
+      for (const path of [
+        '/api/statistics',
+        '/api/statistics/geohashCoverage',
+        '/api/statistics/cacheCoverage',
+        '/api/statistics/cacheCoverage/area?south=52.5&west=13.3&north=52.6&east=13.4&precision=5'
+      ]) {
+        await request(url).get(path).expect(401);
+      }
+
+      const statsResponse = await request(url)
+        .get('/api/statistics')
+        .set(clientAuthHeaderName, clientAuthToken);
+      expect([200, 202]).toContain(statsResponse.statusCode);
+
+      const geohashResponse = await request(url)
+        .get('/api/statistics/geohashCoverage')
+        .set(clientAuthHeaderName, clientAuthToken);
+      expect([200, 202]).toContain(geohashResponse.statusCode);
+
+      const cacheResponse = await request(url)
+        .get('/api/statistics/cacheCoverage')
+        .set(clientAuthHeaderName, clientAuthToken);
+      expect([200, 202]).toContain(cacheResponse.statusCode);
+
+      const areaResponse = await request(url)
+        .get('/api/statistics/cacheCoverage/area?south=52.5&west=13.3&north=52.6&east=13.4&precision=5')
+        .set(clientAuthHeaderName, clientAuthToken);
+      expect(areaResponse.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('protects transparent api endpoints and strips the token before proxying upstream', async () => {
+    const mockOverpass = createMockOverpass();
+    let capturedHeaders: Record<string, string | string[] | undefined> = {};
+    mockOverpass.app.get('/api/status', async (req, reply) => {
+      capturedHeaders = req.headers as Record<string, string | string[] | undefined>;
+      reply.send({ ok: true });
+    });
+    mockOverpass.app.get('/api/custom', async (req, reply) => {
+      capturedHeaders = req.headers as Record<string, string | string[] | undefined>;
+      reply.send({ ok: true });
+    });
+    await mockOverpass.start(0);
+
+    const address = mockOverpass.app.server.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    const upstreamBaseUrl = `http://127.0.0.1:${port}`;
+    const redis = new InMemoryRedis();
+
+    const { app, url } = await startProtectedServer(
+      { upstreamUrls: [`${upstreamBaseUrl}/api/interpreter`] },
+      redis as unknown as Redis
+    );
+
+    try {
+      await request(url).get('/api/status').expect(401);
+      await request(url).get('/api/custom').expect(401);
+
+      await request(url)
+        .get('/api/status')
+        .set(clientAuthHeaderName, clientAuthToken)
+        .expect(200);
+      expect(capturedHeaders[clientAuthHeaderName.toLowerCase()]).toBeUndefined();
+
+      await request(url)
+        .get('/api/custom')
+        .set(clientAuthHeaderName, clientAuthToken)
+        .expect(200);
+      expect(capturedHeaders[clientAuthHeaderName.toLowerCase()]).toBeUndefined();
+    } finally {
+      await app.close();
+      await redis.quit();
+      await mockOverpass.stop();
+    }
+  });
+
+  it('requires the client token before checking cache invalidation secrets', async () => {
+    const testSecret = 'invalidate-secret';
+    const testBbox = { south: 52.5, west: 13.3, north: 52.6, east: 13.4 };
+    const { app, url } = await startProtectedServer({
+      cacheInvalidateSecret: testSecret
+    });
+
+    try {
+      await request(url)
+        .post('/api/cache/invalidate')
+        .send({ secret: testSecret, bbox: testBbox })
+        .expect(401);
+
+      await request(url)
+        .post('/api/cache/invalidate')
+        .set(clientAuthHeaderName, clientAuthToken)
+        .send({ bbox: testBbox })
+        .expect(403);
+
+      await request(url)
+        .post('/api/cache/invalidate')
+        .set(clientAuthHeaderName, clientAuthToken)
+        .send({ secret: 'wrong-secret', bbox: testBbox })
+        .expect(403);
+
+      const response = await request(url)
+        .post('/api/cache/invalidate')
+        .set(clientAuthHeaderName, clientAuthToken)
+        .send({ secret: testSecret, bbox: testBbox })
+        .expect(200);
+
+      expect(response.body.ok).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('allows preflight requests and exposes the client auth header in CORS', async () => {
+    const { app, url } = await startProtectedServer();
+
+    try {
+      const response = await request(url)
+        .options('/api/interpreter')
+        .set('Origin', 'https://example.com')
+        .set('Access-Control-Request-Method', 'POST')
+        .set('Access-Control-Request-Headers', clientAuthHeaderName);
+
+      expect([200, 204]).toContain(response.statusCode);
+      expect(response.headers['access-control-allow-headers']).toContain(clientAuthHeaderName);
+    } finally {
+      await app.close();
+    }
   });
 });
 

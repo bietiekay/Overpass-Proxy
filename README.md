@@ -83,10 +83,18 @@ Environment variables are read at startup. Defaults are shown below:
 | `LOG_VERBOSITY` | `info` | Logging verbosity: `errors`, `info`, or `debug` for full request/response details |
 | `NODE_ENV` | `production` | Runtime environment |
 | `CACHE_INVALIDATION_SECRET` | *(unset)* | Secret keyword required by the cache invalidation API |
+| `CLIENT_AUTH_TOKEN` | *(unset)* | Optional shared token required on all `/api/*` requests via `X-Overpass-Proxy-Token`; unset or blank keeps auth disabled |
 
 The defaults for `TILE_PRECISION` and `MAX_TILES_PER_REQUEST` are tuned for the ToiletFinder iOS client: a precision of 5 keeps
 tile counts below the 1 024-tile ceiling even for the app’s widest live-map fetches (~70 km across) and cache-preload passes
 (~100 km combined width/height) while still yielding reusable tiles for the 2 km spatial grid used during normal browsing.
+
+### Optional client token auth
+
+- When `CLIENT_AUTH_TOKEN` is unset, empty, or whitespace-only, the proxy behaves exactly as before and no extra client header is required.
+- When `CLIENT_AUTH_TOKEN` is set, every `/api/*` route requires the request header `X-Overpass-Proxy-Token` with the configured token value.
+- Browser preflight requests remain allowed, and the bundled operator pages include a token input so they can call protected API routes.
+- This is a lightweight shared-secret gate for basic access control, not a user/account-based authentication system.
 
 ### Tile caching lifecycle
 
@@ -166,6 +174,33 @@ Launch the proxy (expects a Redis instance reachable via `REDIS_URL`):
 npm start
 ```
 
+## Client developer quickstart
+
+If you are integrating an app or frontend against this proxy, the minimum contract is small: send standard Overpass requests to `/api/*`, and only add the optional shared client token when the operator has enabled it.
+
+1. Point your client to the proxy base URL instead of the public Overpass endpoint.
+2. Use `POST /api/interpreter` or `GET /api/interpreter` with the same Overpass query style you already use.
+3. If the proxy operator configured `CLIENT_AUTH_TOKEN`, send `X-Overpass-Proxy-Token` on every `/api/*` request.
+4. If you call `POST /api/cache/invalidate`, also provide `CACHE_INVALIDATION_SECRET` as documented below.
+5. Handle normal HTTP status codes from the proxy, especially `200`, `202`, `400`, `401`, `403`, `413`, `502`, and `503`.
+
+Integration notes:
+
+- Cacheable amenity JSON bbox queries go through the proxy cache; unsupported or non-cacheable queries are transparently forwarded upstream.
+- `401` means the proxy expects `X-Overpass-Proxy-Token` and it was missing or wrong.
+- `403` on cache invalidation means the invalidation secret was missing, wrong, or not configured.
+- `202` on statistics endpoints means the snapshot is still being prepared.
+- Browser clients should allow CORS preflight for `X-Overpass-Proxy-Token`; the proxy advertises this header automatically.
+
+Minimal example:
+
+```bash
+curl -X POST http://localhost:8080/api/interpreter \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -H 'X-Overpass-Proxy-Token: YOUR_CLIENT_TOKEN' \
+  --data '[out:json];node["amenity"="cafe"](52.5,13.3,52.6,13.4);out;'
+```
+
 ### Docker Compose
 
 A ready-to-run docker-compose configuration is provided:
@@ -180,7 +215,7 @@ The proxy also publishes aggregated usage statistics at `GET /api/statistics`, c
 
 Statistics snapshots now self-heal when cached payloads age out: a pending read from `/api/statistics` triggers an asynchronous rebuild in the background instead of remaining indefinitely pending. Refresh triggers are throttled per target to protect interpreter request latency during repeated dashboard polling. Snapshot assembly is time-sliced so large per-amenity or hotspot datasets yield back to the event loop in small chunks instead of monopolising the worker thread.
 
-Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities.
+Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities. When `CLIENT_AUTH_TOKEN` is enabled, the same request must also send `X-Overpass-Proxy-Token`.
 
 ### Cache invalidation tool
 
@@ -196,6 +231,7 @@ The proxy ships with a lightweight cache invalidation tool at `GET /cache-invali
 **Secret handling**
 
 - The tool requires the same secret keyword configured in `CACHE_INVALIDATION_SECRET`.
+- When `CLIENT_AUTH_TOKEN` is enabled, enter the same shared client token in the tool so its API requests include `X-Overpass-Proxy-Token`.
 - The secret is sent only in the request payload (not in the URL) and is never stored server-side.
 - Requests are rejected with HTTP 403 if the secret is missing or incorrect, or if the secret is not configured.
 
@@ -234,6 +270,7 @@ The proxy ships with a lightweight cache invalidation tool at `GET /cache-invali
 - Refresh controls with progress feedback to avoid heavy re-fetching during navigation.
 - Panel for upstream health and cache summary statistics.
 - Cooldown rows expose the stored backoff cause separately from the generic status text.
+- Optional client token entry in settings for protected `/api/*` deployments.
 
 **Why it exists**
 
@@ -289,6 +326,12 @@ curl -X POST http://localhost:8080/api/interpreter \
   -H 'Content-Type: application/x-www-form-urlencoded' \
   --data '[out:json];node["amenity"="cafe"](52.5,13.3,52.6,13.4);out;'
 
+# Same request when CLIENT_AUTH_TOKEN is enabled
+curl -X POST http://localhost:8080/api/interpreter \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -H 'X-Overpass-Proxy-Token: YOUR_CLIENT_TOKEN' \
+  --data '[out:json];node["amenity"="cafe"](52.5,13.3,52.6,13.4);out;'
+
 # Validation error when amenity filter missing
 curl -X POST http://localhost:8080/api/interpreter \
   -H 'Content-Type: application/x-www-form-urlencoded' \
@@ -297,6 +340,7 @@ curl -X POST http://localhost:8080/api/interpreter \
 # Cache invalidation request
 curl -X POST 'http://localhost:8080/api/cache/invalidate' \
   -H 'Content-Type: application/json' \
+  -H 'X-Overpass-Proxy-Token: YOUR_CLIENT_TOKEN' \
   --data '{"secret":"YOUR_SECRET","south":52.5,"west":13.3,"north":52.6,"east":13.4}'
 ```
 

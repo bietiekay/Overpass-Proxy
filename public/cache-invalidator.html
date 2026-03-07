@@ -160,6 +160,10 @@
     <h1>Overpass Cache Invalidation</h1>
     <div class="controls">
       <label>
+        Client token
+        <input id="client-token" type="password" placeholder="Optional API token" />
+      </label>
+      <label>
         Secret keyword
         <input id="secret" type="password" placeholder="Enter secret keyword" />
       </label>
@@ -183,11 +187,13 @@
   ></script>
   <script>
     const map = L.map('map', { boxZoom: true }).setView([51.505, -0.09], 13);
+    const clientAuthHeaderName = 'X-Overpass-Proxy-Token';
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; OpenStreetMap contributors'
     }).addTo(map);
 
+    const clientTokenInput = document.getElementById('client-token');
     const secretInput = document.getElementById('secret');
     const invalidateButton = document.getElementById('invalidate');
     const clearButton = document.getElementById('clear');
@@ -201,6 +207,15 @@
     const updateStatus = (message, isError = false) => {
       statusEl.textContent = message;
       statusEl.style.color = isError ? '#fca5a5' : '';
+    };
+
+    const buildApiHeaders = () => {
+      const headers = { 'Content-Type': 'application/json' };
+      const clientToken = clientTokenInput.value.trim();
+      if (clientToken) {
+        headers[clientAuthHeaderName] = clientToken;
+      }
+      return headers;
     };
 
     const setSelection = (bounds) => {
@@ -286,7 +301,7 @@
         updateStatus('Sending invalidation request...');
         const response = await fetch('/api/cache/invalidate', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: buildApiHeaders(),
           body: JSON.stringify(payload)
         });
         const data = await response.json().catch(() => ({}));

@@ -9,6 +9,7 @@ const originalTrustProxy = env.TRUST_PROXY;
 const originalOrigin = env.UPSTREAM_ORIGIN;
 const originalReferer = env.UPSTREAM_REFERER;
 const originalTimeout = env.UPSTREAM_REQUEST_TIMEOUT_SECONDS;
+const originalClientAuthToken = env.CLIENT_AUTH_TOKEN;
 
 describe('loadConfig transparentOnly flag', () => {
   beforeEach(() => {
@@ -37,6 +38,11 @@ describe('loadConfig transparentOnly flag', () => {
     } else {
       env.UPSTREAM_REQUEST_TIMEOUT_SECONDS = originalTimeout;
     }
+    if (originalClientAuthToken === undefined) {
+      delete env.CLIENT_AUTH_TOKEN;
+    } else {
+      env.CLIENT_AUTH_TOKEN = originalClientAuthToken;
+    }
   });
 
   afterEach(() => {
@@ -64,6 +70,11 @@ describe('loadConfig transparentOnly flag', () => {
       delete env.UPSTREAM_REQUEST_TIMEOUT_SECONDS;
     } else {
       env.UPSTREAM_REQUEST_TIMEOUT_SECONDS = originalTimeout;
+    }
+    if (originalClientAuthToken === undefined) {
+      delete env.CLIENT_AUTH_TOKEN;
+    } else {
+      env.CLIENT_AUTH_TOKEN = originalClientAuthToken;
     }
   });
 
@@ -114,5 +125,23 @@ describe('loadConfig transparentOnly flag', () => {
     expect(config.upstreamOrigin).toBe('https://example.com');
     expect(config.upstreamReferer).toBe('https://example.com/');
     expect(config.upstreamRequestTimeoutSeconds).toBe(15);
+  });
+
+  it('keeps client auth disabled when env is unset', () => {
+    delete env.CLIENT_AUTH_TOKEN;
+    const config = loadConfig();
+    expect(config.clientAuthToken).toBeNull();
+  });
+
+  it('keeps client auth disabled when env is blank', () => {
+    env.CLIENT_AUTH_TOKEN = '   ';
+    const config = loadConfig();
+    expect(config.clientAuthToken).toBeNull();
+  });
+
+  it('reads and trims the client auth token', () => {
+    env.CLIENT_AUTH_TOKEN = '  shared-secret  ';
+    const config = loadConfig();
+    expect(config.clientAuthToken).toBe('shared-secret');
   });
 });

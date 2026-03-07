@@ -546,6 +546,19 @@
             Base URL for API requests. Leave empty to use relative URLs (default).
           </div>
         </div>
+        <div class="form-group">
+          <label for="client-token" class="form-label">Client token</label>
+          <input
+            type="password"
+            id="client-token"
+            class="form-input"
+            placeholder="Leave empty when API token auth is disabled"
+            autocomplete="off"
+          />
+          <div class="form-help">
+            Optional token sent as <code>X-Overpass-Proxy-Token</code> with API requests.
+          </div>
+        </div>
         <div class="modal-actions">
           <button type="button" id="settings-cancel">Cancel</button>
           <button type="submit" id="settings-save" class="button-primary">Save</button>
@@ -586,6 +599,7 @@
     };
 
     const geohashReady = loadGeohash();
+    const clientAuthHeaderName = 'X-Overpass-Proxy-Token';
 
     const map = L.map('map', {
       worldCopyJump: true,
@@ -613,6 +627,7 @@
     const settingsModal = document.getElementById('settings-modal');
     const settingsForm = document.getElementById('settings-form');
     const serverUrlInput = document.getElementById('server-url');
+    const clientTokenInput = document.getElementById('client-token');
     const settingsCancel = document.getElementById('settings-cancel');
     const settingsSave = document.getElementById('settings-save');
     const layerLoadingEl = document.getElementById('layer-loading');
@@ -623,6 +638,7 @@
     const geohashBoundsCache = new Map();
     const upstreamPanelStorageKey = 'overpass-proxy.upstreams-panel.visible';
     const serverUrlStorageKey = 'overpass-proxy.server-url';
+    let clientToken = '';
     let cacheCoverageSignature = null;
     let cacheCoverageAbort = null;
     let cacheCoverageDebounce = null;
@@ -650,6 +666,15 @@
       const base = baseUrl.replace(/\/$/, '');
       const apiPath = path.startsWith('/') ? path : `/${path}`;
       return `${base}${apiPath}`;
+    };
+
+    const buildApiFetchOptions = (options = {}) => {
+      const headers = { ...(options.headers ?? {}) };
+      const trimmedToken = clientToken.trim();
+      if (trimmedToken) {
+        headers[clientAuthHeaderName] = trimmedToken;
+      }
+      return { ...options, headers };
     };
 
     const precisionForZoom = (zoom) => {
@@ -1441,7 +1466,10 @@
 
     const fetchStatistics = async () => {
       try {
-        const response = await fetch(buildApiUrl('/api/statistics'), { cache: 'no-store' });
+        const response = await fetch(
+          buildApiUrl('/api/statistics'),
+          buildApiFetchOptions({ cache: 'no-store' })
+        );
         if (!response.ok) throw new Error('Request failed');
         const snapshot = await response.json();
         latestSnapshot = snapshot;
@@ -1459,7 +1487,10 @@
 
     const fetchCacheCoverageLegacy = async () => {
       try {
-        const response = await fetch(buildApiUrl('/api/statistics/cacheCoverage'), { cache: 'no-store' });
+        const response = await fetch(
+          buildApiUrl('/api/statistics/cacheCoverage'),
+          buildApiFetchOptions({ cache: 'no-store' })
+        );
         if (!response.ok) throw new Error('Request failed');
         const snapshot = await response.json();
         latestCacheCoverage = snapshot.cacheCoverage ?? [];
@@ -1502,10 +1533,10 @@
       try {
         const response = await fetch(
           buildApiUrl(`/api/statistics/cacheCoverage/area?${params.toString()}`),
-          {
+          buildApiFetchOptions({
             cache: 'no-store',
             signal: controller.signal
-          }
+          })
         );
         if (!response.ok) {
           throw new Error(`Request failed (${response.status})`);
@@ -1532,7 +1563,10 @@
 
     const fetchGeohashCoverage = async () => {
       try {
-        const response = await fetch(buildApiUrl('/api/statistics/geohashCoverage'), { cache: 'no-store' });
+        const response = await fetch(
+          buildApiUrl('/api/statistics/geohashCoverage'),
+          buildApiFetchOptions({ cache: 'no-store' })
+        );
         if (!response.ok) throw new Error('Request failed');
         const snapshot = await response.json();
         latestGeohashCoverage = snapshot.geohashCoverage ?? [];
@@ -1567,6 +1601,7 @@
 
     const openSettingsModal = () => {
       serverUrlInput.value = getServerUrl();
+      clientTokenInput.value = clientToken;
       settingsModal.classList.add('visible');
       settingsModal.setAttribute('aria-hidden', 'false');
       serverUrlInput.focus();
@@ -1585,6 +1620,7 @@
       e.preventDefault();
       const url = serverUrlInput.value.trim();
       setServerUrl(url);
+      clientToken = clientTokenInput.value.trim();
       closeSettingsModal();
       void refreshData();
     });

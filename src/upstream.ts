@@ -4,6 +4,11 @@ import got from 'got';
 import type { Method, RetryOptions } from 'got';
 
 import { hasJsonOutput, type BoundingBox } from './bbox.js';
+import {
+  CLIENT_AUTH_HEADER,
+  sanitiseHeadersForLogs,
+  stripHeader
+} from './clientAuth.js';
 import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
 import type { OverpassResponse } from './store.js';
@@ -1293,10 +1298,13 @@ export const proxyTransparent = async (
           bodyReencoded = true;
         }
 
-        const headers = {
-          ...request.headers,
-          host: undefined
-        } as Record<string, string | string[] | undefined>;
+        const headers = stripHeader(
+          {
+            ...request.headers,
+            host: undefined
+          } as Record<string, string | string[] | undefined>,
+          CLIENT_AUTH_HEADER
+        );
 
         const ensureHeader = (name: string, value: string): void => {
           const existing =
@@ -1368,7 +1376,7 @@ export const proxyTransparent = async (
         const requestLogContext = {
           request: {
             ...requestMeta,
-            headers: request.headers,
+            headers: sanitiseHeadersForLogs(request.headers),
             body: summarisePayload(body)
           }
         };
@@ -1383,7 +1391,7 @@ export const proxyTransparent = async (
           logger.debug(
             {
               ...requestMeta,
-              headers: request.headers,
+              headers: sanitiseHeadersForLogs(request.headers),
               body: summarisePayload(body)
             },
             'transparent proxy request details'
