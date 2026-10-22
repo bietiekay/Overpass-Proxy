@@ -52,6 +52,12 @@ Requests preserve HTTP methods, headers, payloads, and status codes. `/api/inter
 - The same JSON normalization also applies to transparently proxied `/api/interpreter` requests when the incoming query requests `out:json`.
 - Live check on 2026-03-06 against `https://overpass.private.coffee/api/interpreter`: `out:json` requests returned `HTTP 200` with `Content-Type: application/json`, and `out:xml` requests returned `HTTP 200` with `Content-Type: application/osm3s+xml`. This confirms that the upstream serves real Overpass XML even though the specific `out:json` -> XML fallback was not reproducible during that check.
 
+## Runtime
+
+Node.js 26 is the only supported runtime (`>=26 <27`). Use `nvm install` and `nvm use`, then `npm ci`. Docker uses Node 26 Alpine.
+
+Production release requires Node 26 LTS status and successful validation; see [Node 26 validation and rollout](docs/NODE26_VALIDATION.md).
+
 ## Configuration
 
 Environment variables are read at startup. Defaults are shown below:
@@ -64,7 +70,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `UPSTREAM_REQUEST_TIMEOUT_SECONDS` | `30` | Timeout for individual upstream requests before failing over |
 | `UPSTREAM_EXHAUSTED_WAIT_SECONDS` | `2` | Maximum time a cache-miss request waits for the next upstream to leave backoff before returning an error |
 | `UPSTREAM_EXHAUSTED_GRACE_SECONDS` | `0` | Extra grace window added after the next upstream retry time before the waiting request gives up |
-| `REDIS_URL` | `redis://redis:6379` | Redis connection URL |
+| `REDIS_URL` | `redis://redis:6379` | Redis connection URL; supports password, ACL username and TLS (`rediss://`) |
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
 | `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
@@ -206,10 +212,25 @@ curl -X POST http://localhost:8080/api/interpreter \
 A ready-to-run docker-compose configuration is provided:
 
 ```bash
-docker-compose up --build
+cp docker-compose.yml.template docker-compose.yml
+# Create .env with REDIS_PASSWORD and authenticated REDIS_URL (see below).
+docker compose up --build
 ```
 
-This starts the proxy along with Redis and a mock Overpass service used for integration tests.
+This starts the proxy with Redis 8.10.2 and mandatory password authentication in the supplied Compose deployment. The mock upstream is used only by the isolated smoke test.
+
+Create a local `.env` (excluded from Git and Docker build context):
+
+```dotenv
+REDIS_PASSWORD=REPLACE_WITH_A_LONG_RANDOM_HEX_PASSWORD
+REDIS_URL=redis://default:REPLACE_WITH_A_LONG_RANDOM_HEX_PASSWORD@redis:6379/0
+```
+
+Generate a password with `openssl rand -hex 32` and use the same value in both entries. For arbitrary passwords, percent-encode the username/password components in `REDIS_URL`; keep `REDIS_PASSWORD` as the original value. Missing variables stop Compose before startup.
+
+For an external Redis ACL user, set `REDIS_URL=redis://username:encoded-password@host:6379/0`; use `rediss://` for TLS. Both the proxy and statistics worker use this URL. Redis itself still permits unauthenticated configurations by default; authentication is enabled explicitly by this deployment template. External deployments without authentication remain compatible.
+
+Redis 8.10.2 is the current container/test target. Docker integration tests use a named ACL user with the default user disabled. The container smoke test checks rejection of missing/wrong credentials, cache MISS/HIT and the statistics worker using authenticated Redis. See [Redis upgrade and validation](docs/REDIS_UPGRADE.md) before reusing an existing data directory.
 
 The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, while `GET /api/statistics/cacheCoverage/area` returns cache coverage scoped to a bounding box at a requested geohash precision for zoomed-in maps. Per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
@@ -302,7 +323,7 @@ The test suite is designed to work both with and without Docker:
 
 - **Default (`npm test`)** – runs unit + integration tests using the in-memory Redis implementation and embedded mock Overpass server. No Docker daemon required.
 - **Watch (`npm run test:watch`)** – same as above but in watch mode for quick iteration.
-- **Docker-backed (`npm run test:docker`)** – opts into Testcontainers so Redis runs inside Docker when available.
+- **Docker-backed (`npm run test:docker`)** – requires a working Docker daemon and runs Redis through Testcontainers; fails rather than falling back when Docker is unavailable.
 - **Coverage (`npm run test:ci`)** – default non-Docker execution with coverage reporting.
 - **Build smoke test (`npm run test:build`)** – compiles the TypeScript project once (`tsc`) and fails on type/build errors.
 - **Statistics latency gate (`npm run test:perf:statistics`)** – compares `/api/interpreter` p95 latency at baseline vs. while statistics refresh is continuously triggered, and fails if the delta exceeds the configured budget (default `10ms`, configurable with `PERF_MAX_P95_DELTA_MS`).
@@ -344,9 +365,11 @@ curl -X POST 'http://localhost:8080/api/cache/invalidate' \
   --data '{"secret":"YOUR_SECRET","south":52.5,"west":13.3,"north":52.6,"east":13.4}'
 ```
 
+`npm run test:smoke:docker` builds the production and mock images and checks the compiled server, Redis cache MISS/HIT, statistics worker, and operator page in an isolated Docker network.
+
 ## Continuous Integration
 
-`.github/workflows/ci.yml` runs linting and tests (with coverage enforcement) on every push and pull request.
+`.github/workflows/node.js.yml` runs Node 26 lint, build, tests, real Redis integration, statistics latency, and production-container smoke checks for pushes and pull requests targeting `master`.
 
 ## Screenshots
 ![Example screenshot of the proxy cache coverage statistics map](screenshot/cache-coverage-statistic.png)

@@ -1,7 +1,7 @@
 # Overpass Proxy Specification
 
 ## 1. Purpose and Context
-The Overpass Proxy is a Fastify-based Node.js 20 service that mirrors the public Overpass API surface while adding Redis-backed tile caching for amenity-focused JSON bounding-box (bbox) queries. It enables ToiletFinder clients to switch endpoints without behavioural changes when requesting amenities while benefiting from faster, cached responses for map tiles. The proxy can run as a standalone deployment, via Docker Compose, or locally in developer environments with or without Docker.
+The Overpass Proxy is a Fastify-based Node.js 26 service that mirrors the public Overpass API surface while adding Redis-backed tile caching for amenity-focused JSON bounding-box (bbox) queries. It enables ToiletFinder clients to switch endpoints without behavioural changes when requesting amenities while benefiting from faster, cached responses for map tiles. The proxy can run as a standalone deployment, via Docker Compose, or locally in developer environments with or without Docker.
 
 ## 2. Architectural Overview
 - **Entry point:** `src/index.ts` builds and starts a Fastify server, wiring configuration, Redis connections, and route registration. Redis connectivity can be injected for testing.
@@ -116,7 +116,7 @@ The async `buildServer` helper allows tests to override any configuration or inj
 ## 9. Deployment and Operations
 - **Build:** `npm run build` compiles TypeScript to `dist/`.
 - **Runtime:** `npm start` executes the compiled server; Fastify listens on `0.0.0.0:PORT`.
-- **Docker:** `Dockerfile` (Node 20 Alpine) and `docker-compose.yml` orchestrate the proxy alongside Redis (and mock Overpass in development scenarios).
+- **Docker:** `Dockerfile` (Node 26 Alpine) and `docker-compose.yml` orchestrate the proxy alongside Redis (and mock Overpass in development scenarios).
 - **CI:** `.github/workflows/ci.yml` installs dependencies, runs linting, executes tests with coverage, and uploads reports.
 - **Observability:** Structured logs include contextual metadata (request IDs, error stacks) through Pino, aiding debugging across deployment targets. The Redis-persisted `/api/statistics` endpoint surfaces aggregated request metrics (total demand, amenity breakdowns, cache status, cache inventory counts, and hotspot geohashes) since the start of the current UTC day, even after restarts. Tile cache coverage is exposed at `/api/statistics/cacheCoverage`, bounding-box cache coverage is available at `/api/statistics/cacheCoverage/area`, and per-amenity geohash coverage is available via `/api/statistics/geohashCoverage` for dashboards that only need hotspot shares.
 

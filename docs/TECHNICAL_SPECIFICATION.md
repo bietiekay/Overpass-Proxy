@@ -9,7 +9,7 @@
 - **Statistics subsystem** that aggregates request metrics, cache coverage, and upstream state, persisted in Redis and served via JSON endpoints and HTML dashboards.【specification.md, src/stats.ts, public/statistics-map.html】
 
 ### Runtime/deployment model
-- Node.js 20+ Fastify server started via `src/index.ts`, listening on `0.0.0.0:PORT` with form body support and permissive CORS headers.【package.json, src/index.ts, README.md】
+- Node.js 26 Fastify server started via `src/index.ts`, listening on `0.0.0.0:PORT` with form body support and permissive CORS headers.【package.json, src/index.ts, README.md】
 - Redis client initialized at startup; statistics worker (via worker threads) uses Redis for persistence and coverage snapshots.【src/index.ts, src/statsWorker.ts, specification.md】
 - Deployable via Docker or local runtime; integration tests can run in-process without Docker by default.【README.md, src/tests/integration/testcontainers.ts】
 

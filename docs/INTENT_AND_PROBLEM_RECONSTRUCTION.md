@@ -27,7 +27,7 @@ Provide a Fastify-based Overpass API proxy that preserves upstream compatibility
 ## 4. Operating Context & Assumptions
 
 ### Runtime/deployment assumptions
-- Node.js 20+ runtime with Fastify; service listens on `0.0.0.0:PORT` and expects Redis connectivity via `REDIS_URL`.【package.json, src/index.ts, src/config.ts】
+- Node.js 26 runtime with Fastify; service listens on `0.0.0.0:PORT` and expects Redis connectivity via `REDIS_URL`.【package.json, src/index.ts, src/config.ts】
 - Supports standalone runs and Docker deployments; stats worker uses a Redis connection and background threads for persistence and coverage caching.【specification.md, src/index.ts, src/statsWorker.ts】
 - CORS headers are permissive to allow browser-based clients (notably overpass-turbo) to call the proxy directly.【src/index.ts, .specstory/history/2025-10-28_14-28Z-cors-policy-blocking-api-access.md】
 

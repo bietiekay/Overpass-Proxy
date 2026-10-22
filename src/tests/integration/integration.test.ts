@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { extractBoundingBox } from '../../bbox.js';
 import { planTileFetches } from '../../fetchPlan.js';
-import { buildServer } from '../../index.js';
+import { buildServer as buildServerWithConfig, type BuildServerOptions } from '../../index.js';
 import { logger } from '../../logger.js';
 import { tileKey, tilesForBoundingBox } from '../../tiling.js';
 import * as upstream from '../../upstream.js';
@@ -12,6 +12,19 @@ import { RequestStatistics, STATISTICS_SNAPSHOT_KEY } from '../../stats.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 import { createMockOverpass } from './mock-overpass.js';
 import { createTestEnvironment } from './testcontainers.js';
+
+// Injected real Redis clients and the production worker must use the same ACL credentials.
+const buildServer = (options: BuildServerOptions = {}) => {
+  const redisOptions = options.redisClient?.options;
+  if (!redisOptions) return buildServerWithConfig(options);
+  const url = new URL(`redis://${redisOptions.host}:${redisOptions.port}/${redisOptions.db ?? 0}`);
+  url.username = redisOptions.username ?? '';
+  url.password = redisOptions.password ?? '';
+  return buildServerWithConfig({
+    ...options,
+    configOverrides: { redisUrl: url.toString(), ...options.configOverrides }
+  });
+};
 
 const jsonQuery = '[out:json];node["amenity"="toilets"](52.5,13.3,52.6,13.4);out;';
 const formBody = (query: string) => new URLSearchParams({ data: query }).toString();

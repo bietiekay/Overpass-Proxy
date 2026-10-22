@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { execSync } from 'node:child_process';
 
 import { got } from 'got';
@@ -28,12 +29,18 @@ const isDockerAvailable = (): boolean => {
 export const createTestEnvironment = async (): Promise<TestEnvironment> => {
   const dockerWanted = process.env.USE_DOCKER === '1';
   const dockerAvailable = dockerWanted && isDockerAvailable();
+  if (dockerWanted && !dockerAvailable) {
+    throw new Error('USE_DOCKER=1 requires a working Docker daemon; refusing in-memory Redis fallback.');
+  }
 
   if (dockerAvailable) {
-    const redisContainer = await new GenericContainer('redis:7-alpine').withExposedPorts(6379).start();
+    const password = randomBytes(24).toString('hex');
+    const redisContainer = await new GenericContainer('redis:8.10.2-alpine')
+      .withCommand(['redis-server', '--user', 'default', 'off', '--user', 'proxy', 'on', `>${password}`, '~*', '&*', '+@all'])
+      .withExposedPorts(6379).start();
     const redisPort = redisContainer.getMappedPort(6379);
     const redisHost = redisContainer.getHost();
-    const redis = new Redis({ host: redisHost, port: redisPort });
+    const redis = new Redis({ host: redisHost, port: redisPort, username: 'proxy', password });
 
     const mockOverpass = createMockOverpass();
     await mockOverpass.start(0);

@@ -185,7 +185,7 @@ Provide an Overpass-compatible HTTP proxy that accelerates amenity-focused JSON 
 ## 6. Constraints
 
 ### Technical
-- Node.js 20+ runtime with TypeScript compilation to `dist/` for production `npm start` runs.【package.json, README.md】
+- Node.js 26 runtime with TypeScript compilation to `dist/` for production `npm start` runs.【package.json, README.md】
 - Redis must be reachable; cacheable requests depend on Redis availability (Redis failures result in 500s).【src/index.ts, .specstory/history/2025-10-28_13-42Z-redis-connection-refused-errors.md】
 
 ### Architectural

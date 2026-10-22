@@ -5,3 +5,7 @@ coverage/
 .DS_Store
 redis-data/
 docker-compose.yml
+
+# Local deployment credentials
+.env
+.env.*
