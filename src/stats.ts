@@ -498,7 +498,7 @@ class SnapshotCache<T extends { generatedAt: string }> {
       const generatedAt = Date.parse(parsed.generatedAt);
       if (Number.isFinite(generatedAt)) {
         this.lastGeneratedAt = generatedAt;
-        this.dirty = false;
+        // Reading an old persisted snapshot must not cancel an explicit rebuild request.
       }
       return parsed;
     } catch (error) {

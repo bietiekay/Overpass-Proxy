@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { BoundingBox } from '../../bbox.js';
 import {
@@ -21,6 +21,28 @@ class InMemoryStatisticsStorage implements StatisticsStorage {
 
 describe('RequestStatistics - Non-blocking behavior', () => {
   const bbox: BoundingBox = { south: 52.5, west: 13.3, north: 52.6, east: 13.4 };
+
+  it('rebuilds an explicitly dirty snapshot even without a request revision change', async () => {
+    let cachedTiles = 0;
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => cachedTiles,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: () => cachedTiles,
+        getCacheCoverage: () => []
+      },
+      new InMemoryStatisticsStorage()
+    );
+    expect((await stats.getSnapshot()).totalCachedTiles).toBe(0);
+    cachedTiles = 7;
+    stats.markStatisticsDirty();
+    // The initial read stays non-blocking but must preserve the rebuild request.
+    expect((await stats.getSnapshot()).totalCachedTiles).toBe(0);
+    await vi.waitFor(async () => {
+      expect((await stats.getSnapshot()).totalCachedTiles).toBe(7);
+    });
+  });
 
   it('returns cached snapshot immediately even when refresh is needed', async () => {
     const storage = new InMemoryStatisticsStorage();

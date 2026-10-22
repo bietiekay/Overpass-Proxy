@@ -19,6 +19,8 @@ import { StatisticsWorkerClient } from './stats.js';
 export interface BuildServerOptions {
   configOverrides?: Partial<AppConfig>;
   redisClient?: Redis;
+  /** Override automatic worker selection, for deterministic integration tests. */
+  statisticsWorker?: boolean;
   startupProgress?: (message: string) => void;
 }
 
@@ -164,7 +166,12 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   await store.restorePresence(logRestoreProgress);
 
   startupProgress('preparing statistics subsystem');
-  const statistics = new StatisticsWorkerClient({ config, redis, redisUrl: config.redisUrl });
+  const statistics = new StatisticsWorkerClient({
+    config,
+    redis,
+    redisUrl: config.redisUrl,
+    useWorker: options.statisticsWorker
+  });
   await statistics.ready();
 
   registerInterpreterRoutes(app, { config, redis, store, stats: statistics });

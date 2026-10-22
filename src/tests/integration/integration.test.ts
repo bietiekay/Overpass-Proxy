@@ -14,7 +14,9 @@ import { createMockOverpass } from './mock-overpass.js';
 import { createTestEnvironment } from './testcontainers.js';
 
 // Injected real Redis clients and the production worker must use the same ACL credentials.
-const buildServer = (options: BuildServerOptions = {}) => {
+const buildServer = (overrides: BuildServerOptions = {}) => {
+  // Behavioral tests spy on main-thread implementations; worker behavior is tested explicitly.
+  const options = { statisticsWorker: false, ...overrides };
   const redisOptions = options.redisClient?.options;
   if (!redisOptions) return buildServerWithConfig(options);
   const url = new URL(`redis://${redisOptions.host}:${redisOptions.port}/${redisOptions.db ?? 0}`);
@@ -2296,6 +2298,7 @@ describe('statistics edge cases', () => {
     }
 
     const { app } = await buildServer({
+      statisticsWorker: true,
       configOverrides: {
         upstreamUrls: env.upstreamUrls,
         tilePrecision: 5

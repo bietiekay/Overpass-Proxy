@@ -25,3 +25,11 @@ After clean installation, `npm audit` reported zero findings across production a
 `npm run test:ci` also passed all 226 tests with V8 coverage: statements 81.43%, branches 69.42%, functions 85.59%, lines 81.44%. `npm run test:perf:statistics` passed with a p95 delta of 0.06 ms against the unchanged 10 ms budget.
 
 The Docker test command was retried and failed explicitly because Docker is not installed. Real Redis 8 and production-container acceptance remain pending on a Docker-capable host/CI.
+
+## Follow-up: Docker CI statistics failures
+
+The first Docker CI run exposed assumptions that the statistics implementation ran in the main process. Behavioral integration tests now explicitly select inline statistics so their main-process spies and synchronous snapshot checks remain meaningful with real Redis. The stale-snapshot recovery test explicitly selects the production worker; production still selects the worker automatically for real Redis.
+
+A genuine cache defect was also fixed: reading a stored snapshot cleared an explicit dirty flag, cancelling worker-triggered rebuilds when no request revision changed. A regression test now verifies that explicit invalidation produces a new snapshot while preserving non-blocking reads.
+
+Validation under Node 26.12.1: lint, build, and 227 tests passed. For diagnosis only, the testcontainer launcher was temporarily replaced with isolated local Redis 6.0.16 processes using random ACL passwords; all 227 tests, including worker recovery, then passed. The launcher was restored after this run. This does not constitute a Docker or Redis 8 acceptance result; GitHub CI must confirm those.
