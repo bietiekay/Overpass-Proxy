@@ -33,3 +33,9 @@ The first Docker CI run exposed assumptions that the statistics implementation r
 A genuine cache defect was also fixed: reading a stored snapshot cleared an explicit dirty flag, cancelling worker-triggered rebuilds when no request revision changed. A regression test now verifies that explicit invalidation produces a new snapshot while preserving non-blocking reads.
 
 Validation under Node 26.12.1: lint, build, and 227 tests passed. For diagnosis only, the testcontainer launcher was temporarily replaced with isolated local Redis 6.0.16 processes using random ACL passwords; all 227 tests, including worker recovery, then passed. The launcher was restored after this run. This does not constitute a Docker or Redis 8 acceptance result; GitHub CI must confirm those.
+
+## Follow-up: production smoke cache assertion
+
+The production-container CI reached the HTTP cache check, then failed because it expected `X-Cache: MISS` for a successfully resolved cold request. The existing proxy reports `HIT` once all requested tiles are resolved, including tiles fetched during that request. Application behavior remains unchanged. The smoke test now checks the mock upstream's test-only request counter: the cold request must increase it and the warm request must leave it unchanged; both successful responses must report `HIT`.
+
+Validation: `npm run verify` passed all 227 tests, plus lint and build. The exact HTTP smoke-check JavaScript was extracted and run successfully against the compiled production entrypoint, a local ACL-protected Redis 6.0.16 instance, and the mock upstream. Docker/Redis 8 execution remains for GitHub CI.

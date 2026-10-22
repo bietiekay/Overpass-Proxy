@@ -17,7 +17,7 @@ Redis authentication is not newly mandatory in Redis 8. The default ACL user sti
 
 `npm run test:docker` uses Redis 8.10.2 with a randomly generated named ACL user. The test wrapper passes the injected client's credentials and database to the statistics worker as well as the main client.
 
-`npm run test:smoke:docker` builds the production image and starts an isolated authenticated Redis 8.10.2. It checks rejection of missing and wrong credentials, valid ACL authentication, cache MISS/HIT, operator HTML, and statistics readiness through the compiled worker. Passwords are generated for each run. Docker must be available; no in-memory fallback is accepted.
+`npm run test:smoke:docker` builds the production image and starts an isolated authenticated Redis 8.10.2. It checks rejection of missing and wrong credentials, valid ACL authentication, cold-cache fetch and warm-cache reuse, operator HTML, and statistics readiness through the compiled worker. Passwords are generated for each run. Docker must be available; no in-memory fallback is accepted.
 
 Docker is not installed in the development environment used for this change. Redis 8 container integration and smoke acceptance therefore remain pending CI execution. Do not infer Redis 8 certification from the in-memory suite or from the locally installed Redis 6 server.
 

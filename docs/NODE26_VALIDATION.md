@@ -38,7 +38,7 @@ npm run test:perf:statistics
 npm run test:smoke:docker
 ```
 
-The smoke script builds the production and mock images, prints the production image ID and commit, and starts a private network with a disposable Redis instance and local mock upstream. It checks the compiled server, operator page, interpreter MISS then HIT, and a ready statistics snapshot produced with real Redis and the production worker. Containers and network are removed on exit; no production Redis or external Overpass service is used. Save the CI logs with the tested commit and image ID. The temporary smoke images are removed on exit; build and retain the release image separately, then rerun acceptance against the exact retained image before rollout.
+The smoke script builds the production and mock images, prints the production image ID and commit, and starts a private network with a disposable Redis instance and local mock upstream. It checks the compiled server, operator page, a cold interpreter request followed by cache reuse (verified through upstream request counts), and a ready statistics snapshot produced with real Redis and the production worker. Containers and network are removed on exit; no production Redis or external Overpass service is used. Save the CI logs with the tested commit and image ID. The temporary smoke images are removed on exit; build and retain the release image separately, then rerun acceptance against the exact retained image before rollout.
 
 ## Release gate and rollback
 

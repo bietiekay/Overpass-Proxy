@@ -36,6 +36,9 @@ export const createMockOverpass = () => {
     | null
     | ((bbox: BoundingBox, amenity: string) => { status?: number; body?: unknown } | void) = null;
 
+  // Exposed only by the test upstream to verify real cache reuse.
+  app.get('/__test__/hits', async () => ({ count: hits.length }));
+
   app.all('/api/interpreter', async (request, reply) => {
     const formBody = (request as FastifyRequest<{ Body: { data?: string } }>).body;
     const query =

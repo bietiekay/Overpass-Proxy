@@ -55,14 +55,29 @@ for (let i = 0; i < 30; i++) {
 }
 assert.ok(upstreamReady, 'mock upstream must be ready');
 const query = '[out:json];node["amenity"="toilets"](52.5,13.3,52.501,13.301);out;';
-for (const expected of ['MISS', 'HIT']) {
+const upstreamHitCount = async () => {
+  const response = await fetch('http://upstream:8081/__test__/hits');
+  assert.equal(response.status, 200);
+  return (await response.json()).count;
+};
+const beforeColdRequest = await upstreamHitCount();
+let afterColdRequest;
+for (const phase of ['cold', 'warm']) {
   const response = await fetch(`${base}/api/interpreter`, {
     method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
     body: new URLSearchParams({data: query})
   });
   assert.equal(response.status, 200, await response.clone().text());
-  assert.equal(response.headers.get('x-cache'), expected);
+  // Successfully fetched tiles count as resolved, so both responses report HIT.
+  assert.equal(response.headers.get('x-cache'), 'HIT');
   assert.ok(Array.isArray((await response.json()).elements));
+  const hits = await upstreamHitCount();
+  if (phase === 'cold') {
+    assert.ok(hits > beforeColdRequest, 'cold request must fetch tiles upstream');
+    afterColdRequest = hits;
+  } else {
+    assert.equal(hits, afterColdRequest, 'warm request must reuse cached tiles without an upstream fetch');
+  }
 }
 let statisticsReady = false;
 for (let i = 0; i < 30; i++) {

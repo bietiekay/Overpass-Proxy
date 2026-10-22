@@ -230,7 +230,7 @@ Generate a password with `openssl rand -hex 32` and use the same value in both e
 
 For an external Redis ACL user, set `REDIS_URL=redis://username:encoded-password@host:6379/0`; use `rediss://` for TLS. Both the proxy and statistics worker use this URL. Redis itself still permits unauthenticated configurations by default; authentication is enabled explicitly by this deployment template. External deployments without authentication remain compatible.
 
-Redis 8.10.2 is the current container/test target. Docker integration tests use a named ACL user with the default user disabled. The container smoke test checks rejection of missing/wrong credentials, cache MISS/HIT and the statistics worker using authenticated Redis. See [Redis upgrade and validation](docs/REDIS_UPGRADE.md) before reusing an existing data directory.
+Redis 8.10.2 is the current container/test target. Docker integration tests use a named ACL user with the default user disabled. The container smoke test checks rejection of missing/wrong credentials, cold-cache fetch and warm-cache reuse and the statistics worker using authenticated Redis. See [Redis upgrade and validation](docs/REDIS_UPGRADE.md) before reusing an existing data directory.
 
 The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, while `GET /api/statistics/cacheCoverage/area` returns cache coverage scoped to a bounding box at a requested geohash precision for zoomed-in maps. Per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
@@ -365,7 +365,7 @@ curl -X POST 'http://localhost:8080/api/cache/invalidate' \
   --data '{"secret":"YOUR_SECRET","south":52.5,"west":13.3,"north":52.6,"east":13.4}'
 ```
 
-`npm run test:smoke:docker` builds the production and mock images and checks the compiled server, Redis cache MISS/HIT, statistics worker, and operator page in an isolated Docker network.
+`npm run test:smoke:docker` builds the production and mock images and checks the compiled server, Redis cold-cache fetch and warm-cache reuse, statistics worker, and operator page in an isolated Docker network.
 
 ## Continuous Integration
 
