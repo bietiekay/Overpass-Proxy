@@ -170,6 +170,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     config,
     redis,
     redisUrl: config.redisUrl,
+    store,
     useWorker: options.statisticsWorker
   });
   await statistics.ready();

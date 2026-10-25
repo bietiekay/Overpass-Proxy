@@ -6,14 +6,39 @@ import { logger } from './logger.js';
 import type { TileInfo } from './tiling.js';
 import { tileKey } from './tiling.js';
 
-type PresenceState = 'present' | 'missing';
+// Pack presence state, millisecond expiry, stale flag, and up to 1,023 item
+// counts into one safe integer. Exceptional timestamps use a four-value tuple.
+type PresenceEntry = number | [state: 1 | -1, expiresAt: number, amenityCount: number, stale: boolean];
+const PRESENCE_COUNT_BITS = 11;
+const PRESENCE_COUNT_SCALE = 2 ** PRESENCE_COUNT_BITS;
+const isCompactExpiry = (expiresAt: number): boolean =>
+  Number.isSafeInteger(expiresAt) &&
+  expiresAt > 0 &&
+  expiresAt * PRESENCE_COUNT_SCALE + PRESENCE_COUNT_SCALE - 1 <= Number.MAX_SAFE_INTEGER;
+const encodePresent = (expiresAt: number, amenityCount: number, stale: boolean): PresenceEntry => {
+  if (!isCompactExpiry(expiresAt)) {
+    return [1, expiresAt, amenityCount, stale];
+  }
+  return (
+    expiresAt * PRESENCE_COUNT_SCALE +
+    Math.min(amenityCount, PRESENCE_COUNT_SCALE / 2 - 1) * 2 +
+    Number(stale)
+  );
+};
+const encodeMissing = (expiresAt: number): PresenceEntry =>
+  isCompactExpiry(expiresAt)
+    ? -(expiresAt * PRESENCE_COUNT_SCALE + 1)
+    : [-1, expiresAt, 0, false];
+const isPresentEntry = (entry: PresenceEntry): boolean =>
+  Array.isArray(entry) ? entry[0] === 1 : entry > 0;
+const presenceExpiry = (entry: PresenceEntry): number =>
+  Array.isArray(entry) ? entry[1] : Math.floor(Math.abs(entry) / PRESENCE_COUNT_SCALE);
+const presenceCount = (entry: PresenceEntry): number =>
+  Array.isArray(entry) ? entry[2] : Math.floor((entry % PRESENCE_COUNT_SCALE) / 2);
+const presenceStale = (entry: PresenceEntry): boolean =>
+  Array.isArray(entry) ? entry[3] : entry % 2 !== 0;
 
-interface PresenceEntry {
-  state: PresenceState;
-  expiresAt: number;
-  amenityCount: number;
-  stale: boolean;
-}
+const REDIS_TILE_READ_BATCH_SIZE = 500;
 
 const MIN_STATS_COVERAGE_GEOHASH_PRECISION = 3;
 
@@ -101,6 +126,8 @@ class TilePresenceCache {
 
   private readonly listeners = new Map<string, Set<PresenceListener>>();
 
+  private readonly overflowAmenityCounts = new Map<string, number>();
+
   private readonly presentTileCounts = new Map<string, number>();
 
   private readonly presentAmenityItemCounts = new Map<string, number>();
@@ -111,7 +138,7 @@ class TilePresenceCache {
 
   private amenitiesWithPresentTiles = 0;
 
-  constructor(private readonly defaultMissingTtlMs: number) {}
+  constructor(private readonly defaultMissingTtlMs: number, private readonly enabled = true) {}
 
   private getAmenityEntries(amenity: string): Map<string, PresenceEntry> {
     let amenityEntries = this.entries.get(amenity);
@@ -134,14 +161,20 @@ class TilePresenceCache {
     if (!entry) {
       return undefined;
     }
-    const now = Date.now();
-    if (entry.expiresAt > now) {
+    if (isPresentEntry(entry) && presenceStale(entry)) {
       return entry;
     }
-    if (entry.state === 'present') {
-      entry.stale = true;
-      entry.expiresAt = Number.POSITIVE_INFINITY;
+    const now = Date.now();
+    const expiresAt = presenceExpiry(entry);
+    if (expiresAt > now) {
       return entry;
+    }
+    if (isPresentEntry(entry)) {
+      const key = this.fullKey(amenity, tileHash);
+      const count = this.overflowAmenityCounts.get(key) ?? presenceCount(entry);
+      const staleEntry = encodePresent(expiresAt, count, true);
+      this.entries.get(amenity)?.set(tileHash, staleEntry);
+      return staleEntry;
     }
     this.deleteEntry(amenity, tileHash);
     return undefined;
@@ -179,31 +212,37 @@ class TilePresenceCache {
     }
   }
 
-  private addToAggregates(amenity: string, entry: PresenceEntry): void {
-    if (entry.state !== 'present') {
+  private addToAggregates(amenity: string, tileHash: string, entry: PresenceEntry): void {
+    if (!isPresentEntry(entry)) {
       return;
     }
 
-    this.updatePresentCounts(amenity, 1, entry.amenityCount);
+    this.updatePresentCounts(amenity, 1, this.overflowAmenityCounts.get(this.fullKey(amenity, tileHash)) ?? presenceCount(entry));
   }
 
-  private removeFromAggregates(amenity: string, entry: PresenceEntry): void {
-    if (entry.state !== 'present') {
+  private removeFromAggregates(amenity: string, tileHash: string, entry: PresenceEntry): void {
+    if (!isPresentEntry(entry)) {
       return;
     }
 
-    this.updatePresentCounts(amenity, -1, -entry.amenityCount);
+    this.updatePresentCounts(amenity, -1, -(this.overflowAmenityCounts.get(this.fullKey(amenity, tileHash)) ?? presenceCount(entry)));
+    this.overflowAmenityCounts.delete(this.fullKey(amenity, tileHash));
   }
 
-  private setEntry(amenity: string, tileHash: string, entry: PresenceEntry): void {
+  private setEntry(amenity: string, tileHash: string, entry: PresenceEntry, amenityCount = 0): void {
     const amenityEntries = this.getAmenityEntries(amenity);
     const existing = amenityEntries.get(tileHash);
     if (existing) {
-      this.removeFromAggregates(amenity, existing);
+      this.removeFromAggregates(amenity, tileHash, existing);
     }
 
+    if (isPresentEntry(entry) && amenityCount >= PRESENCE_COUNT_SCALE / 2) {
+      this.overflowAmenityCounts.set(this.fullKey(amenity, tileHash), amenityCount);
+    } else {
+      this.overflowAmenityCounts.delete(this.fullKey(amenity, tileHash));
+    }
     amenityEntries.set(tileHash, entry);
-    this.addToAggregates(amenity, entry);
+    this.addToAggregates(amenity, tileHash, entry);
   }
 
   private deleteEntry(amenity: string, tileHash: string): void {
@@ -214,7 +253,7 @@ class TilePresenceCache {
 
     const existing = amenityEntries.get(tileHash);
     if (existing) {
-      this.removeFromAggregates(amenity, existing);
+      this.removeFromAggregates(amenity, tileHash, existing);
     }
 
     amenityEntries.delete(tileHash);
@@ -230,19 +269,16 @@ class TilePresenceCache {
     amenityCount: number,
     stale = false
   ): void {
-    const entry: PresenceEntry = { state: 'present', expiresAt, amenityCount, stale };
-    this.setEntry(amenity, tileHash, entry);
+    if (!this.enabled) return;
+    const entry: PresenceEntry = encodePresent(expiresAt, amenityCount, stale);
+    this.setEntry(amenity, tileHash, entry, amenityCount);
     this.notify(amenity, tileHash);
   }
 
   public markMissing(amenity: string, tileHash: string, ttlMs?: number): void {
+    if (!this.enabled) return;
     const duration = Math.max(1, Math.floor(ttlMs ?? this.defaultMissingTtlMs));
-    const entry: PresenceEntry = {
-      state: 'missing',
-      expiresAt: Date.now() + duration,
-      amenityCount: 0,
-      stale: false
-    };
+    const entry: PresenceEntry = encodeMissing(Date.now() + duration);
     this.setEntry(amenity, tileHash, entry);
     this.notify(amenity, tileHash);
   }
@@ -310,7 +346,7 @@ class TilePresenceCache {
 
   public waitForPresent(amenity: string, tileHash: string, timeoutMs: number): Promise<void> {
     const existing = this.get(amenity, tileHash);
-    if (existing?.state === 'present') {
+    if (existing !== undefined && isPresentEntry(existing)) {
       return Promise.resolve();
     }
 
@@ -339,7 +375,7 @@ class TilePresenceCache {
 
       this.addListener(key, complete);
       const current = this.get(amenity, tileHash);
-      if (current?.state === 'present') {
+      if (current !== undefined && isPresentEntry(current)) {
         complete();
       }
     });
@@ -361,16 +397,16 @@ class TilePresenceCache {
     for (const [amenity, entries] of this.entries) {
       for (const [tileHash, entry] of entries) {
         const current = this.clearIfExpired(amenity, tileHash, entry);
-        if (current?.state !== 'present') {
+        if (current === undefined || !isPresentEntry(current)) {
           continue;
         }
 
         const base: CacheCoverageEntry = {
           geohash: tileHash,
-          entries: current.stale ? 0 : 1,
-          amenityItems: current.stale ? 0 : current.amenityCount,
-          staleEntries: current.stale ? 1 : 0,
-          staleAmenityItems: current.stale ? current.amenityCount : 0
+          entries: presenceStale(current) ? 0 : 1,
+          amenityItems: presenceStale(current) ? 0 : (this.overflowAmenityCounts.get(this.fullKey(amenity, tileHash)) ?? presenceCount(current)),
+          staleEntries: presenceStale(current) ? 1 : 0,
+          staleAmenityItems: presenceStale(current) ? (this.overflowAmenityCounts.get(this.fullKey(amenity, tileHash)) ?? presenceCount(current)) : 0
         };
 
         coverage.set(tileHash, mergeCoverageEntry(coverage.get(tileHash), base));
@@ -417,7 +453,7 @@ class TilePresenceCache {
     for (const [amenity, entries] of this.entries) {
       for (const [tileHash, entry] of entries) {
         const current = this.clearIfExpired(amenity, tileHash, entry);
-        if (current?.state !== 'present') {
+        if (current === undefined || !isPresentEntry(current)) {
           continue;
         }
 
@@ -428,10 +464,10 @@ class TilePresenceCache {
 
         const base: CacheCoverageEntry = {
           geohash: prefix,
-          entries: current.stale ? 0 : 1,
-          amenityItems: current.stale ? 0 : current.amenityCount,
-          staleEntries: current.stale ? 1 : 0,
-          staleAmenityItems: current.stale ? current.amenityCount : 0
+          entries: presenceStale(current) ? 0 : 1,
+          amenityItems: presenceStale(current) ? 0 : (this.overflowAmenityCounts.get(this.fullKey(amenity, tileHash)) ?? presenceCount(current)),
+          staleEntries: presenceStale(current) ? 1 : 0,
+          staleAmenityItems: presenceStale(current) ? (this.overflowAmenityCounts.get(this.fullKey(amenity, tileHash)) ?? presenceCount(current)) : 0
         };
 
         coverage.set(prefix, mergeCoverageEntry(coverage.get(prefix), base));
@@ -498,6 +534,10 @@ export interface InvalidateResult {
 }
 
 export interface TileStoreOptions {
+  /** Statistics stores read aggregated Redis metadata instead of retaining a tile index. */
+  metricsOnly?: boolean;
+  metricsMaxCoverageEntries?: number;
+  metricsRefreshIntervalMs?: number;
   ttlSeconds: number;
   swrSeconds: number;
 }
@@ -512,12 +552,39 @@ const tileMetaKey = (tileHash: string, amenity: string): string =>
 export class TileStore {
   private readonly presence: TilePresenceCache;
 
+  private metricCounts = new Map<string, { tiles: number; items: number }>();
+  private metricCoverage: CacheCoverageEntry[] = [];
+  private metricsBuiltAt = 0;
+  private metricsRevision: string | null = null;
+  private metricsRefresh: Promise<void> | null = null;
+
+  public async refreshMetrics(): Promise<void> {
+    if (!this.options.metricsOnly) return;
+    if (!this.metricsRefresh) {
+      this.metricsRefresh = (async () => {
+        const revision = await this.redis.get(CACHE_COVERAGE_REVISION_KEY);
+        const age = Date.now() - this.metricsBuiltAt;
+        if (this.metricsBuiltAt > 0 && (
+          age < (this.options.metricsRefreshIntervalMs ?? 30000) ||
+          (revision === this.metricsRevision && age < 5 * 60 * 1000)
+        )) return;
+        this.metricCoverage = await this.getCacheCoverageFromRedis({
+          maxEntries: this.options.metricsMaxCoverageEntries ?? 25000
+        });
+        this.metricsRevision = revision;
+        this.metricsBuiltAt = Date.now();
+      })().finally(() => { this.metricsRefresh = null; });
+    }
+    await this.metricsRefresh;
+  }
+
   constructor(private readonly redis: Redis, private readonly options: TileStoreOptions) {
     const missingTtl = Math.max(250, Math.min(2000, options.swrSeconds * 1000));
-    this.presence = new TilePresenceCache(missingTtl);
+    this.presence = new TilePresenceCache(missingTtl, !options.metricsOnly);
   }
 
   public async restorePresence(onProgress?: (progress: RestorePresenceProgress) => void): Promise<void> {
+    if (this.options.metricsOnly) return;
     const metadataRestore = await this.restorePresenceFromMetadata(onProgress);
     if (metadataRestore.sawMetadata) {
       if (
@@ -626,10 +693,12 @@ export class TileStore {
       }
       sawMetadata = true;
 
-      const values = await this.redis.mget(keys);
-      keys.forEach((key, index) => {
+      for (let offset = 0; offset < keys.length; offset += REDIS_TILE_READ_BATCH_SIZE) {
+        const keyBatch = keys.slice(offset, offset + REDIS_TILE_READ_BATCH_SIZE);
+        const values = await this.redis.mget(keyBatch);
+        keyBatch.forEach((key, localIndex) => {
         const parsed = this.parseTileMetaKey(key);
-        const raw = values[index];
+        const raw = values[localIndex];
         if (!parsed || !raw) {
           return;
         }
@@ -642,7 +711,8 @@ export class TileStore {
         } catch (error) {
           logger.warn({ err: error, key }, 'failed to restore tile metadata from redis');
         }
-      });
+        });
+      }
 
       if (batches === 1 || cursor === '0' || batches % 10 === 0) {
         reportProgress();
@@ -661,13 +731,15 @@ export class TileStore {
       return 0;
     }
 
-    const values = await this.redis.mget(keys);
     let restored = 0;
     const metadataUpdates: Array<{ amenity: string; hash: string; payload: TileMetadataPayload }> = [];
 
-    keys.forEach((key, index) => {
+    for (let offset = 0; offset < keys.length; offset += REDIS_TILE_READ_BATCH_SIZE) {
+      const keyBatch = keys.slice(offset, offset + REDIS_TILE_READ_BATCH_SIZE);
+      const values = await this.redis.mget(keyBatch);
+      keyBatch.forEach((key, localIndex) => {
       const parsed = this.parseTileKey(key);
-      const raw = values[index];
+      const raw = values[localIndex];
 
       if (!parsed || !raw) {
         return;
@@ -687,7 +759,8 @@ export class TileStore {
       } catch (error) {
         logger.warn({ err: error, key }, 'failed to restore tile presence from redis');
       }
-    });
+      });
+    }
 
     if (metadataUpdates.length > 0) {
       const pipeline = this.redis.pipeline();
@@ -747,22 +820,27 @@ export class TileStore {
 
   public countCachedTiles(amenity: string): number {
     const amenitySuffix = amenityKey(amenity);
+    if (this.options.metricsOnly) return this.metricCounts.get(amenitySuffix)?.tiles ?? 0;
     return this.presence.countPresent(amenitySuffix);
   }
 
   public countCachedAmenities(): number {
+    if (this.options.metricsOnly) return [...this.metricCounts.values()].reduce((n, v) => n + v.items, 0);
     return this.presence.countAmenityItems();
   }
 
   public countCachedAmenityTypes(): number {
+    if (this.options.metricsOnly) return this.metricCounts.size;
     return this.presence.countPresentAmenities();
   }
 
   public countTotalCachedTiles(): number {
+    if (this.options.metricsOnly) return [...this.metricCounts.values()].reduce((n, v) => n + v.tiles, 0);
     return this.presence.countAllPresent();
   }
 
   public getCacheCoverage(options?: CacheCoverageOptions): CacheCoverageEntry[] {
+    if (this.options.metricsOnly) return this.metricCoverage;
     return this.presence.getCoverage(options);
   }
 
@@ -772,6 +850,8 @@ export class TileStore {
       ? Number.POSITIVE_INFINITY
       : Math.max(targetSize, Math.floor(targetSize * 1.2));
 
+    const counts = new Map<string, { tiles: number; items: number }>();
+    let precision = 12;
     let coverage = new Map<string, CacheCoverageEntry>();
     let processed = 0;
     let cursor = '0';
@@ -790,16 +870,22 @@ export class TileStore {
         continue;
       }
 
-      const values = await this.redis.mget(keys);
-      keys.forEach((key, index) => {
+      for (let offset = 0; offset < keys.length; offset += REDIS_TILE_READ_BATCH_SIZE) {
+        const keyBatch = keys.slice(offset, offset + REDIS_TILE_READ_BATCH_SIZE);
+        const values = await this.redis.mget(keyBatch);
+        keyBatch.forEach((key, localIndex) => {
         const parsed = this.parseTileMetaKey(key);
-        const raw = values[index];
+        const raw = values[localIndex];
         if (!parsed || !raw) {
           return;
         }
 
         try {
           const payload = JSON.parse(raw) as TileMetadataPayload;
+          const count = counts.get(parsed.amenity) ?? { tiles: 0, items: 0 };
+          count.tiles += 1;
+          count.items += payload.amenityCount;
+          counts.set(parsed.amenity, count);
           const stale = payload.expiresAt < now;
           const base: CacheCoverageEntry = {
             geohash: parsed.hash,
@@ -809,20 +895,31 @@ export class TileStore {
             staleAmenityItems: stale ? payload.amenityCount : 0
           };
 
-          coverage.set(parsed.hash, mergeCoverageEntry(coverage.get(parsed.hash), base));
+          const hash = parsed.hash.slice(0, precision);
+          coverage.set(hash, mergeCoverageEntry(coverage.get(hash), { ...base, geohash: hash }));
 
           processed += 1;
           if (coverage.size > compactionThreshold && processed % 50 === 0) {
-            coverage = compactCoverageGeohashEntries(coverage, targetSize);
+            while (coverage.size > targetSize && precision > 1) {
+              precision -= 1;
+              const next = new Map<string, CacheCoverageEntry>();
+              for (const entry of coverage.values()) {
+                const hash = entry.geohash.slice(0, precision);
+                next.set(hash, mergeCoverageEntry(next.get(hash), { ...entry, geohash: hash }));
+              }
+              coverage = next;
+            }
           }
         } catch {
           // ignore parse errors
         }
-      });
+        });
+      }
     } while (cursor !== '0');
 
     coverage = compactCoverageGeohashEntries(coverage, targetSize);
 
+    if (this.options.metricsOnly) this.metricCounts = counts;
     return [...coverage.values()];
   }
 
@@ -832,44 +929,46 @@ export class TileStore {
 
   public async readTiles(tiles: TileInfo[], amenity: string): Promise<Map<string, CachedTile>> {
     const amenitySuffix = amenityKey(amenity);
-    const keys = tiles.map((tile) => tileKey(tile.hash, amenitySuffix));
-    const values = await this.redis.mget(keys);
-    const now = Date.now();
-
     const result = new Map<string, CachedTile>();
-
     let hits = 0;
     let misses = 0;
     let staleCount = 0;
 
-    tiles.forEach((tile, index) => {
-      const value = values[index];
-      if (!value) {
-        misses += 1;
-        this.presence.markMissing(amenitySuffix, tile.hash);
-        return;
-      }
+    // Keep both Redis command size and parsed raw payloads bounded for large bbox reads.
+    for (let offset = 0; offset < tiles.length; offset += REDIS_TILE_READ_BATCH_SIZE) {
+      const batch = tiles.slice(offset, offset + REDIS_TILE_READ_BATCH_SIZE);
+      const keys = batch.map((tile) => tileKey(tile.hash, amenitySuffix));
+      const values = await this.redis.mget(keys);
+      const now = Date.now();
 
-      try {
-        const payload = JSON.parse(value) as OverpassTilePayload;
-        const stale = payload.expiresAt < now;
-        const amenityCount = countAmenitiesInResponse(payload.response);
-        result.set(tile.hash, { tile, payload, stale });
-        this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount, stale);
-        hits += 1;
-        if (stale) {
-          staleCount += 1;
+      batch.forEach((tile, index) => {
+        const value = values[index];
+        if (!value) {
+          misses += 1;
+          this.presence.markMissing(amenitySuffix, tile.hash);
+          return;
         }
-      } catch {
-        result.delete(tile.hash);
-        misses += 1;
-        this.presence.markMissing(amenitySuffix, tile.hash);
-      }
-    });
+
+        try {
+          const payload = JSON.parse(value) as OverpassTilePayload;
+          const stale = payload.expiresAt < now;
+          const amenityCount = countAmenitiesInResponse(payload.response);
+          result.set(tile.hash, { tile, payload, stale });
+          this.presence.markPresent(amenitySuffix, tile.hash, payload.expiresAt, amenityCount, stale);
+          hits += 1;
+          if (stale) staleCount += 1;
+        } catch {
+          result.delete(tile.hash);
+          misses += 1;
+          this.presence.markMissing(amenitySuffix, tile.hash);
+        }
+      });
+    }
 
     logger.info(
       {
-        tiles: tiles.map((t) => t.hash),
+        tiles: tiles.slice(0, REDIS_TILE_READ_BATCH_SIZE).map((t) => t.hash),
+        tileCount: tiles.length,
         hits,
         misses,
         stale: staleCount,
@@ -966,7 +1065,7 @@ export class TileStore {
   public async readTile(tile: TileInfo, amenity: string): Promise<CachedTile | undefined> {
     const amenitySuffix = amenityKey(amenity);
     const known = this.presence.get(amenitySuffix, tile.hash);
-    if (known?.state === 'missing') {
+    if (known !== undefined && !isPresentEntry(known)) {
       return undefined;
     }
 

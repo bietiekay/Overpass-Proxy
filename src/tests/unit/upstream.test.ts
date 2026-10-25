@@ -341,6 +341,62 @@ describe('upstream failover', () => {
     }
   });
 
+  it('passes stale refresh cancellation through to the upstream request', async () => {
+    const config = { ...baseConfig, upstreamUrls: ['http://cancel.example/api/interpreter'] };
+    const controller = new AbortController();
+    const aborted = new Error('timed out');
+    postMock.mockImplementationOnce((_url: string, options: { signal?: AbortSignal }) => {
+      expect(options.signal).toBe(controller.signal);
+      return new Promise((_resolve, reject) => {
+        options.signal?.addEventListener('abort', () => reject(aborted), { once: true });
+      });
+    });
+    const pending = fetchTile(config, bbox, 'toilets', { signal: controller.signal });
+    await vi.waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+    controller.abort(aborted);
+    await expect(pending).rejects.toBe(aborted);
+    expect(postMock).toHaveBeenCalledTimes(1);
+    const metrics = await createUpstreamMetricsProvider(config);
+    const upstream = metrics.describeUpstreams()[0];
+    expect(upstream?.totalFailures).toBe(0);
+    expect(upstream?.backoffReason).toBeUndefined();
+  });
+
+  it('cancels an availability wait without starting an upstream request', async () => {
+    vi.useFakeTimers();
+    const warning = vi.spyOn(logger, 'warn');
+    try {
+      const config: AppConfig = {
+        ...baseConfig,
+        upstreamUrls: ['http://waiting.example/api/interpreter'],
+        upstreamBackoffBaseSeconds: 30,
+        upstreamBackoffMaxSeconds: 30,
+        upstreamExhaustedWaitSeconds: 60
+      };
+      const pool = getUpstreamPoolForTesting(config);
+      await (pool as unknown as { ensureReady: () => Promise<void> }).ensureReady();
+      (pool as unknown as { markFailure: (url: string) => void }).markFailure(
+        'http://waiting.example/api/interpreter'
+      );
+
+      const controller = new AbortController();
+      const pending = fetchTile(config, bbox, 'toilets', { signal: controller.signal });
+      await vi.waitFor(() => {
+        expect(warning).toHaveBeenCalledWith(
+          expect.objectContaining({ waitMs: expect.any(Number) }),
+          'waiting for upstream availability'
+        );
+      });
+      controller.abort(new Error('queue timeout'));
+      await expect(pending).rejects.toThrow('queue timeout');
+      expect(postMock).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      warning.mockRestore();
+    }
+  });
+
   it('throws when all upstreams fail', async () => {
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
     const loggerErrorSpy = vi.spyOn(logger, 'error');

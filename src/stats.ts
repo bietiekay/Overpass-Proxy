@@ -3,6 +3,7 @@ import ngeohash from 'ngeohash';
 import { setImmediate as setImmediateCallback } from 'node:timers';
 import { Worker, type WorkerOptions } from 'node:worker_threads';
 
+import { DistinctCounter } from './distinctCounter.js';
 import type { BoundingBox } from './bbox.js';
 import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
@@ -19,6 +20,7 @@ import { StaleRefreshQueue } from './staleRefreshQueue.js';
 export type CacheStatus = 'HIT' | 'MISS' | 'STALE';
 
 export interface CacheMetricsProvider {
+  refreshMetrics?(): Promise<void>;
   countCachedTiles(amenity: string): number;
   countCachedAmenities(): number;
   countCachedAmenityTypes(): number;
@@ -30,8 +32,9 @@ interface AmenityStatsInternal {
   amenity: string;
   requests: number;
   totalTiles: number;
-  clients: Set<string>;
+  clients: DistinctCounter;
   geohashCounts: Map<string, number>;
+  geohashPrecision: number;
   cacheStatusCounts: Record<CacheStatus, number>;
   lastRequestAt: number;
 }
@@ -52,6 +55,7 @@ export interface AmenityStatistics {
   amenity: string;
   requests: number;
   uniqueClients: number;
+  clientCountApproximate?: boolean;
   cacheItems: number;
   cacheHitRate: number;
   averageTilesPerRequest: number;
@@ -74,6 +78,8 @@ export interface StatisticsSnapshot {
   totalRequestsWeek: number;
   totalRequestsMonth: number;
   totalUniqueClients: number;
+  clientCountsApproximate?: boolean;
+  groupedAmenities?: boolean;
   totalTilesRequested: number;
   totalCachedTiles: number;
   totalStaleTiles: number; // Total number of stale tiles in cache (sum of staleEntries from cache coverage)
@@ -658,7 +664,9 @@ interface PersistedAmenityStats {
   requests: number;
   totalTiles: number;
   clients: string[];
+  clientSketch?: string;
   geohashCounts: Array<[string, number]>;
+  geohashPrecision?: number;
   cacheStatusCounts: Record<CacheStatus, number>;
   lastRequestAt: number;
 }
@@ -673,6 +681,7 @@ export interface PersistedStatisticsState {
   totalRequestsMonth: number;
   totalTiles: number;
   uniqueClients: string[];
+  uniqueClientSketch?: string;
   cacheStatusCounts: Record<CacheStatus, number>;
   amenities: PersistedAmenityStats[];
 }
@@ -688,6 +697,8 @@ export interface RequestStatisticsOptions {
   coverageCacheTtlMs?: number;
   maxCacheCoverageEntries?: number;
   maxGeohashCoverageEntries?: number;
+  maxTrackedAmenities?: number;
+  maxRequestGeohashEntries?: number;
   staleRefreshQueue?: StaleRefreshQueueMetricsProvider;
 }
 
@@ -730,7 +741,7 @@ export class RequestStatistics {
 
   private totalTiles = 0;
 
-  private readonly uniqueClients = new Set<string>();
+  private uniqueClients = new DistinctCounter();
 
   private readonly amenityStats = new Map<string, AmenityStatsInternal>();
 
@@ -756,6 +767,9 @@ export class RequestStatistics {
 
   private readonly geohashCoverageCompactionThreshold: number;
 
+  private readonly maxTrackedAmenities: number;
+  private readonly maxRequestGeohashEntries: number;
+
   private revision = 0;
 
   private snapshotRevision = 0;
@@ -777,6 +791,8 @@ export class RequestStatistics {
     options: RequestStatisticsOptions = {}
   ) {
     this.staleRefreshQueue = options.staleRefreshQueue;
+    this.maxTrackedAmenities = Math.max(1, Math.floor(options.maxTrackedAmenities ?? 256));
+    this.maxRequestGeohashEntries = Math.max(32, Math.floor(options.maxRequestGeohashEntries ?? 2048));
     const refreshIntervalMs = options.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
     this.coverageRefreshIntervalMs = refreshIntervalMs;
     const cacheTtlMs = options.coverageCacheTtlMs ?? DEFAULT_COVERAGE_CACHE_TTL_MS;
@@ -876,10 +892,7 @@ export class RequestStatistics {
       this.totalRequestsWeek = persisted.totalRequestsWeek ?? persisted.totalRequests;
       this.totalRequestsMonth = persisted.totalRequestsMonth ?? persisted.totalRequests;
       this.totalTiles = persisted.totalTiles;
-      this.uniqueClients.clear();
-      for (const client of persisted.uniqueClients) {
-        this.uniqueClients.add(client);
-      }
+      this.uniqueClients = new DistinctCounter(persisted.uniqueClients, persisted.uniqueClientSketch);
       this.cacheStatusCounts.HIT = persisted.cacheStatusCounts.HIT ?? 0;
       this.cacheStatusCounts.MISS = persisted.cacheStatusCounts.MISS ?? 0;
       this.cacheStatusCounts.STALE = persisted.cacheStatusCounts.STALE ?? 0;
@@ -889,8 +902,9 @@ export class RequestStatistics {
           amenity: amenity.amenity,
           requests: amenity.requests,
           totalTiles: amenity.totalTiles,
-          clients: new Set(amenity.clients),
+          clients: new DistinctCounter(amenity.clients, amenity.clientSketch),
           geohashCounts: new Map(amenity.geohashCounts),
+          geohashPrecision: amenity.geohashPrecision ?? 12,
           cacheStatusCounts: {
             HIT: amenity.cacheStatusCounts.HIT ?? 0,
             MISS: amenity.cacheStatusCounts.MISS ?? 0,
@@ -898,7 +912,20 @@ export class RequestStatistics {
           },
           lastRequestAt: amenity.lastRequestAt ?? 0
         };
-        this.amenityStats.set(stats.amenity, stats);
+        this.compactRequestGeohashes(stats, true);
+        const target = this.getAmenityStats(stats.amenity);
+        target.requests += stats.requests;
+        target.totalTiles += stats.totalTiles;
+        target.clients.merge(stats.clients);
+        target.lastRequestAt = Math.max(target.lastRequestAt, stats.lastRequestAt);
+        for (const status of ['HIT', 'MISS', 'STALE'] as const) {
+          target.cacheStatusCounts[status] += stats.cacheStatusCounts[status];
+        }
+        target.geohashPrecision = Math.min(target.geohashPrecision, stats.geohashPrecision);
+        for (const [hash, count] of stats.geohashCounts) {
+          target.geohashCounts.set(hash, (target.geohashCounts.get(hash) ?? 0) + count);
+        }
+        this.compactRequestGeohashes(target, true);
       }
 
       this.revision = persisted.totalRequests ?? 0;
@@ -908,20 +935,45 @@ export class RequestStatistics {
   }
 
   private getAmenityStats(amenity: string): AmenityStatsInternal {
+    if (!this.amenityStats.has(amenity) && this.amenityStats.size >= this.maxTrackedAmenities) {
+      amenity = '[other amenities]';
+    }
     let stats = this.amenityStats.get(amenity);
     if (!stats) {
       stats = {
         amenity,
         requests: 0,
         totalTiles: 0,
-        clients: new Set<string>(),
+        clients: new DistinctCounter(),
         geohashCounts: new Map<string, number>(),
+        geohashPrecision: 12,
         cacheStatusCounts: zeroCacheStatus(),
         lastRequestAt: 0
       };
       this.amenityStats.set(amenity, stats);
     }
     return stats;
+  }
+
+  private compactRequestGeohashes(stats: AmenityStatsInternal, normalise = false): void {
+    if (normalise) {
+      const next = new Map<string, number>();
+      for (const [hash, count] of stats.geohashCounts) {
+        const key = hash.slice(0, stats.geohashPrecision);
+        next.set(key, (next.get(key) ?? 0) + count);
+      }
+      stats.geohashCounts = next;
+    }
+    // Lower precision permanently so subsequent requests merge into the same cells.
+    while (stats.geohashCounts.size > this.maxRequestGeohashEntries && stats.geohashPrecision > 1) {
+      stats.geohashPrecision -= 1;
+      const next = new Map<string, number>();
+      for (const [hash, count] of stats.geohashCounts) {
+        const key = hash.slice(0, stats.geohashPrecision);
+        next.set(key, (next.get(key) ?? 0) + count);
+      }
+      stats.geohashCounts = next;
+    }
   }
 
   private refreshPeriodCounters(now: number): void {
@@ -973,13 +1025,15 @@ export class RequestStatistics {
           ? new Set(options.tiles.map((tile) => tile.hash))
           : new Set<string>([geohashForBoundingBox(options.bbox) ?? undefined].filter(Boolean) as string[]);
 
-      for (const geohash of geohashes) {
+      for (const rawHash of geohashes) {
+        const geohash = rawHash.slice(0, amenityStats.geohashPrecision);
         amenityStats.geohashCounts.set(
           geohash,
           (amenityStats.geohashCounts.get(geohash) ?? 0) + 1
         );
       }
 
+      this.compactRequestGeohashes(amenityStats);
       this.revision += 1;
 
       await this.persist();
@@ -1069,6 +1123,7 @@ export class RequestStatistics {
   }
 
   private async buildStatisticsSnapshot(now = Date.now()): Promise<StatisticsSnapshot> {
+    await this.cacheMetrics.refreshMetrics?.();
     return this.runExclusive(async () => {
       logger.info(
         {
@@ -1090,7 +1145,11 @@ export class RequestStatistics {
       const yieldController = new YieldController();
 
       for (const stats of this.amenityStats.values()) {
-        const cacheItems = this.cacheMetrics.countCachedTiles(stats.amenity);
+        const cacheItems = stats.amenity === '[other amenities]'
+          ? Math.max(0, this.cacheMetrics.countTotalCachedTiles() - [...this.amenityStats.keys()]
+            .filter((amenity) => amenity !== '[other amenities]')
+            .reduce((sum, amenity) => sum + this.cacheMetrics.countCachedTiles(amenity), 0))
+          : this.cacheMetrics.countCachedTiles(stats.amenity);
         for (const [hash, count] of stats.geohashCounts) {
           globalGeohashCounts.set(hash, (globalGeohashCounts.get(hash) ?? 0) + count);
           await yieldController.maybeYield();
@@ -1109,6 +1168,7 @@ export class RequestStatistics {
           amenity: stats.amenity,
           requests: stats.requests,
           uniqueClients: stats.clients.size,
+          clientCountApproximate: stats.clients.sketch() !== undefined,
           cacheItems,
           cacheHitRate,
           averageTilesPerRequest,
@@ -1153,6 +1213,8 @@ export class RequestStatistics {
         totalRequestsWeek: this.totalRequestsWeek,
         totalRequestsMonth: this.totalRequestsMonth,
         totalUniqueClients: this.uniqueClients.size,
+        clientCountsApproximate: this.uniqueClients.sketch() !== undefined,
+        groupedAmenities: this.amenityStats.has('[other amenities]'),
         totalTilesRequested: this.totalTiles,
         totalCachedTiles: this.cacheMetrics.countTotalCachedTiles(),
         totalStaleTiles: this.totalStaleTiles,
@@ -1232,6 +1294,7 @@ export class RequestStatistics {
     
     const generatedAt = new Date(now).toISOString();
     logger.info({ memory: reportMemoryUsage() }, 'cache coverage snapshot build started');
+    await this.cacheMetrics.refreshMetrics?.();
     const coverageEntries = this.cacheMetrics.getCacheCoverage({
       maxEntries: this.maxCacheCoverageEntries
     });
@@ -1381,14 +1444,17 @@ export class RequestStatistics {
       totalRequestsWeek: this.totalRequestsWeek,
       totalRequestsMonth: this.totalRequestsMonth,
       totalTiles: this.totalTiles,
-      uniqueClients: [...this.uniqueClients],
+      uniqueClients: this.uniqueClients.values(),
+      uniqueClientSketch: this.uniqueClients.sketch(),
       cacheStatusCounts: { ...this.cacheStatusCounts },
       amenities: [...this.amenityStats.values()].map((stats) => ({
         amenity: stats.amenity,
         requests: stats.requests,
         totalTiles: stats.totalTiles,
-        clients: [...stats.clients],
+        clients: stats.clients.values(),
+        clientSketch: stats.clients.sketch(),
         geohashCounts: [...stats.geohashCounts.entries()],
+        geohashPrecision: stats.geohashPrecision,
         cacheStatusCounts: { ...stats.cacheStatusCounts },
         lastRequestAt: stats.lastRequestAt
       }))
@@ -1430,6 +1496,8 @@ const REFRESH_THROTTLE_TARGETS: RefreshThrottleTarget[] = [
 ];
 
 export interface StatisticsWorkerOptions {
+  /** Reuse the request store when running without a worker. */
+  store?: TileStore;
   config: AppConfig;
   redis: Redis;
   redisUrl: string;
@@ -1564,13 +1632,16 @@ export class StatisticsWorkerClient {
   private async startInline(options: StatisticsWorkerOptions): Promise<void> {
     this.inlineStaleRefreshMetrics = new SharedStaleRefreshMetrics();
     this.inlineStaleRefreshQueue = new StaleRefreshQueue();
-    const store = new TileStore(options.redis, {
+    const store = options.store ?? new TileStore(options.redis, {
+      metricsOnly: true,
+      metricsMaxCoverageEntries: options.maxCacheCoverageEntries,
+      metricsRefreshIntervalMs: Math.min(30000, Math.max(0, options.coverageRefreshIntervalMs ?? 300000)),
       ttlSeconds: options.config.cacheTtlSeconds,
       swrSeconds: options.config.swrSeconds
     });
     this.inlineStore = store;
 
-    await store.restorePresence();
+    await store.refreshMetrics();
     const { createUpstreamMetricsProvider } = await import('./upstream.js');
     const upstreamMetrics = await createUpstreamMetricsProvider(options.config, options.redis);
 
@@ -1818,6 +1889,7 @@ export class StatisticsWorkerClient {
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
     statsPayload: RecordRequestOptions;
   }): void {
+    const { amenity, groups, statsPayload } = task;
     const planOptions = {
       coarsePrecision: this.config.staleRefreshCoarsePrecision,
       finePrecision: this.config.tilePrecision,
@@ -1826,19 +1898,18 @@ export class StatisticsWorkerClient {
 
     if (!this.useWorker) {
       void this.readyPromise
-        .then(() =>
+        .then(async () => {
           this.inlineStaleRefreshQueue?.enqueue({
-            amenity: task.amenity,
-            groups: task.groups,
+            amenity,
+            groups,
             planOptions,
-            run: async (groups) => {
-              await this.runStaleRefreshTask({ amenity: task.amenity, groups });
-            },
-            onSettled: async () => {
-              await this.inlineStatistics?.recordRequest(task.statsPayload);
+            coalesceKey: 'inline-stale-tile-refresh',
+            run: async (groups, signal) => {
+              await this.runStaleRefreshTask({ amenity, groups }, signal);
             }
-          })
-        )
+          });
+          await this.inlineStatistics?.recordRequest(statsPayload);
+        })
         .catch((error) => {
           logger.warn({ err: error }, 'failed to enqueue inline stale refresh task');
         });
@@ -1849,10 +1920,10 @@ export class StatisticsWorkerClient {
       .then(() => {
         const command: StatsWorkerCommand = {
           type: 'staleRefreshTask',
-          amenity: task.amenity,
-          groups: task.groups,
+          amenity,
+          groups,
           planOptions,
-          statsPayload: task.statsPayload
+          statsPayload
         };
         this.worker?.postMessage(command);
       })
@@ -1970,13 +2041,15 @@ export class StatisticsWorkerClient {
     await this.readyPromise.catch(() => {});
     if (this.worker) {
       await this.worker.terminate();
+    } else {
+      await this.inlineStaleRefreshQueue?.stop();
     }
   }
 
   private async runStaleRefreshTask(task: {
     amenity: string;
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
-  }): Promise<void> {
+  }, signal?: AbortSignal): Promise<void> {
     if (!this.inlineStatistics || !this.inlineStore) {
       return;
     }
@@ -1985,14 +2058,18 @@ export class StatisticsWorkerClient {
     const { filterElementsByBbox } = await import('./store.js');
 
     for (const group of task.groups) {
+      if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
       const representative = group.tiles[0];
       if (!representative) continue;
 
       await this.inlineStore
         .withRefreshLock(representative, task.amenity, async () => {
+          if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
           const response = await fetchTile(this.config, group.bounds, task.amenity, {
-            redis: this.redis
+            redis: this.redis,
+            signal
           });
+          if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
           const entries = group.tiles.map((fine) => ({
             tile: fine,
             response: { ...response, elements: filterElementsByBbox(response.elements, fine.bounds) }
@@ -2004,6 +2081,7 @@ export class StatisticsWorkerClient {
         });
     }
 
+    if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
     this.inlineStatistics.markCacheCoverageDirty();
   }
 }

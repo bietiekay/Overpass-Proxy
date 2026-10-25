@@ -70,7 +70,8 @@
   - Miss-lock waiters are released promptly when a miss handler fails to avoid request pileups.【src/store.ts, src/tests/unit/store.test.ts】
   - Refresh-lock logic preserves newer lock tokens if they change mid-refresh to avoid deleting fresh locks.【src/store.ts, src/tests/unit/store.test.ts】
 - **State & lifecycle:**
-  - Maintains in-memory presence cache to support coverage queries and statistics.
+  - The request store owns the only full presence index, with packed exact numeric metadata and rare overflow/fallback representations. Inline statistics reuse it; worker statistics retain Redis-derived aggregates.
+  - Tile and metadata MGET decoding is limited to 500 values per batch, including oversized SCAN pages.
   - Uses Redis scan to rebuild presence on startup for continuity across restarts.【src/store.ts】
 - **Failure modes:**
   - Redis errors can prevent reads/writes; caller must handle missing data or errors accordingly.【src/store.ts】
@@ -103,7 +104,8 @@
   - Worker commands for record/refresh/dirty/stale refresh tasks.【src/stats.ts, src/statsWorker.ts】
 - **Key logic:**
   - Tracks daily/weekly/monthly counters, unique clients, cache hit/miss/stale rates, hotspots, geohash coverage.
-  - Compacts geohash coverage entries to bound payload sizes; caches snapshots with TTL and refresh intervals.【src/stats.ts】
+  - Bounds source request geohash maps to 2,048 cells per amenity, retains 256 individual amenities plus an overflow row, and merges counts when reducing precision. Caches snapshots with TTL and refresh intervals.【src/stats.ts】
+  - Client counts are exact through 1,024 distinct values and then use 4,096-register HyperLogLog sketches with approximation flags. Existing persisted arrays migrate on load.【src/distinctCounter.ts, src/stats.ts】
 - **State & lifecycle:**
   - Uses Redis storage for persistence across restarts; worker thread maintains periodic refresh intervals.
   - Stale refresh queue can be used for background refresh tasks in worker mode.【src/statsWorker.ts, src/staleRefreshQueue.ts】
@@ -116,7 +118,8 @@
 - **Interfaces:**
   - `enqueue(task)` to add refresh tasks; `describeQueue()` returns queue metrics for stats.
 - **Key logic:**
-  - Merges queued tasks by amenity to reduce duplication; enforces task timeout and continues processing after failures/timeouts.【src/staleRefreshQueue.ts】
+  - Coalesces pending tasks on enqueue only when amenity, plan options, and explicit executor identity match. Runs one executor for the combined tile set and preserves settlement callbacks.【src/staleRefreshQueue.ts】
+  - A per-task AbortSignal cancels active HTTP requests and availability waits on timeout. Refresh loops check it before further fetches and writes. Inline shutdown aborts active work and discards pending jobs.【src/staleRefreshQueue.ts, src/stats.ts, src/statsWorker.ts, src/upstream.ts】
 - **Failure modes:**
   - Task timeouts are logged and queue continues; errors are logged and do not stop queue processing.【src/staleRefreshQueue.ts, src/tests/unit/staleRefreshQueue.test.ts】
 - **Evidence pointers:** `src/staleRefreshQueue.ts`, `src/tests/unit/staleRefreshQueue.test.ts`.
@@ -262,3 +265,8 @@
 - **Stale refresh queue** → FR-006 (background refresh), NFR Reliability (timeouts).【docs/PRD.md, src/staleRefreshQueue.ts】
 - **Query parsing & tiling** → FR-002, FR-003 (validation and tile budget).【docs/PRD.md, src/bbox.ts, src/tiling.ts】
 - **Assembly & headers** → FR-007 (dedupe/bbox filter/ETag).【docs/PRD.md, src/assemble.ts, src/headers.ts】
+
+## Memory behavior and validation
+
+See [Memory optimizations](MEMORY_OPTIMIZATIONS.md) for the current memory model,
+API compatibility, migration requirements, measurements, and remaining unbounded data.

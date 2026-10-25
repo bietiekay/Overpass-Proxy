@@ -2,15 +2,19 @@ import type { BoundingBox } from './bbox.js';
 import { filterElementsByBbox, type OverpassElement, type OverpassResponse } from './store.js';
 
 const cloneElement = (element: OverpassElement): OverpassElement => {
+  // Preserve runtime Overpass fields beyond the proxy's narrowed TS type.
   const cloned: OverpassElement = { ...element };
-  if (element.tags) {
-    cloned.tags = { ...element.tags };
+  const tags = element.tags;
+  if (tags) {
+    cloned.tags = { ...tags };
   }
-  if (element.nodes) {
-    cloned.nodes = [...element.nodes];
+  const nodes = element.nodes;
+  if (nodes) {
+    cloned.nodes = [...nodes];
   }
-  if (element.members) {
-    cloned.members = element.members.map((member) => ({ ...member }));
+  const members = element.members;
+  if (members) {
+    cloned.members = members.map((member) => ({ ...member }));
   }
   return cloned;
 };
@@ -29,7 +33,9 @@ export const combineResponses = (responses: OverpassResponse[], bbox: BoundingBo
 
     for (const element of filteredElements) {
       const key = `${element.type}:${element.id}`;
-      elements.set(key, cloneElement(element));
+      // Keep references while resolving duplicate precedence. Only the final
+      // survivor for each key needs to be cloned into the assembled response.
+      elements.set(key, element);
     }
   }
 
@@ -39,6 +45,6 @@ export const combineResponses = (responses: OverpassResponse[], bbox: BoundingBo
     version: firstMeta?.version,
     generator: firstMeta?.generator,
     osm3s: firstMeta?.osm3s,
-    elements: Array.from(elements.values())
+    elements: Array.from(elements.values(), cloneElement)
   };
 };

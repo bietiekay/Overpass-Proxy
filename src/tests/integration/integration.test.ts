@@ -358,7 +358,8 @@ describe('integration', () => {
 
       expect(second.headers['x-cache']).toBe('STALE');
       expect(duration).toBeLessThan(200);
-      expect(recordRequestSpy).toHaveBeenCalledTimes(0);
+      // Inline and worker modes count each request when refresh work is queued.
+      expect(recordRequestSpy).toHaveBeenCalledTimes(1);
 
       await new Promise((resolve) => setTimeout(resolve, 400));
       expect(fetchTileSpy).toHaveBeenCalled();

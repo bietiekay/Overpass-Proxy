@@ -109,7 +109,7 @@ tile counts below the 1 024-tile ceiling even for the app’s widest live-map 
 `tile:<amenity>:<geohash>` and stores its bounding box so upstream responses can be trimmed precisely when written back. The
 workflow is:
 
-- **Cache read:** all requested tile keys are fetched in a single Redis `mget`. Entries with `expiresAt` in the past are marked
+- **Cache read:** requested tile keys are fetched and decoded in Redis `mget` batches of at most 500 values. Entries with `expiresAt` in the past are marked
   stale; missing entries are tracked separately. Cached tiles (fresh or stale) are added to the response immediately, and the
   cache disposition header (`X-Cache`) reports `HIT`, `STALE`, or `MISS` accordingly.
 - **Stale-while-revalidate:** tiles become stale when `expiresAt` crosses `CACHE_TTL_SECONDS` (default 86 400 seconds). When
@@ -127,7 +127,9 @@ workflow is:
 - **Upstream grouping:** tiles slated for refresh are clustered at `UPSTREAM_TILE_PRECISION` (default two geohash levels
   coarser than `TILE_PRECISION`) so one upstream bbox request can repopulate many fine-grained tiles. Background refreshes
   replan tiles using `STALE_REFRESH_COARSE_PRECISION` (default 3) and `STALE_REFRESH_TARGET_TILES_PER_REQUEST` (default a
-  quarter of `MAX_TILES_PER_REQUEST`, min 32) to reduce redundant bbox fetches. Each grouped request uses the canonical
+  quarter of `MAX_TILES_PER_REQUEST`, min 32) to reduce redundant bbox fetches. Compatible queued refreshes are coalesced
+  before execution. Background task timeouts abort active upstream requests and stop subsequent fetches and writes.
+  Both inline and worker statistics count each stale request when its refresh is queued. Each grouped request uses the canonical
   amenity query and obeys `UPSTREAM_REQUEST_TIMEOUT_SECONDS` (default 30 seconds, bounded by
   `UPSTREAM_FAILURE_COOLDOWN_SECONDS`). When the pool is empty only because all upstreams are in backoff, the proxy can
   temporarily replan the same miss into smaller bbox groups using `UPSTREAM_RECOVERY_COARSE_PRECISION` and
@@ -386,3 +388,44 @@ Two static dashboards ship in `public/` to help operators observe coverage and p
   large geohash ranges can be warmed without exhausting the browser.
 - `public/cache-invalidator.html` provides a map-based UI for selecting a bounding box and sending an invalidation request. The
   secret keyword must match `CACHE_INVALIDATION_SECRET`, and the page reports deleted key counts and affected amenities.
+
+### Statistics memory limits
+
+The request handler owns the only full in-process tile presence index, using compact
+metadata values while retaining exact presence and item counts. Redis tile reads and
+metadata scans decode at most 500 values per batch. In worker mode,
+statistics read Redis tile metadata in batches and retain only per-amenity totals and a
+compacted coverage map. Changed-cache scans are throttled to at most once every
+30 seconds; this is a minimum spacing, not a freshness guarantee.
+Snapshot freshness also depends on the refresh schedule (five minutes by default).
+Concurrent metadata refreshes share one scan; an unchanged cache revision reuses
+the aggregates for up to five minutes before the next refresh rescans stale tile counts.
+Tile response payloads are not loaded for these scans. Without a worker,
+statistics reuse the request handler's store.
+
+Request totals, cache status counters and requested tile totals remain exact. Detail
+storage is bounded as follows:
+
+- Unique clients are exact through 1,024 distinct clients per counter. Larger populations
+  use a 4,096-byte HyperLogLog sketch (approximately 1.6% standard relative error).
+  `clientCountsApproximate` in the summary and `clientCountApproximate` per amenity
+  indicate estimated counts. This applies to lifetime client counts, including after restart.
+- Each amenity retains at most 2,048 request geohash cells. When necessary, all cells
+  move to a coarser precision, merging their counts. New requests use that precision;
+  no request counts are discarded. Coverage maps and hotspots can therefore be coarser
+  after substantial geographic activity.
+- At most 256 individually named request amenities are retained. Additional amenity
+  types share the `[other amenities]` statistics row; `groupedAmenities` indicates this.
+  This grouping affects statistical detail only, not cache keys or upstream queries.
+  Global cache counts and request counters remain available as before.
+
+Existing `statistics:current` records are migrated on load and saved in the bounded
+format with the next recorded request. Deployments should keep the new code when
+reusing this state: older versions do not understand the client sketches.
+
+
+See [Memory optimizations and validation](docs/MEMORY_OPTIMIZATIONS.md) for response
+assembly, refresh cancellation, measured memory/latency trade-offs, migration details,
+and remaining options. Redis write batching, incremental response assembly, worker
+backpressure, incremental statistics persistence, and transparent response streaming
+are future opportunities, not implemented features.

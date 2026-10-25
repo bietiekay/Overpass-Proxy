@@ -23,6 +23,54 @@ class InMemoryStatisticsStorage implements StatisticsStorage {
 describe('RequestStatistics', () => {
   const bbox: BoundingBox = { south: 52.5, west: 13.3, north: 52.6, east: 13.4 };
 
+  it('bounds and migrates client, amenity and geohash details without losing counters', async () => {
+    const storage = new InMemoryStatisticsStorage();
+    const alphabet = '0123456789bcdefghjkmnpqrstuvwxyz';
+    const hashes = Array.from({ length: 256 }, (_, i) =>
+      [`${alphabet[i % 32]}${alphabet[Math.floor(i / 32)]}000`, 1] as [string, number]);
+    const clients = Array.from({ length: 2500 }, (_, i) => `client-${i}`);
+    await storage.save({
+      dayStart: Date.now(), weekStart: Date.now(), monthStart: Date.now(),
+      totalRequests: 6, totalRequestsDay: 6, totalRequestsWeek: 6, totalRequestsMonth: 6,
+      totalTiles: 1536, uniqueClients: clients,
+      cacheStatusCounts: { HIT: 6, MISS: 0, STALE: 0 },
+      amenities: Array.from({ length: 6 }, (_, i) => ({
+        amenity: `amenity-${i}`, requests: 1, totalTiles: 256, clients,
+        geohashCounts: hashes, cacheStatusCounts: { HIT: 1, MISS: 0, STALE: 0 },
+        lastRequestAt: Date.now()
+      }))
+    });
+    const metrics = {
+      countCachedTiles: () => 0, countCachedAmenities: () => 0,
+      countCachedAmenityTypes: () => 0, countTotalCachedTiles: () => 0,
+      getCacheCoverage: () => []
+    };
+    const options = { maxTrackedAmenities: 2, maxRequestGeohashEntries: 32 };
+    const stats = await RequestStatistics.create(metrics, storage, undefined, options);
+    await stats.recordRequest({ amenity: 'new-amenity', clientIp: 'client-0', bbox,
+      tileCount: 1, cacheStatus: 'MISS', tiles: [{ hash: 'u0000', bounds: bbox }] });
+    const persisted = (await storage.load())!;
+    expect(persisted.uniqueClients).toEqual([]);
+    expect(persisted.uniqueClientSketch).toBeDefined();
+    expect(persisted.amenities).toHaveLength(3);
+    expect(persisted.amenities.reduce((n, a) => n + a.requests, 0)).toBe(7);
+    expect(persisted.amenities.reduce((n, a) => n + a.totalTiles, 0)).toBe(1537);
+    expect(persisted.amenities.flatMap((a) => a.geohashCounts)
+      .reduce((n, [, count]) => n + count, 0)).toBe(1537);
+    for (const amenity of persisted.amenities) {
+      expect(amenity.geohashCounts.length).toBeLessThanOrEqual(32);
+      expect(amenity.clients.length).toBeLessThanOrEqual(1024);
+      expect(amenity.geohashCounts.every(([hash]) => hash.length <= amenity.geohashPrecision!)).toBe(true);
+    }
+    const restored = await RequestStatistics.create(metrics, storage, undefined, options);
+    const snapshot = await restored.getSnapshot();
+    expect(snapshot.totalRequests).toBe(7);
+    expect(snapshot.totalUniqueClients).toBeGreaterThan(2400);
+    expect(snapshot.totalUniqueClients).toBeLessThan(2600);
+    expect(snapshot.clientCountsApproximate).toBe(true);
+    expect(snapshot.groupedAmenities).toBe(true);
+  });
+
   it('aggregates request metrics', async () => {
     const cacheCounts = new Map<string, number>([['toilets', 5]]);
     const cachedAmenities = new Map<string, number>([['toilets', 5]]);

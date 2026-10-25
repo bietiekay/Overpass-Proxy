@@ -74,22 +74,22 @@ flowchart TD
 ## 4. Tile Caching Pipeline
 1. **Tile computation:** Detected bbox coordinates are expanded into geohash tiles at `TILE_PRECISION` (default 5). Duplicate hashes are removed.
 2. **Tile budget enforcement:** Requests requiring more than `MAX_TILES_PER_REQUEST` tiles raise a `TooManyTilesError`, returning HTTP 413 (default limit 1024 tiles so ToiletFinder’s ~70 km viewport and preload flows stay cacheable).
-3. **Cache lookup:** For each tile, Redis is queried in bulk. Stored payloads include `response`, `fetchedAt`, and `expiresAt` timestamps.
+3. **Cache lookup:** Redis tile reads and decoding use batches of at most 500 values. Stored payloads include `response`, `fetchedAt`, and `expiresAt` timestamps.
 4. **Stale tracking:** Tiles past their TTL are marked `stale`. When `SERVE_STALE_FROM_CACHE=true` and the request is fully satisfied by cached tiles, stale data is returned immediately and refreshed asynchronously via per-tile locks (SWR window `SWR_SECONDS`). When the request contains cache misses or `SERVE_STALE_FROM_CACHE=false`, stale tiles are refreshed before replying so the client receives the latest attempted write.
 5. **Upstream fetch:** Missing tiles are fetched individually by issuing the canonical Overpass multi-entity bbox query (`node`, `way`, `relation`) via POST `application/x-www-form-urlencoded`, scoped to the specific amenity type supplied by the client. If upstream fetches fail and missing tiles remain unresolved, the proxy returns HTTP 503 with cache metadata headers rather than serving partial stale data.
-6. **Persistence:** Fresh tile responses are persisted with a TTL covering both the primary cache duration and SWR window, namespaced by amenity. Tile writes are batched per upstream response and flushed to Redis via `MULTI/EXEC` pipelines to avoid per-tile round trips.
-7. **Assembly:** All tile responses (cached or freshly fetched) are merged, deduplicated by `(type,id)`, filtered against the original bbox, and returned with `Content-Type: application/json`. The proxy also emits `X-Cache` headers (`HIT`, `STALE`, or `MISS`).
+6. **Persistence:** Fresh tile responses are persisted under amenity-scoped keys with logical `expiresAt` timestamps. Payload keys have no Redis TTL so stale responses remain available until overwritten or invalidated. Writes use Redis pipelines (not an atomic `MULTI/EXEC` transaction).
+7. **Assembly:** Tile responses are filtered against the original bbox, then deduplicated by `(type,id)` before cloning survivors. The last eligible value wins while the first insertion position is retained. The assembled response is returned with `Content-Type: application/json`. The proxy also emits `X-Cache` headers (`HIT`, `STALE`, or `MISS`).
 8. **Conditional delivery:** ETags are generated from the assembled JSON payload. Matching `If-None-Match` headers yield a 304 response with no body.
 
 ## 5. Transparent Proxy Behaviour
 - Non-interpreter `/api/*` endpoints (`/api/status`, `/api/timestamp`, `/api/timestamp/*`, `/api/kill_my_queries`, `/api/statistics`, `/api/statistics/cacheCoverage`, `/api/statistics/cacheCoverage/area`, and arbitrary paths) are proxied verbatim when caching is disabled or the request falls outside amenity JSON bbox handling.
 - `/api/statistics`, `/api/statistics/cacheCoverage`, `/api/statistics/cacheCoverage/area`, and `/api/statistics/geohashCoverage` are served locally, returning aggregated JSON metrics derived from the Redis-backed `RequestStatistics` service so data survives restarts.
-- The proxy streams binary bodies without transformation, preserves upstream headers (excluding `host`), and relays upstream status codes. Errors contacting the upstream translate to HTTP 502 with a JSON error object.
+- The proxy buffers binary bodies before forwarding them, preserves upstream headers (excluding `host`), and relays upstream status codes. Errors contacting the upstream translate to HTTP 502 with a JSON error object.
 
 ## 6. Redis Data Model and SWR Locks
 - **Primary key format:** `tile:<amenity>:<geohash>` where `<amenity>` reflects the normalised amenity requested by the client.
 - **Payload:** JSON string representing `{ response, fetchedAt, expiresAt }`, where `response` mirrors the Overpass JSON envelope.
-- **TTL strategy:** Redis `SET` with PX expiry of `(CACHE_TTL_SECONDS + SWR_SECONDS)` milliseconds, ensuring stale entries remain addressable for refresh locking.
+- **TTL strategy:** Tile payload and metadata keys have no Redis expiry; staleness is computed from `expiresAt`. Locks have temporary Redis PX expiries.
 - **Refresh locks:** Temporary keys (`tile:<amenity>:<geohash>:lock`) guard background refreshes for stale tiles, preventing duplicate upstream fetches during the SWR window.
 
 ## 7. Configuration Surface
@@ -136,3 +136,11 @@ The async `buildServer` helper allows tests to override any configuration or inj
 - **Configuration:** `UPSTREAM_DAILY_LIMIT` controls the number of interpreter requests each upstream base URL can serve within a UTC day (`-1` keeps the quota unlimited). Once exhausted, the upstream is blocked for 24 hours.
 - **Enforcement:** `UpstreamPool` in `src/upstream.ts` tracks per-upstream request counts, failure cooldowns, and block expirations. `withUpstream` consults the pool to skip exhausted or cooling-off instances while attempting alternative URLs.
 - **Operator feedback:** When a quota is hit, the proxy logs a structured warning including the upstream URL, request count, configured limit, and unblock timestamp so operators can add capacity or adjust the limit.
+
+## Memory and refresh lifecycle
+
+The request store owns the only full presence index; worker statistics use bounded
+coverage aggregates and inline statistics share the request store. Compatible pending
+refreshes coalesce on enqueue, and timeout signals cancel active HTTP work and waits
+and stop further refresh steps. See [Memory optimizations](docs/MEMORY_OPTIMIZATIONS.md)
+for detail limits, client estimation flags, migration and validation.

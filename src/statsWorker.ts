@@ -51,11 +51,14 @@ const bootstrap = async (): Promise<void> => {
     await redis.connect();
 
     const store = new TileStore(redis, {
+      metricsOnly: true,
+      metricsMaxCoverageEntries: data.maxCacheCoverageEntries,
+      metricsRefreshIntervalMs: Math.min(30000, Math.max(0, data.coverageRefreshIntervalMs ?? 300000)),
       ttlSeconds: data.config.cacheTtlSeconds,
       swrSeconds: data.config.swrSeconds
     });
 
-    await store.restorePresence();
+    await store.refreshMetrics();
     const upstreamMetrics = await createUpstreamMetricsProvider(data.config, redis);
     const staleRefreshQueue = new StaleRefreshQueue();
 
@@ -144,16 +147,21 @@ const bootstrap = async (): Promise<void> => {
         amenity,
         groups,
         planOptions,
-        run: async (mergedGroups) => {
+        coalesceKey: 'stats-worker-stale-tile-refresh',
+        run: async (mergedGroups, signal) => {
           for (const group of mergedGroups) {
+            if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
             const representative = group.tiles[0];
             if (!representative) continue;
 
             await store
               .withRefreshLock(representative, amenity, async () => {
+                if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
                 const response = await fetchTile(data.config, group.bounds, amenity, {
-                  redis: redis ?? undefined
+                  redis: redis ?? undefined,
+                  signal
                 });
+                if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
                 const entries = group.tiles.map((fine) => ({
                   tile: fine,
                   response: {
@@ -167,7 +175,7 @@ const bootstrap = async (): Promise<void> => {
                 logger.warn({ err: error }, 'failed stale refresh task in worker');
               });
           }
-
+          if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
           statistics.markCacheCoverageDirty();
         }
       });

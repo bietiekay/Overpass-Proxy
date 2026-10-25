@@ -24,16 +24,6 @@ export interface StaleRefreshQueueMetricsProvider {
   onUpdate?(listener: () => void): void;
 }
 
-type QueueEntry = {
-  enqueuedAt: number;
-  tileGroups: number;
-  tiles: number;
-  task: StaleRefreshTask;
-};
-
-type ActiveEntry = QueueEntry & { startedAt: number };
-
-const DEFAULT_TASK_TIMEOUT_MS = 5 * 60 * 1000;
 export type StaleRefreshGroup = {
   bounds: BoundingBox;
   tiles: TileInfo[];
@@ -49,70 +39,85 @@ export type StaleRefreshTask = {
   amenity: string;
   groups: StaleRefreshGroup[];
   planOptions: StaleRefreshPlanOptions;
-  run: (groups: StaleRefreshGroup[]) => Promise<void>;
+  run: (groups: StaleRefreshGroup[], signal?: AbortSignal) => Promise<void>;
+  /** Tasks sharing this key promise that one executor can perform the combined work. */
+  coalesceKey?: string;
   onSettled?: () => void | Promise<void>;
 };
 
+type QueueEntry = {
+  enqueuedAt: number;
+  tileGroups: number;
+  tiles: number;
+  task: StaleRefreshTask;
+  settled: Array<() => void | Promise<void>>;
+};
+
+type ActiveEntry = QueueEntry & { startedAt: number };
+
+const DEFAULT_TASK_TIMEOUT_MS = 5 * 60 * 1000;
+
 export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
-  private tail: Promise<void> = Promise.resolve();
-
   private queued: QueueEntry[] = [];
-
   private active: ActiveEntry | null = null;
-
+  private activeController: AbortController | null = null;
+  private pumping = false;
+  private stopped = false;
+  private drainPromise: Promise<void> | null = null;
   private lastSettledAt: number | null = null;
-
   private readonly listeners = new Set<() => void>();
 
   constructor(private readonly taskTimeoutMs = DEFAULT_TASK_TIMEOUT_MS) {}
 
   public enqueue(task: StaleRefreshTask): void {
-    const groups = this.normalizeGroups(task.groups, task.planOptions);
-    const tileGroups = groups.length;
-    const tiles = groups.reduce((total, group) => total + group.tiles.length, 0);
-    const entry: QueueEntry = {
-      enqueuedAt: Date.now(),
-      tileGroups,
-      tiles,
-      task: {
-        ...task,
-        groups
+    if (this.stopped) {
+      if (task.onSettled) {
+        void this.runSettledHandlers({
+          enqueuedAt: Date.now(),
+          tileGroups: 0,
+          tiles: 0,
+          task,
+          settled: [task.onSettled]
+        });
       }
-    };
+      return;
+    }
+    const groups = this.normalizeGroups(task.groups, task.planOptions);
+    const key = this.compatibilityKey(task.amenity, task.planOptions, task.coalesceKey);
+    const existing = task.coalesceKey === undefined
+      ? undefined
+      : this.queued.find((entry) =>
+          this.compatibilityKey(
+            entry.task.amenity,
+            entry.task.planOptions,
+            entry.task.coalesceKey
+          ) === key
+        );
 
-    this.queued.push(entry);
+    if (existing) {
+      const mergedGroups = this.normalizeGroups(
+        [...existing.task.groups, ...groups],
+        task.planOptions
+      );
+      existing.task = { ...existing.task, groups: mergedGroups };
+      existing.tileGroups = mergedGroups.length;
+      existing.tiles = mergedGroups.reduce((sum, group) => sum + group.tiles.length, 0);
+      if (task.onSettled) {
+        existing.settled.push(task.onSettled);
+      }
+    } else {
+      const entry: QueueEntry = {
+        enqueuedAt: Date.now(),
+        tileGroups: groups.length,
+        tiles: groups.reduce((sum, group) => sum + group.tiles.length, 0),
+        task: { ...task, groups },
+        settled: task.onSettled ? [task.onSettled] : []
+      };
+      this.queued.push(entry);
+    }
+
     this.notify();
-
-    this.tail = this.tail
-      .catch((error) => {
-        logger.warn({ err: error }, 'failed stale refresh queue task');
-      })
-      .then(async () => {
-        const nextEntry = this.takeNextEntry();
-        if (!nextEntry) {
-          return;
-        }
-        this.active = { ...nextEntry, startedAt: Date.now() };
-        this.notify();
-
-        try {
-          await this.runWithTimeout(() => nextEntry.task.run(nextEntry.task.groups));
-        } catch (error) {
-          if (this.isTimeoutError(error)) {
-            logger.warn(
-              { err: error, timeoutMs: this.taskTimeoutMs },
-              'stale refresh task timed out'
-            );
-          } else {
-            logger.warn({ err: error }, 'failed to refresh stale tiles in background');
-          }
-        } finally {
-          await this.runSettledHandlers(nextEntry);
-          this.active = null;
-          this.lastSettledAt = Date.now();
-          this.notify();
-        }
-      });
+    this.schedulePump();
   }
 
   public describeQueue(): StaleRefreshQueueOverview {
@@ -120,13 +125,10 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
     const latest =
       this.queued[this.queued.length - 1]?.enqueuedAt ?? this.active?.enqueuedAt ?? null;
 
-    const queuedTileGroups = this.queued.reduce((sum, entry) => sum + entry.tileGroups, 0);
-    const queuedTiles = this.queued.reduce((sum, entry) => sum + entry.tiles, 0);
-
     return {
       queuedRequests: this.queued.length,
-      queuedTileGroups,
-      queuedTiles,
+      queuedTileGroups: this.queued.reduce((sum, entry) => sum + entry.tileGroups, 0),
+      queuedTiles: this.queued.reduce((sum, entry) => sum + entry.tiles, 0),
       oldestEnqueuedAt: oldest ? new Date(oldest).toISOString() : undefined,
       latestEnqueuedAt: latest ? new Date(latest).toISOString() : undefined,
       lastSettledAt: this.lastSettledAt ? new Date(this.lastSettledAt).toISOString() : undefined,
@@ -145,167 +147,143 @@ export class StaleRefreshQueue implements StaleRefreshQueueMetricsProvider {
     this.listeners.add(listener);
   }
 
-  private async runWithTimeout(task: () => Promise<void>): Promise<void> {
-    if (this.taskTimeoutMs <= 0) {
-      await task();
+  public async stop(): Promise<void> {
+    this.stopped = true;
+    const discarded = this.queued.splice(0);
+    if (discarded.length > 0) {
+      this.notify();
+    }
+    this.activeController?.abort(new Error('Stale refresh queue stopped'));
+    for (const entry of discarded) {
+      await this.runSettledHandlers(entry);
+    }
+    await this.drainPromise;
+  }
+
+  private compatibilityKey(
+    amenity: string,
+    plan: StaleRefreshPlanOptions,
+    coalesceKey?: string
+  ): string {
+    return JSON.stringify([
+      amenity,
+      plan.coarsePrecision,
+      plan.finePrecision,
+      plan.targetTilesPerRequest ?? null,
+      coalesceKey
+    ]);
+  }
+
+  private schedulePump(): void {
+    if (this.pumping) {
       return;
     }
 
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    this.pumping = true;
+    queueMicrotask(() => {
+      this.drainPromise = this.drain();
+    });
+  }
+
+  private async drain(): Promise<void> {
     try {
-      await Promise.race([
-        task(),
-        new Promise<void>((_, reject) => {
-          timeoutId = setTimeout(() => {
-            const error = new Error(
-              `Stale refresh task timed out after ${this.taskTimeoutMs}ms`
-            );
-            error.name = 'StaleRefreshTaskTimeout';
-            reject(error);
-          }, this.taskTimeoutMs);
-        })
-      ]);
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    }
-  }
+      while (this.queued.length > 0) {
+        const entry = this.queued.shift()!;
+        this.active = { ...entry, startedAt: Date.now() };
+        this.notify();
 
-  private async runWithTimeoutInternal(task: () => Promise<void>, timeoutMs: number): Promise<void> {
-    if (timeoutMs <= 0) {
-      await task();
-      return;
-    }
-
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        task(),
-        new Promise<void>((_, reject) => {
-          timeoutId = setTimeout(() => {
-            const error = new Error(
-              `Stale refresh task timed out after ${timeoutMs}ms`
-            );
-            error.name = 'StaleRefreshTaskTimeout';
-            reject(error);
-          }, timeoutMs);
-        })
-      ]);
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    }
-  }
-
-  private isTimeoutError(error: unknown): boolean {
-    return error instanceof Error && error.name === 'StaleRefreshTaskTimeout';
-  }
-
-  private takeNextEntry(): QueueEntry | null {
-    if (this.queued.length === 0) {
-      return null;
-    }
-
-    const baseEntry = this.queued[0];
-    if (!baseEntry) {
-      return null;
-    }
-
-    const amenity = baseEntry.task.amenity;
-    const matching = this.queued.filter((entry) => entry.task.amenity === amenity);
-    if (matching.length <= 1) {
-      this.queued = this.queued.filter((entry) => entry !== baseEntry);
-      return baseEntry;
-    }
-
-    const merged = this.mergeEntries(matching);
-    this.queued = this.queued.filter((entry) => entry.task.amenity !== amenity);
-    return merged;
-  }
-
-  private mergeEntries(entries: QueueEntry[]): QueueEntry {
-    const allGroups = entries.flatMap((entry) => entry.task.groups);
-    const baseTask = entries[0]?.task;
-    if (!baseTask) {
-      throw new Error('Cannot merge empty stale refresh queue');
-    }
-
-    const mergedGroups = this.normalizeGroups(allGroups, baseTask.planOptions);
-    const tileGroups = mergedGroups.length;
-    const tiles = mergedGroups.reduce((total, group) => total + group.tiles.length, 0);
-    const enqueuedAt = Math.min(...entries.map((entry) => entry.enqueuedAt));
-    const callbacks = entries.map((entry) => entry.task.onSettled).filter(Boolean) as Array<
-      () => void | Promise<void>
-    >;
-
-    // If multiple tasks are merged, run them sequentially
-    // This ensures that if one task times out, the others still get a chance to run
-    const runFunctions = entries.map((entry) => entry.task.run);
-    const mergedRun =
-      runFunctions.length === 1
-        ? runFunctions[0]!
-        : async (groups: StaleRefreshGroup[]) => {
-            for (const run of runFunctions) {
-              try {
-                // Run each function with its own timeout to ensure one timeout doesn't block others
-                await this.runWithTimeoutInternal(() => run(groups), this.taskTimeoutMs);
-              } catch (error) {
-                // If a task times out or fails, continue with the next one
-                // The timeout error will be logged by runWithTimeout
-                if (!this.isTimeoutError(error)) {
-                  throw error;
-                }
-                // Continue to next run function on timeout
-              }
+        const controller = new AbortController();
+        this.activeController = controller;
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        let onAbort: (() => void) | undefined;
+        const abort = new Promise<never>((_, reject) => {
+          onAbort = () => reject(controller.signal.reason ?? new Error('Stale refresh aborted'));
+          if (controller.signal.aborted) {
+            onAbort();
+            return;
+          }
+          controller.signal.addEventListener('abort', onAbort, { once: true });
+        });
+        try {
+          const work = entry.task.run(entry.task.groups, controller.signal);
+          if (this.taskTimeoutMs > 0) {
+            await Promise.race([
+              work,
+              abort,
+              new Promise<never>((_, reject) => {
+                timeoutId = setTimeout(() => {
+                  const error = new Error(
+                    `Stale refresh task timed out after ${this.taskTimeoutMs}ms`
+                  );
+                  error.name = 'StaleRefreshTaskTimeout';
+                  controller.abort(error);
+                  reject(error);
+                }, this.taskTimeoutMs);
+              })
+            ]);
+          } else {
+            await Promise.race([work, abort]);
+          }
+        } catch (error) {
+          const timeout = error instanceof Error && error.name === 'StaleRefreshTaskTimeout';
+          logger.warn(
+            { err: error, timeoutMs: this.taskTimeoutMs },
+            timeout
+              ? 'stale refresh task timed out'
+              : 'failed to refresh stale tiles in background'
+          );
+        } finally {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+          if (onAbort) {
+            controller.signal.removeEventListener('abort', onAbort);
+          }
+          if (this.activeController === controller) {
+            this.activeController = null;
+          }
+          for (const callback of entry.settled) {
+            try {
+              await callback();
+            } catch (error) {
+              logger.warn({ err: error }, 'failed stale refresh queue settled handler');
             }
-          };
-
-    return {
-      enqueuedAt,
-      tileGroups,
-      tiles,
-      task: {
-        amenity: baseTask.amenity,
-        groups: mergedGroups,
-        planOptions: baseTask.planOptions,
-        run: mergedRun,
-        onSettled: callbacks.length
-          ? async () => {
-              for (const callback of callbacks) {
-                await callback();
-              }
-            }
-          : undefined
+          }
+          this.active = null;
+          this.lastSettledAt = Date.now();
+          this.notify();
+        }
       }
-    };
+    } finally {
+      this.pumping = false;
+      if (this.queued.length > 0 && !this.stopped) {
+        this.schedulePump();
+      }
+    }
+  }
+
+  private async runSettledHandlers(entry: QueueEntry): Promise<void> {
+    for (const callback of entry.settled) {
+      try {
+        await callback();
+      } catch (error) {
+        logger.warn({ err: error }, 'failed stale refresh queue settled handler');
+      }
+    }
   }
 
   private normalizeGroups(
     groups: StaleRefreshGroup[],
-    planOptions: StaleRefreshPlanOptions
+    options: StaleRefreshPlanOptions
   ): StaleRefreshGroup[] {
-    const tilesByHash = new Map<string, TileInfo>();
+    const byHash = new Map<string, TileInfo>();
     for (const group of groups) {
       for (const tile of group.tiles) {
-        tilesByHash.set(tile.hash, tile);
+        byHash.set(tile.hash, tile);
       }
     }
 
-    return planTileFetches(Array.from(tilesByHash.values()), planOptions);
-  }
-
-  private async runSettledHandlers(entry: QueueEntry): Promise<void> {
-    if (!entry.task.onSettled) {
-      return;
-    }
-
-    try {
-      await entry.task.onSettled();
-    } catch (error) {
-      logger.warn({ err: error }, 'failed stale refresh queue settled handler');
-    }
+    return planTileFetches(Array.from(byHash.values()), options);
   }
 
   private notify(): void {

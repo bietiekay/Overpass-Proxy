@@ -731,6 +731,7 @@ interface UpstreamCallOptions {
   clientKey?: string;
   logContext?: Record<string, unknown>;
   waitForAvailability?: boolean;
+  signal?: AbortSignal;
   onAvailabilityWait?: (details: {
     waitMs: number;
     nextAvailableInMs: number;
@@ -774,11 +775,16 @@ const extractInterpreterQuery = (request: FastifyRequest): string | null => {
   return null;
 };
 
-const sleep = async (ms: number): Promise<void> => {
+const sleep = async (ms: number, signal?: AbortSignal): Promise<void> => {
+  if (signal?.aborted) throw signal.reason ?? new Error('Operation aborted');
   if (ms <= 0) {
     return;
   }
-  await new Promise((resolve) => setTimeout(resolve, ms));
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+    const abort = (): void => { clearTimeout(timer); reject(signal?.reason ?? new Error('Operation aborted')); };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 };
 
 const normaliseBackoffReason = (reason: string | undefined, maxLength = 160): string | undefined => {
@@ -1079,6 +1085,7 @@ const withUpstream = async <T>(
   if (!fn) {
     throw new Error('Upstream callback required');
   }
+  if (options.signal?.aborted) throw options.signal.reason ?? new Error('Operation aborted');
 
   const pool = getPool(config, options.redis);
   if (pool.size === 0) {
@@ -1097,7 +1104,9 @@ const withUpstream = async <T>(
   let waitAttempts = 0;
 
   while (true) {
+    if (options.signal?.aborted) throw options.signal.reason ?? new Error('Operation aborted');
     while (attempted.size < pool.size) {
+      if (options.signal?.aborted) throw options.signal.reason ?? new Error('Operation aborted');
       const upstream = pool.next(attempted, dailyLimit, clientKey);
       if (!upstream) {
         break;
@@ -1118,6 +1127,7 @@ const withUpstream = async <T>(
         pool.markSuccess(upstream, Date.now() - start);
         return result;
       } catch (error) {
+        if (options.signal?.aborted) throw error;
         attempted.add(upstream);
         if (!shouldMarkFailure(error)) {
           throw error;
@@ -1181,7 +1191,7 @@ const withUpstream = async <T>(
       },
       'waiting for upstream availability'
     );
-    await sleep(waitMs);
+    await sleep(waitMs, options.signal);
     attempted.clear();
   }
 
@@ -1234,7 +1244,8 @@ export const fetchTile = async (
         },
         timeout: { request: config.upstreamRequestTimeoutSeconds * 1000 },
         throwHttpErrors: true,
-        retry: buildUpstreamRetryOptions(true)
+        retry: buildUpstreamRetryOptions(true),
+        signal: fetchTileOptions.signal
       });
       logger.info({ bbox, amenity, upstreamUrl }, 'upstream fetch done');
       const contentTypeValue = response.headers?.['content-type'];
