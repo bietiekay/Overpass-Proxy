@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Give basic-statistics integration environment startup and teardown separate 60-second hook budgets, keeping Docker provisioning outside the five-second application test timeout.
 - Recover statistics snapshots whose Redis generation timestamp regresses after a completed build, without letting the previous build's refresh cooldown block repair. Repeated polling still respects the normal build interval after recovery.
 
 ### Added

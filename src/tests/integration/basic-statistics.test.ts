@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildServer } from '../../index.js';
 import { RequestStatistics } from '../../stats.js';
 import { TileStore } from '../../store.js';
@@ -7,8 +7,20 @@ import { createTestEnvironment } from './testcontainers.js';
 const query = '[out:json];node["amenity"="toilets"](52.5,13.3,52.6,13.4);out;';
 
 describe('basic statistics without detailed statistics', () => {
+  let env: Awaited<ReturnType<typeof createTestEnvironment>>;
+
+  // Container startup/teardown has its own budget. Keep assertions under the
+  // normal test timeout so slow application behavior still fails promptly.
+  beforeEach(async () => {
+    env = await createTestEnvironment();
+  }, 60_000);
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await env?.stop();
+  }, 60_000);
+
   it('reuses cache inventory, counts responses, and avoids statistics initialization and polling I/O', async () => {
-    const env = await createTestEnvironment();
     const createStatistics = vi.spyOn(RequestStatistics, 'create');
     const refreshMetrics = vi.spyOn(TileStore.prototype, 'refreshMetrics');
     const options = {
@@ -61,13 +73,10 @@ describe('basic statistics without detailed statistics', () => {
       }
     } finally {
       await first.app.close();
-      vi.restoreAllMocks();
-      await env.stop();
     }
   });
 
   it('continues deferred stale refreshes without a statistics worker', async () => {
-    const env = await createTestEnvironment();
     const { app } = await buildServer({
       redisClient: env.redis,
       configOverrides: {
@@ -90,7 +99,6 @@ describe('basic statistics without detailed statistics', () => {
       expect((await app.inject('/api/statistics')).json().cacheStatus.STALE).toBeGreaterThan(0);
     } finally {
       await app.close();
-      await env.stop();
     }
   });
 });
