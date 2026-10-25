@@ -18,20 +18,31 @@ docker run --rm "$run-proxy" npm --version
 docker network create "$run" >/dev/null
 docker run -d --name "$run-redis" --network "$run" --network-alias redis redis:8.10.2-alpine redis-server --user default off --user proxy on ">$redis_password" '~*' '&*' '+@all' >/dev/null
 docker run -d --name "$run-upstream" --network "$run" --network-alias upstream "$run-upstream" >/dev/null
+redis_ready=false
 for attempt in {1..30}; do
-  if docker exec -e REDISCLI_AUTH="$redis_password" "$run-redis" redis-cli --user proxy ping | grep -q PONG; then break; fi
+  if docker exec -e REDISCLI_AUTH="$redis_password" "$run-redis" redis-cli --user proxy ping | grep -q PONG; then redis_ready=true; break; fi
   sleep 1
 done
+if [[ "$redis_ready" != true ]]; then
+  echo 'Redis did not become ready with valid ACL credentials' >&2
+  docker logs "$run-redis"
+  exit 1
+fi
 # Verify the server actually rejects unauthenticated and incorrect credentials.
-if ! docker exec "$run-redis" redis-cli ping 2>&1 | grep -q NOAUTH; then
+# Authentication rejection may itself give redis-cli a nonzero exit status.
+# Capture its output first so pipefail cannot turn an expected rejection into
+# a failed assertion (or grep -q closing the pipe into a SIGPIPE failure).
+unauthenticated_reply="$(docker exec "$run-redis" redis-cli ping 2>&1 || true)"
+if ! grep -q NOAUTH <<<"$unauthenticated_reply"; then
   echo 'Redis unexpectedly accepted an unauthenticated connection' >&2
   exit 1
 fi
-if ! docker exec -e REDISCLI_AUTH=incorrect "$run-redis" redis-cli --user proxy ping 2>&1 | grep -q WRONGPASS; then
+incorrect_password_reply="$(docker exec -e REDISCLI_AUTH=incorrect "$run-redis" redis-cli --user proxy ping 2>&1 || true)"
+if ! grep -q WRONGPASS <<<"$incorrect_password_reply"; then
   echo 'Redis did not reject incorrect ACL credentials' >&2
   exit 1
 fi
-docker run -d --name "$run-proxy" --network "$run" -e REDIS_URL="redis://proxy:$redis_password@redis:6379" -e UPSTREAM_URL=http://upstream:8081/api/interpreter -e LOG_VERBOSITY=errors "$run-proxy" >/dev/null
+docker run -d --name "$run-proxy" --network "$run" -e REDIS_URL="redis://proxy:$redis_password@redis:6379" -e UPSTREAM_URL=http://upstream:8081/api/interpreter -e STATISTICS_ENABLED=true -e LOG_VERBOSITY=errors "$run-proxy" >/dev/null
 if ! docker exec -i "$run-proxy" node --input-type=module <<'JS'
 import assert from 'node:assert/strict';
 const base = 'http://127.0.0.1:8080';
@@ -82,7 +93,16 @@ for (const phase of ['cold', 'warm']) {
 let statisticsReady = false;
 for (let i = 0; i < 30; i++) {
   const response = await fetch(`${base}/api/statistics`);
-  if (response.status === 200 && (await response.json()).pending !== true) { statisticsReady = true; break; }
+  if (response.status === 200) {
+    const snapshot = await response.json();
+    if (snapshot.pending !== true) {
+      assert.ok(Array.isArray(snapshot.upstreams), 'detailed worker snapshot must expose upstream health');
+      assert.ok(Array.isArray(snapshot.amenities), 'detailed worker snapshot must expose amenity statistics');
+      assert.notEqual(snapshot.mode, 'basic', 'worker smoke test must not accept basic-mode counters');
+      statisticsReady = true;
+      break;
+    }
+  }
   await pause();
 }
 assert.ok(statisticsReady, 'production statistics worker must produce a snapshot');
