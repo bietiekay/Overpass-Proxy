@@ -486,6 +486,15 @@ class SnapshotCache<T extends { generatedAt: string }> {
       const parsed = JSON.parse(raw) as T;
       const generatedAt = Date.parse(parsed.generatedAt);
       if (Number.isFinite(generatedAt)) {
+        // Redis can be restored or overwritten after this instance published a
+        // newer snapshot. Its previous build must not throttle recovery of the
+        // regressed value. Only reset on a timestamp regression, so repeated
+        // reads still respect retry throttling after a failed recovery build.
+        if (this.lastGeneratedAt !== null && generatedAt < this.lastGeneratedAt &&
+          this.refreshFailureCount === 0 && !this.hasBuildInFlight()) {
+          this.lastAttemptAt = null;
+          this.lastCompletedAt = null;
+        }
         this.lastGeneratedAt = generatedAt;
         // Reading an old persisted snapshot must not cancel an explicit rebuild request.
       }

@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { BoundingBox } from '../../bbox.js';
+import type { Redis } from 'ioredis';
+import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 import {
   type PersistedStatisticsState,
   type StatisticsStorage,
-  RequestStatistics
+  RequestStatistics,
+  STATISTICS_SNAPSHOT_KEY
 } from '../../stats.js';
 
 class InMemoryStatisticsStorage implements StatisticsStorage {
@@ -21,6 +24,43 @@ class InMemoryStatisticsStorage implements StatisticsStorage {
 
 describe('RequestStatistics - Non-blocking behavior', () => {
   const bbox: BoundingBox = { south: 52.5, west: 13.3, north: 52.6, east: 13.4 };
+
+  it('repairs a regressed Redis snapshot inside the normal refresh cooldown', async () => {
+    const redis = new InMemoryRedis() as unknown as Redis;
+    const countTiles = vi.fn(() => 7);
+    const stats = await RequestStatistics.create(
+      {
+        countCachedTiles: () => 0,
+        countCachedAmenities: () => 0,
+        countCachedAmenityTypes: () => 0,
+        countTotalCachedTiles: countTiles,
+        getCacheCoverage: () => []
+      },
+      new InMemoryStatisticsStorage(),
+      undefined,
+      { redis, snapshotRefreshIntervalMs: 600_000 }
+    );
+    try {
+      await stats.getSnapshot();
+      countTiles.mockClear();
+      const staleGeneratedAt = '2020-01-01T00:00:00.000Z';
+      await redis.set(STATISTICS_SNAPSHOT_KEY, JSON.stringify({ generatedAt: staleGeneratedAt, totalRequests: 0 }));
+      stats.markStatisticsDirty();
+      expect((await stats.getSnapshot()).generatedAt).toBe(staleGeneratedAt);
+      await vi.waitFor(async () => {
+        expect((await stats.getSnapshot()).generatedAt).not.toBe(staleGeneratedAt);
+      });
+      expect(countTiles).toHaveBeenCalledTimes(1);
+      for (let i = 0; i < 10; i++) {
+        stats.markStatisticsDirty();
+        await stats.getSnapshot();
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(countTiles).toHaveBeenCalledTimes(1);
+    } finally {
+      await stats.close();
+    }
+  });
 
   it('rebuilds an explicitly dirty snapshot even without a request revision change', async () => {
     let cachedTiles = 0;
