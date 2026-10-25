@@ -236,7 +236,7 @@ Redis 8.10.2 is the current container/test target. Docker integration tests use 
 
 The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, while `GET /api/statistics/cacheCoverage/area` returns cache coverage scoped to a bounding box at a requested geohash precision for zoomed-in maps. Per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
 
-Statistics snapshots now self-heal when cached payloads age out: a pending read from `/api/statistics` triggers an asynchronous rebuild in the background instead of remaining indefinitely pending. Refresh triggers are throttled per target to protect interpreter request latency during repeated dashboard polling. Snapshot assembly is time-sliced so large per-amenity or hotspot datasets yield back to the event loop in small chunks instead of monopolising the worker thread.
+Statistics endpoints serve the last completed snapshot while a replacement is prepared. Dirty data and repeated dashboard polling respect the ten-minute default build interval. All three snapshot kinds share one build gate; snapshot assembly yields to the event loop in small chunks. Failed refreshes can delay updates beyond the configured interval.
 
 Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities. When `CLIENT_AUTH_TOKEN` is enabled, the same request must also send `X-Overpass-Proxy-Token`.
 
@@ -397,7 +397,7 @@ metadata scans decode at most 500 values per batch. In worker mode,
 statistics read Redis tile metadata in batches and retain only per-amenity totals and a
 compacted coverage map. Changed-cache scans are throttled to at most once every
 30 seconds; this is a minimum spacing, not a freshness guarantee.
-Snapshot freshness also depends on the refresh schedule (five minutes by default).
+Snapshot freshness also depends on the refresh schedule (ten minutes by default).
 Concurrent metadata refreshes share one scan; an unchanged cache revision reuses
 the aggregates for up to five minutes before the next refresh rescans stale tile counts.
 Tile response payloads are not loaded for these scans. Without a worker,
@@ -410,7 +410,8 @@ storage is bounded as follows:
   use a 4,096-byte HyperLogLog sketch (approximately 1.6% standard relative error).
   `clientCountsApproximate` in the summary and `clientCountApproximate` per amenity
   indicate estimated counts. This applies to lifetime client counts, including after restart.
-- Each amenity retains at most 2,048 request geohash cells. When necessary, all cells
+- All amenities together retain at most 20,000 request geohash cells by default, with
+  at most 2,048 cells per amenity. When necessary, all cells
   move to a coarser precision, merging their counts. New requests use that precision;
   no request counts are discarded. Coverage maps and hotspots can therefore be coarser
   after substantial geographic activity.
@@ -420,12 +421,46 @@ storage is bounded as follows:
   Global cache counts and request counters remain available as before.
 
 Existing `statistics:current` records are migrated on load and saved in the bounded
-format with the next recorded request. Deployments should keep the new code when
+format with the next persistence flush. Deployments should keep the new code when
 reusing this state: older versions do not understand the client sketches.
 
 
 See [Memory optimizations and validation](docs/MEMORY_OPTIMIZATIONS.md) for response
 assembly, refresh cancellation, measured memory/latency trade-offs, migration details,
-and remaining options. Redis write batching, incremental response assembly, worker
-backpressure, incremental statistics persistence, and transparent response streaming
-are future opportunities, not implemented features.
+and remaining options. Redis tile-write batching, incremental response assembly,
+statistics delta persistence, and transparent response streaming remain future opportunities.
+
+
+Statistics ingress now retains one bounded pending aggregate and at most one
+acknowledged worker batch in flight, rather than individual requests or their tile
+geometry. Foreground requests update counters without waiting for the worker or
+Redis. Refresh notifications also have one acknowledged command in flight.
+Statistics attached to stale requests are counted independently of refresh-job
+coalescing. Retries reuse batch IDs and are deduplicated within the worker lifetime.
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `STATS_BATCH_INTERVAL_MS` | `1000` | Flush pending counters; minimum 50 ms |
+| `STATS_FLUSH_THRESHOLD` | `128` | Attempt an earlier flush after this many pending requests |
+| `STATS_BATCH_RETRY_MS` | `5000` | Retry an unacknowledged batch, at most three retries; minimum 250 ms |
+| `STATS_PERSIST_INTERVAL_MS` | `30000` | Persist the latest complete bounded statistics state |
+| `STATS_SNAPSHOT_INTERVAL_MS` | `600000` | Minimum rebuild interval for statistics and both coverage snapshots |
+| `STATS_MAX_AMENITIES` | `256` | Individually named request amenities, plus the overflow row |
+| `STATS_MAX_PENDING_GEOHASHES` | `20000` | Total request geohash cells in the pending aggregate |
+| `STATS_MAX_REQUEST_GEOHASHES` | `20000` | Total request geohash cells in worker state |
+
+Geohash budgets are clamped to at least `32 * (STATS_MAX_AMENITIES + 1)` so
+all amenity rows can retain valid precision-one cells. Coarsening adds existing
+counts: distinct requested tile hashes still contribute separately when they
+land in the same coarser cell. These limits bound statistics structures, not
+whole-process RSS. Tile responses, the main presence index, Redis, and background
+refresh jobs have separate lifetimes and budgets. A snapshot build and one
+persistence serialization can coexist.
+
+The persistence interval trades crash durability for fewer allocations and Redis
+writes: a crash can lose unflushed pending/in-flight counters and changes since the
+last successful persistence. Graceful shutdown attempts a final flush with a bounded
+wait; a failed worker cannot make the proxy wait indefinitely. A stalled worker
+retains bounded pending state after its retry budget is exhausted; a terminated
+worker cannot provide further statistics until the process restarts. Snapshot
+freshness is independent of successful counter ingestion and persistence.

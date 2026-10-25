@@ -96,8 +96,10 @@
   - Upstream errors propagate to caller; interpreter may respond 503 if unresolved tiles remain.【src/interpreter.ts, src/upstream.ts】
 - **Evidence pointers:** `src/upstream.ts`, `specification.md`, `src/tests/unit/upstream.test.ts`.
 
-### 2.5 Statistics subsystem (`stats.ts`, `statsWorker.ts`)
+### 2.5 Statistics subsystem (`stats.ts`, `statsAggregation.ts`, `statsWorker.ts`)
 - **Responsibility:** Aggregate request metrics, cache coverage snapshots, per-amenity stats, and upstream status; persist snapshots to Redis and expose worker-based refreshes.【src/stats.ts, src/statsWorker.ts】
+- `StatsAggregation` retains bounded live counters, client sketches and request-geohash maps, serializing only at batch boundaries. One batch and one coalesced notification command may be in flight, each acknowledged separately. Batch retries reuse identities and application is deduplicated.【src/statsAggregation.ts, src/stats.ts, src/statsWorker.ts】
+- Production defaults persist bounded state every 30 seconds and rebuild snapshots at most every 10 minutes. All snapshot builds, serialization and writes share a single gate; HTTP readers reuse the last completed snapshot. One state persistence can overlap a snapshot build. See README statistics memory limits for environment controls and crash-loss tradeoffs.【src/stats.ts, src/statsWorker.ts, README.md】
 - **Interfaces:**
   - `RequestStatistics` with `recordRequest`, `getSnapshot`, `getCacheCoverageSnapshot`, `getGeohashCoverageSnapshot`.
   - `StatisticsWorkerClient` for main process to submit record/refresh tasks to worker.

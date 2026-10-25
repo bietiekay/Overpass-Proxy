@@ -8,7 +8,7 @@ import { buildServer as buildServerWithConfig, type BuildServerOptions } from '.
 import { logger } from '../../logger.js';
 import { tileKey, tilesForBoundingBox } from '../../tiling.js';
 import * as upstream from '../../upstream.js';
-import { RequestStatistics, STATISTICS_SNAPSHOT_KEY } from '../../stats.js';
+import { StatisticsWorkerClient, STATISTICS_SNAPSHOT_KEY } from '../../stats.js';
 import { InMemoryRedis } from '../helpers/inMemoryRedis.js';
 import { createMockOverpass } from './mock-overpass.js';
 import { createTestEnvironment } from './testcontainers.js';
@@ -313,7 +313,7 @@ describe('integration', () => {
   it('returns stale cache immediately and queues refresh when configured', async () => {
     await redisClient?.flushall();
     hits.splice(0, hits.length);
-    const recordRequestSpy = vi.spyOn(RequestStatistics.prototype, 'recordRequest');
+    const recordRequestSpy = vi.spyOn(StatisticsWorkerClient.prototype, 'recordRequest');
     const originalFetchTile = upstream.fetchTile;
 
     const { app } = await buildServer({
@@ -1024,6 +1024,9 @@ describe('integration', () => {
   });
 
   it('tracks unique clients using forwarded headers when proxy trust is enabled', async () => {
+    // Production statistics are intentionally delayed; this test uses short explicit schedules.
+    vi.stubEnv('STATS_BATCH_INTERVAL_MS', '50');
+    vi.stubEnv('STATS_SNAPSHOT_INTERVAL_MS', '0');
     await redisClient?.flushall();
     hits.splice(0, hits.length);
 
@@ -1058,10 +1061,13 @@ describe('integration', () => {
         .send(formBody(jsonQuery))
         .expect(200);
 
-      const response = await request(url).get('/api/statistics').expect(200);
-      expect(response.body.totalUniqueClients).toBeGreaterThanOrEqual(2);
+      await expect.poll(async () => {
+        const response = await request(url).get('/api/statistics').expect(200);
+        return response.body.totalUniqueClients;
+      }, { timeout: 2000, interval: 25 }).toBeGreaterThanOrEqual(2);
     } finally {
       await app.close();
+      vi.unstubAllEnvs();
     }
   });
 

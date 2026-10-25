@@ -4,7 +4,6 @@ import { Redis } from 'ioredis';
 import type { AppConfig } from './config.js';
 import { logger } from './logger.js';
 import {
-  DEFAULT_COVERAGE_REFRESH_INTERVAL_MS,
   RequestStatistics,
   RedisStatisticsStorage,
   type StatsWorkerCommand,
@@ -25,6 +24,11 @@ interface StatisticsWorkerData {
   maxCacheCoverageEntries?: number;
   maxGeohashCoverageEntries?: number;
 }
+
+const envInteger = (name: string, fallback: number, minimum = 0): number => {
+  const parsed = Number(process.env[name]);
+  return Math.max(minimum, Math.floor(Number.isFinite(parsed) ? parsed : fallback));
+};
 
 const shutdownRedis = async (redis: Redis | null): Promise<void> => {
   if (!redis) {
@@ -63,7 +67,7 @@ const bootstrap = async (): Promise<void> => {
     const staleRefreshQueue = new StaleRefreshQueue();
 
     const refreshIntervalMs =
-      data.coverageRefreshIntervalMs ?? DEFAULT_COVERAGE_REFRESH_INTERVAL_MS;
+      data.coverageRefreshIntervalMs ?? envInteger('STATS_SNAPSHOT_INTERVAL_MS', 10 * 60 * 1000);
 
     const statistics = await RequestStatistics.create(
       store,
@@ -75,7 +79,11 @@ const bootstrap = async (): Promise<void> => {
         coverageRefreshIntervalMs: data.coverageRefreshIntervalMs,
         coverageCacheTtlMs: data.coverageCacheTtlMs,
         maxCacheCoverageEntries: data.maxCacheCoverageEntries,
-        maxGeohashCoverageEntries: data.maxGeohashCoverageEntries
+        maxGeohashCoverageEntries: data.maxGeohashCoverageEntries,
+        maxTrackedAmenities: envInteger('STATS_MAX_AMENITIES', 256, 1),
+        maxTotalRequestGeohashEntries: envInteger('STATS_MAX_REQUEST_GEOHASHES', 20_000, 32),
+        persistenceIntervalMs: envInteger('STATS_PERSIST_INTERVAL_MS', 30_000),
+        snapshotRefreshIntervalMs: data.coverageRefreshIntervalMs ?? envInteger('STATS_SNAPSHOT_INTERVAL_MS', 10 * 60 * 1000)
       }
     );
 
@@ -183,8 +191,33 @@ const bootstrap = async (): Promise<void> => {
 
     const handleCommand = async (command: StatsWorkerCommand): Promise<void> => {
       switch (command.type) {
-        case 'record':
-          await statistics.recordRequest(command.payload);
+        case 'recordBatch':
+          if (!appliedBatchIds.has(command.batch.batchId)) {
+            await statistics.recordBatch(command.batch);
+            appliedBatchIds.add(command.batch.batchId);
+            if (appliedBatchIds.size > 512) appliedBatchIds.delete(appliedBatchIds.values().next().value!);
+          }
+          parentPort!.postMessage({ type: 'ack', batchId: command.batch.batchId });
+          return;
+        case 'shutdown':
+          for (const batch of command.batches ?? []) {
+            if (appliedBatchIds.has(batch.batchId)) continue;
+            await statistics.recordBatch(batch);
+            appliedBatchIds.add(batch.batchId);
+          }
+          await statistics.close();
+          parentPort!.postMessage({ type: 'stopped' });
+          await shutdownRedis(redis);
+          return;
+        case 'notifications':
+          try {
+            for (const target of command.dirtyTargets) handleMarkDirty(target);
+            for (const target of command.refreshTargets) await handleRefresh(target);
+          } catch (error) {
+            logger.warn({ err: error, notificationId: command.notificationId }, 'statistics notification command failed');
+          } finally {
+            parentPort!.postMessage({ type: 'notificationAck', notificationId: command.notificationId });
+          }
           return;
         case 'refresh':
           await handleRefresh(command.target);
@@ -194,7 +227,6 @@ const bootstrap = async (): Promise<void> => {
           return;
         case 'staleRefreshTask':
           enqueueStaleRefresh(command.amenity, command.groups, command.planOptions);
-          await statistics.recordRequest(command.statsPayload);
           return;
         case 'staleRefreshUpdate':
           logger.warn('stale refresh update command is ignored in worker-mode queue');
@@ -204,10 +236,19 @@ const bootstrap = async (): Promise<void> => {
       }
     };
 
+    const appliedBatchIds = new Set<string>();
+    let batchQueue = Promise.resolve();
     parentPort.on('message', (command: StatsWorkerCommand) => {
-      void handleCommand(command).catch((error) => {
+      const run = () => handleCommand(command).catch((error) => {
         logger.warn({ err: error, command }, 'statistics worker command failed');
       });
+      if (command.type === 'recordBatch') {
+        batchQueue = batchQueue.then(run);
+      } else if (command.type === 'shutdown') {
+        void batchQueue.then(run);
+      } else {
+        void run();
+      }
     });
 
     parentPort.on('close', () => {

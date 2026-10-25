@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Bounded statistics pre-aggregation with one acknowledged batch in flight, finite retries, deduplicated batch application, and coalesced refresh notifications.
+- Configurable global request-geohash budgets, persistence/snapshot schedules, and real-worker Redis validation.
 - Bounded lifetime client counters: exact through 1,024 clients, then 4,096-byte HyperLogLog sketches; statistics expose approximation flags.
 - Statistics detail limits of 2,048 request geohash cells per amenity and 256 individually tracked amenities, with count-preserving geographic compaction and an overflow amenity row.
 - Regression coverage for client sketch persistence, bounded Redis batches, compact presence metadata, enqueue coalescing, active cancellation, shutdown, and response clone isolation.
@@ -13,6 +15,8 @@
 - Persisted upstream `backoffReason` metadata for logs, statistics snapshots, and post-restart debugging.
 
 ### Changed
+- Statistics persist periodically (30 seconds by default) and reuse completed snapshots between rebuilds (10 minutes by default); all snapshot builders and writes share one gate.
+- Statistics ingestion keeps counters independent of stale refresh jobs and attempts a bounded final flush during shutdown. Unpersisted counters may be lost after a crash.
 - Removed the statistics worker's duplicate full tile presence index. Worker statistics retain Redis-derived aggregates; inline statistics share the request handler's store.
 - Packed normal presence entries into exact numeric metadata, with overflow counts and fallback representations for exceptional expiry timestamps.
 - Limited tile and metadata MGET reads/decoding to 500 values per batch, including oversized SCAN results, without changing the query interface.
