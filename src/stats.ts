@@ -1739,14 +1739,14 @@ export class StatisticsWorkerClient {
     this.refreshIntervalMs =
       options.coverageRefreshIntervalMs ?? envInteger('STATS_SNAPSHOT_INTERVAL_MS', 10 * 60 * 1000);
     this.snapshotStore = new SnapshotCacheStore(options.redis);
-    this.useWorker =
+    this.useWorker = this.statisticsEnabled && (
       options.useWorker ??
-      options.redis instanceof (IORedis as unknown as new (...args: never[]) => Redis);
+      options.redis instanceof (IORedis as unknown as new (...args: never[]) => Redis));
 
     if (!this.useWorker) {
       this.worker = null;
       this.readyPromise = this.startInline(options);
-      this.startFlushTimers();
+      if (this.statisticsEnabled) this.startFlushTimers();
       return;
     }
 
@@ -1896,6 +1896,10 @@ export class StatisticsWorkerClient {
       swrSeconds: options.config.swrSeconds
     });
     this.inlineStore = store;
+
+    // Keep operational stale refreshes, without constructing statistics caches,
+    // restoring statistics history, scanning coverage, or starting statistics timers.
+    if (!this.statisticsEnabled) return;
 
     await store.refreshMetrics();
     const { createUpstreamMetricsProvider } = await import('./upstream.js');
@@ -2281,7 +2285,7 @@ export class StatisticsWorkerClient {
     amenity: string;
     groups: Array<{ bounds: BoundingBox; tiles: TileInfo[] }>;
   }, signal?: AbortSignal): Promise<void> {
-    if (!this.inlineStatistics || !this.inlineStore) {
+    if (!this.inlineStore) {
       return;
     }
 
@@ -2313,6 +2317,6 @@ export class StatisticsWorkerClient {
     }
 
     if (signal?.aborted) throw signal.reason ?? new Error('Stale refresh aborted');
-    this.inlineStatistics.markCacheCoverageDirty();
+    this.inlineStatistics?.markCacheCoverageDirty();
   }
 }

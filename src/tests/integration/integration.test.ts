@@ -16,7 +16,11 @@ import { createTestEnvironment } from './testcontainers.js';
 // Injected real Redis clients and the production worker must use the same ACL credentials.
 const buildServer = (overrides: BuildServerOptions = {}) => {
   // Behavioral tests spy on main-thread implementations; worker behavior is tested explicitly.
-  const options = { statisticsWorker: false, ...overrides };
+  const options = {
+    statisticsWorker: false,
+    ...overrides,
+    configOverrides: { statisticsEnabled: true, ...overrides.configOverrides }
+  };
   const redisOptions = options.redisClient?.options;
   if (!redisOptions) return buildServerWithConfig(options);
   const url = new URL(`redis://${redisOptions.host}:${redisOptions.port}/${redisOptions.db ?? 0}`);
@@ -2233,6 +2237,29 @@ describe('GET request handling', () => {
 });
 
 describe('statistics edge cases', () => {
+  it('serves basic statistics but disables coverage when detailed statistics are disabled', async () => {
+    const { app } = await buildServer({
+      redisClient,
+      configOverrides: { statisticsEnabled: false, upstreamUrls }
+    });
+    try {
+      const basic = await app.inject({ method: 'GET', url: '/api/statistics' });
+      expect(basic.statusCode).toBe(200);
+      expect(basic.json()).toMatchObject({ mode: 'basic', totalRequests: 0 });
+      for (const url of [
+        '/api/statistics/cacheCoverage',
+        '/api/statistics/cacheCoverage/area?bbox=52.5,13.3,52.6,13.4',
+        '/api/statistics/geohashCoverage'
+      ]) {
+        const response = await app.inject({ method: 'GET', url });
+        expect(response.statusCode).toBe(503);
+        expect(response.json()).toEqual({ error: 'Statistics are disabled', enabled: false });
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   it('returns 400 for invalid precision in cache coverage area', async () => {
     await request(baseUrl)
       .get('/api/statistics/cacheCoverage/area')

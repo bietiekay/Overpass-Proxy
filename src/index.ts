@@ -15,6 +15,7 @@ import { registerInterpreterRoutes } from './interpreter.js';
 import { createLoggerOptions, createProgressLogger, logger } from './logger.js';
 import { TileStore, type RestorePresenceProgress } from './store.js';
 import { StatisticsWorkerClient } from './stats.js';
+import { BasicStatistics } from './basicStatistics.js';
 
 export interface BuildServerOptions {
   configOverrides?: Partial<AppConfig>;
@@ -32,6 +33,8 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   const config: AppConfig = { ...baseConfig, ...options.configOverrides };
   startupProgress('creating fastify instance');
   const app = Fastify({ logger: createLoggerOptions(), trustProxy: config.trustProxy });
+  const basicStatistics = new BasicStatistics();
+  basicStatistics.register(app);
   void app.register(formbody);
 
   const statisticsMapPath = resolve(process.cwd(), 'public', 'statistics-map.html');
@@ -175,7 +178,7 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
   });
   await statistics.ready();
 
-  registerInterpreterRoutes(app, { config, redis, store, stats: statistics });
+  registerInterpreterRoutes(app, { config, redis, store, stats: statistics, basicStatistics });
   startupProgress('registering interpreter routes');
 
   app.addHook('onClose', async () => {

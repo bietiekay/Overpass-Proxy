@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Always-available, fixed-size basic interpreter counters and startup-restored cache inventory at the standard `/api/statistics` endpoint when detailed statistics are disabled, retaining shared field names and omitting unavailable details. Basic mode skips statistics workers, coverage scans, history restoration, and statistics timers while retaining operational stale refreshes.
 - Bounded statistics pre-aggregation with one acknowledged batch in flight, finite retries, deduplicated batch application, and coalesced refresh notifications.
 - Configurable global request-geohash budgets, persistence/snapshot schedules, and real-worker Redis validation.
 - Bounded lifetime client counters: exact through 1,024 clients, then 4,096-byte HyperLogLog sketches; statistics expose approximation flags.

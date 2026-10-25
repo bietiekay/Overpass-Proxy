@@ -82,7 +82,7 @@ flowchart TD
 8. **Conditional delivery:** ETags are generated from the assembled JSON payload. Matching `If-None-Match` headers yield a 304 response with no body.
 
 ## 5. Transparent Proxy Behaviour
-- Non-interpreter `/api/*` endpoints (`/api/status`, `/api/timestamp`, `/api/timestamp/*`, `/api/kill_my_queries`, `/api/statistics`, `/api/statistics/cacheCoverage`, `/api/statistics/cacheCoverage/area`, and arbitrary paths) are proxied verbatim when caching is disabled or the request falls outside amenity JSON bbox handling.
+- Non-interpreter `/api/*` endpoints (`/api/status`, `/api/timestamp`, `/api/timestamp/*`, `/api/kill_my_queries`, and arbitrary paths) are proxied verbatim when caching is disabled or the request falls outside amenity JSON bbox handling.
 - `/api/statistics`, `/api/statistics/cacheCoverage`, `/api/statistics/cacheCoverage/area`, and `/api/statistics/geohashCoverage` are served locally, returning aggregated JSON metrics derived from the Redis-backed `RequestStatistics` service so data survives restarts.
 - The proxy buffers binary bodies before forwarding them, preserves upstream headers (excluding `host`), and relays upstream status codes. Errors contacting the upstream translate to HTTP 502 with a JSON error object.
 
@@ -144,3 +144,9 @@ coverage aggregates and inline statistics share the request store. Compatible pe
 refreshes coalesce on enqueue, and timeout signals cancel active HTTP work and waits
 and stop further refresh steps. See [Memory optimizations](docs/MEMORY_OPTIMIZATIONS.md)
 for detail limits, client estimation flags, migration and validation.
+
+### Basic and detailed statistics
+
+`GET /api/statistics` is handled locally in both modes, including transparent-only deployments. By default (`STATISTICS_ENABLED=false`) it exposes fixed-size, process-local interpreter response/error/cache-status counters, percentage cache hit rate, generation/start times, uptime, and the existing cache inventory counters restored by normal startup. Shared fields use the detailed statistics schema names. Unsupported details are absent, not synthetic zeros or empty arrays. Counters are updated by completed interpreter responses; statistics polling is excluded. No dedicated statistics scans, workers, history, or periodic snapshot/persistence work are needed. Request counters reset on restart. Cache inventory reflects locally known presence, maintained through normal cache operations; operational stale refreshes remain active.
+
+`STATISTICS_ENABLED=true` retains the detailed statistics snapshots and coverage endpoints. Without it, dedicated cache/geohash coverage endpoints return HTTP 503. All statistics routes retain the configured client-token protection. See README for the basic field contract and detailed mode limits.

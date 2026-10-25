@@ -11,6 +11,7 @@ import {
   type BoundingBox
 } from './bbox.js';
 import type { AppConfig } from './config.js';
+import type { BasicStatistics } from './basicStatistics.js';
 import { TooManyTilesError } from './errors.js';
 import { applyConditionalHeaders } from './headers.js';
 import { logger } from './logger.js';
@@ -31,6 +32,7 @@ interface InterpreterDeps {
   redis: Redis;
   store: TileStore;
   stats: StatisticsWorkerClient;
+  basicStatistics: BasicStatistics;
 }
 
 type InterpreterRequest = FastifyRequest;
@@ -628,7 +630,7 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics', async (_request, reply) => {
-    if (!deps.config.statisticsEnabled) return reply.code(503).send({ error: 'Statistics are disabled', enabled: false });
+    if (!deps.config.statisticsEnabled) return deps.basicStatistics.snapshot(deps.store);
     const { snapshot, pending } = await deps.stats.getStatisticsSnapshot();
     reply.header('Content-Type', 'application/json');
 

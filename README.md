@@ -74,7 +74,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
 | `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
-| `STATISTICS_ENABLED` | `false` | Enable request statistics, snapshots, and cache/geohash coverage endpoints. Disabled mode keeps cache refresh behavior active. |
+| `STATISTICS_ENABLED` | `false` | Enable detailed request statistics, snapshots, and cache/geohash coverage endpoints. Basic counters and operational cache refreshes remain available when disabled. |
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `UPSTREAM_RECOVERY_COARSE_PRECISION` | `min(TILE_PRECISION, max(UPSTREAM_TILE_PRECISION + 1, TILE_PRECISION - 1))` | Finer grouping precision used when the upstream pool is temporarily empty and the proxy retries with smaller bbox requests |
@@ -235,9 +235,11 @@ For an external Redis ACL user, set `REDIS_URL=redis://username:encoded-password
 
 Redis 8.10.2 is the current container/test target. Docker integration tests use a named ACL user with the default user disabled. The container smoke test checks rejection of missing/wrong credentials, cold-cache fetch and warm-cache reuse and the statistics worker using authenticated Redis. See [Redis upgrade and validation](docs/REDIS_UPGRADE.md) before reusing an existing data directory.
 
-The proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, while `GET /api/statistics/cacheCoverage/area` returns cache coverage scoped to a bounding box at a requested geohash precision for zoomed-in maps. Per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+The standard `GET /api/statistics` endpoint serves basic statistics with the default `STATISTICS_ENABLED=false`. Available values retain the detailed schema names (`totalRequests`, `cacheStatus`, `cacheHitRate`, `totalCachedTiles`, `cachedAmenities`, `cachedAmenityTypes`, `generatedAt`); unavailable details are omitted rather than filled with zeros or empty arrays. They contain completed GET/POST interpreter request counts, client/server error counts, response counts grouped by the existing `X-Cache` header (HIT/MISS/STALE/unclassified), instance uptime, and the existing cache inventory counters. Polling does not count itself. Counters reset on server restart; cache inventory is restored by the normal startup and maintained by normal cache operations. Inventory reflects locally known presence, including stale tiles, rather than an independently reconciled Redis census. No request history, client/IP sets, geographic data, extra cache index, Redis polling, statistics timers, or statistics worker are added in basic mode. Background stale refreshes continue using the operational store. This endpoint uses the same client-token authentication as other API endpoints.
 
-Statistics endpoints serve the last completed snapshot while a replacement is prepared. Dirty data and repeated dashboard polling respect the ten-minute default build interval. All three snapshot kinds share one build gate; snapshot assembly yields to the event loop in small chunks. Failed refreshes can delay updates beyond the configured interval.
+With `STATISTICS_ENABLED=true`, the proxy also publishes aggregated usage statistics at `GET /api/statistics`, covering amenity demand, client distribution, cache inventory, geohash hotspots since the start of the current day, and a stale refresh queue overview that summarises background tile updates. Cache coverage is available separately at `GET /api/statistics/cacheCoverage` to reduce payload sizes for dashboards that do not need tile-level inventory detail, while `GET /api/statistics/cacheCoverage/area` returns cache coverage scoped to a bounding box at a requested geohash precision for zoomed-in maps. Per-amenity geohash coverage is exposed via `GET /api/statistics/geohashCoverage` for clients that need precision views without loading cache inventory. These counters are persisted to Redis so they survive restarts. Upstream Overpass instances can be protected with the `UPSTREAM_DAILY_LIMIT` environment variable, which stops routing requests to a backend for 24 hours once its quota is exhausted.
+
+With detailed statistics enabled, statistics endpoints serve the last completed snapshot while a replacement is prepared. Dirty data and repeated dashboard polling respect the ten-minute default build interval. All three snapshot kinds share one build gate; snapshot assembly yields to the event loop in small chunks. Failed refreshes can delay updates beyond the configured interval.
 
 Cache invalidation is supported at `POST /api/cache/invalidate` when `CACHE_INVALIDATION_SECRET` is configured. The endpoint accepts the secret and bounding box in either query parameters or a JSON body. Bounding boxes can be supplied as a `bbox` string (`south,west,north,east`), an array, or discrete `south`, `west`, `north`, `east` fields. The response includes the resolved bbox, tile count, deleted key counts, and the list of affected amenities. When `CLIENT_AUTH_TOKEN` is enabled, the same request must also send `X-Overpass-Proxy-Token`.
 
@@ -304,9 +306,25 @@ The proxy ships with a lightweight cache invalidation tool at `GET /cache-invali
 
 #### What the statistics include and how to use them
 
+With `STATISTICS_ENABLED=false`, `/api/statistics` returns `mode: "basic"` and only the available fields:
+
+| Field | Meaning |
+| --- | --- |
+| `generatedAt`, `startedAt`, `uptimeSeconds` | Response generation time, server instance start time, and monotonic uptime. |
+| `totalRequests` | Completed GET/POST `/api/interpreter` responses since this server instance started. |
+| `clientErrors`, `serverErrors` | Interpreter responses with HTTP 4xx and 5xx status codes. |
+| `cacheStatus` | Counts of responses carrying `X-Cache: HIT`, `MISS`, or `STALE`. These follow the existing response-header semantics. |
+| `unclassifiedRequests` | Interpreter responses without one of those cache classifications, including transparent responses and validation errors. |
+| `cacheHitRate` | HIT responses divided by all counted interpreter responses, as a percentage rounded to two decimals; zero before any responses. |
+| `totalCachedTiles`, `cachedAmenities`, `cachedAmenityTypes` | Existing operational counts of locally known cached tiles, amenity items, and amenity types, restored at startup and updated through cache operations. |
+
+Statistics polling, preflight requests, and administration calls do not increment these request counters. Fields such as unique clients, day/week/month totals, requested tiles, stale tile totals, per-amenity breakdowns, hotspots, upstream snapshots, and refresh queue statistics are omitted in basic mode. Dedicated coverage endpoints return HTTP 503 with `{ "error": "Statistics are disabled", "enabled": false }`. There is no separate basic endpoint.
+
+The following detailed data requires `STATISTICS_ENABLED=true`:
+
 - **Global totals (persisted across restarts):** total requests, total requested tiles, unique client IPs, cache hits/misses/stales and hit rate, current cached tile count and number of cached amenities, and the top ten geohash hotspots with their request share.
 - **Per-amenity breakdown:** requests and average tile counts, unique client IPs, cached tile inventory, cache hit/miss/stale counts with hit rate, 4-character geohash coverage percentages, and the timestamp of the last request.
-- **Persistence:** the snapshot is stored in Redis on every update so dashboards and alerts can rely on continuity through restarts.
+- **Persistence:** bounded request state is persisted periodically (30 seconds by default), while completed snapshots are reused between rebuilds (10 minutes by default). Unpersisted changes can be lost after a crash.
 - **Operational uses:**
   - Identify "hot" geohashes and amenity types to pre-warm or pin in the cache.
   - Spot cache effectiveness regressions (hit/miss ratios) and adjust eviction or TTL policies.
@@ -317,7 +335,7 @@ The proxy ships with a lightweight cache invalidation tool at `GET /cache-invali
 - **HTTP:** call `GET /api/statistics` to fetch the current JSON snapshot without touching the interpreter endpoint. Tile cache coverage is exposed separately at `GET /api/statistics/cacheCoverage` for clients that only need the cached tile breakdowns, `GET /api/statistics/cacheCoverage/area` scopes cache coverage to a bbox and precision for map viewports, and per-amenity geohash coverage is served at `GET /api/statistics/geohashCoverage` for viewers that visualise hotspots without inventory payloads.
 - **Snapshot cost model:** `GET /api/statistics` stays on lightweight aggregate counters and cached hotspot state, so it no longer performs a full cache-coverage traversal during rebuilds. Expensive cache inventory work remains isolated to the dedicated coverage endpoints.
 - **In-process:** the Fastify server wires `RequestStatistics` into the interpreter routes. If you add new routes or background jobs, you can inject the same instance and call `await stats.getSnapshot()`, `await stats.getCacheCoverageSnapshot()`, or `await stats.getGeohashCoverageSnapshot()` to retrieve structured data inside the process without another HTTP request.
-- **Time window:** counters continue accumulating until cleared from Redis, so the snapshot survives restarts and day boundaries.
+- **Time window:** basic counters reset on server instance restart. Detailed cumulative counters persist in Redis, with separate day/week/month request windows.
 - **Stale tile totals:** `totalStaleTiles` is reused from the latest cache-coverage snapshot rather than recomputed by scanning the full cache on every `/api/statistics` request. That keeps statistics rebuilds predictable even when Redis contains near-global coverage.
 
 ## Testing

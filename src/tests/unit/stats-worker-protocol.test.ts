@@ -14,7 +14,7 @@ type FixtureMessage = {
 };
 type ClientWithWorker = { worker: Worker | null };
 
-const config = { cacheTtlSeconds: 60, swrSeconds: 30, staleRefreshCoarsePrecision: 3, tilePrecision: 5 } as AppConfig;
+const config = { statisticsEnabled: true, cacheTtlSeconds: 60, swrSeconds: 30, staleRefreshCoarsePrecision: 3, tilePrecision: 5 } as AppConfig;
 const fixtureWorkerPath = new URL('../fixtures/statsWorkerFixture.mjs', import.meta.url);
 const clients: StatisticsWorkerClient[] = [];
 const originalInterval = process.env.STATS_BATCH_INTERVAL_MS;
