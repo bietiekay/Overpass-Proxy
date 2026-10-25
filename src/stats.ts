@@ -1694,6 +1694,7 @@ export class StatisticsWorkerClient {
   private inlineStore: TileStore | null = null;
 
   private readonly config: AppConfig;
+  private readonly statisticsEnabled: boolean;
 
   private readonly redis: Redis;
 
@@ -1732,6 +1733,7 @@ export class StatisticsWorkerClient {
       options.workerPath ?? new URL(`./statsWorker.${extension}`, import.meta.url);
 
     this.config = options.config;
+    this.statisticsEnabled = options.config.statisticsEnabled;
     this.redis = options.redis;
 
     this.refreshIntervalMs =
@@ -1982,7 +1984,7 @@ export class StatisticsWorkerClient {
   }
 
   public recordRequest(payload: RecordRequestOptions): void {
-    if (this.stopped) return;
+    if (this.stopped || !this.statisticsEnabled) return;
     this.aggregation.add(payload);
     if (this.aggregation.pendingCount + (this.inFlightBatch?.totalRequests ?? 0) >= envInteger('STATS_FLUSH_THRESHOLD', 128, 1)) this.flush();
   }
@@ -2035,6 +2037,7 @@ export class StatisticsWorkerClient {
     reason = 'manual',
     metadata: Record<string, unknown> = {}
   ): void {
+    if (!this.statisticsEnabled) return;
     const now = Date.now();
     const budget = this.consumeRefreshBudget(target, now);
     if (!budget.allowed) {
@@ -2064,6 +2067,7 @@ export class StatisticsWorkerClient {
   }
 
   public markDirty(target: StatisticsRefreshTarget = 'all'): void {
+    if (!this.statisticsEnabled) return;
     this.queueNotification('dirty', target);
   }
 

@@ -628,6 +628,7 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics', async (_request, reply) => {
+    if (!deps.config.statisticsEnabled) return reply.code(503).send({ error: 'Statistics are disabled', enabled: false });
     const { snapshot, pending } = await deps.stats.getStatisticsSnapshot();
     reply.header('Content-Type', 'application/json');
 
@@ -650,6 +651,7 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics/geohashCoverage', async (_request, reply) => {
+    if (!deps.config.statisticsEnabled) return reply.code(503).send({ error: 'Statistics are disabled', enabled: false });
     const snapshot = await deps.stats.getGeohashCoverageSnapshot();
     reply.header('Content-Type', 'application/json');
     if (snapshot.pending) {
@@ -659,6 +661,7 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics/cacheCoverage', async (_request, reply) => {
+    if (!deps.config.statisticsEnabled) return reply.code(503).send({ error: 'Statistics are disabled', enabled: false });
     const snapshot = await deps.stats.getCacheCoverageSnapshot();
     reply.header('Content-Type', 'application/json');
     if (snapshot.pending) {
@@ -668,6 +671,7 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   });
 
   app.get('/api/statistics/cacheCoverage/area', async (request, reply) => {
+    if (!deps.config.statisticsEnabled) return reply.code(503).send({ error: 'Statistics are disabled', enabled: false });
     const queryParams = request.query as Record<string, unknown>;
     const bbox =
       parseBoundingBoxInput(queryParams?.bbox) ??

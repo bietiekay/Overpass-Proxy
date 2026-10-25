@@ -74,6 +74,7 @@ Environment variables are read at startup. Defaults are shown below:
 | `CACHE_TTL_SECONDS` | `86400` | Cache TTL |
 | `SWR_SECONDS` | `CACHE_TTL_SECONDS / 10` | Stale-while-revalidate window |
 | `SERVE_STALE_FROM_CACHE` | `true` | Serve stale cache entries immediately and refresh them asynchronously |
+| `STATISTICS_ENABLED` | `false` | Enable request statistics, snapshots, and cache/geohash coverage endpoints. Disabled mode keeps cache refresh behavior active. |
 | `TILE_PRECISION` | `5` | Geohash precision for tiles |
 | `MAX_TILES_PER_REQUEST` | `1024` | Maximum tiles per request |
 | `UPSTREAM_RECOVERY_COARSE_PRECISION` | `min(TILE_PRECISION, max(UPSTREAM_TILE_PRECISION + 1, TILE_PRECISION - 1))` | Finer grouping precision used when the upstream pool is temporarily empty and the proxy retries with smaller bbox requests |

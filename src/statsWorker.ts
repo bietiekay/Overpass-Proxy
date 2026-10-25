@@ -92,8 +92,8 @@ const bootstrap = async (): Promise<void> => {
       await statistics.getSnapshot();
     };
 
-    await refreshStatisticsSnapshot();
-    if (refreshIntervalMs > 0) {
+    if (data.config.statisticsEnabled) await refreshStatisticsSnapshot();
+    if (data.config.statisticsEnabled && refreshIntervalMs > 0) {
       setInterval(() => {
         void refreshStatisticsSnapshot().catch((error: unknown) => {
           logger.warn({ err: error }, 'failed to refresh statistics snapshot');

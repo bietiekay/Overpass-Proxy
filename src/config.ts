@@ -33,6 +33,7 @@ export interface AppConfig {
   serveStaleFromCache: boolean;
   cacheInvalidateSecret: string | null;
   clientAuthToken: string | null;
+  statisticsEnabled: boolean;
 }
 
 const toNumber = (value: string | undefined, fallback: number): number => {
@@ -153,6 +154,7 @@ export const loadConfig = (): AppConfig => {
     serveStaleFromCache: toBoolean(env.SERVE_STALE_FROM_CACHE, true),
     cacheInvalidateSecret:
       cacheInvalidateSecret && cacheInvalidateSecret.length > 0 ? cacheInvalidateSecret : null,
-    clientAuthToken: clientAuthToken && clientAuthToken.length > 0 ? clientAuthToken : null
+    clientAuthToken: clientAuthToken && clientAuthToken.length > 0 ? clientAuthToken : null,
+    statisticsEnabled: toBoolean(env.STATISTICS_ENABLED, false)
   };
 };
