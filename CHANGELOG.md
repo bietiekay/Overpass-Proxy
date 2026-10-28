@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Fixed
+- Handle CORS preflight requests before API wildcard routes so authenticated browser clients receive 204 instead of the unknown-endpoint 404.
+- Align interpreter integration tests with strict amenity allowlisting and the supported transparent endpoints.
 - Docker smoke ACL checks accept the expected Redis authentication error even when redis-cli exits nonzero; worker smoke checks explicitly enable detailed statistics and require detailed snapshot fields.
 - Give basic-statistics integration environment startup and teardown separate 60-second hook budgets, keeping Docker provisioning outside the five-second application test timeout.
 - Recover statistics snapshots whose Redis generation timestamp regresses after a completed build, without letting the previous build's refresh cooldown block repair. Repeated polling still respects the normal build interval after recovery.

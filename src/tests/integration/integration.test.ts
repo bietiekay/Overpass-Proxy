@@ -19,7 +19,11 @@ const buildServer = (overrides: BuildServerOptions = {}) => {
   const options = {
     statisticsWorker: false,
     ...overrides,
-    configOverrides: { statisticsEnabled: true, ...overrides.configOverrides }
+    configOverrides: {
+      statisticsEnabled: true,
+      allowedAmenities: ['toilets', 'drinking_water'],
+      ...overrides.configOverrides
+    }
   };
   const redisOptions = options.redisClient?.options;
   if (!redisOptions) return buildServerWithConfig(options);
@@ -1211,7 +1215,7 @@ describe('integration', () => {
     const address = app.server.address();
     const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
 
-    const largeQuery = '[out:json];node["amenity"](0,0,10,10);out;';
+    const largeQuery = '[out:json];node["amenity"="toilets"](0,0,10,10);out;';
     await request(url)
       .post('/api/interpreter')
       .set('Content-Type', 'application/x-www-form-urlencoded')
@@ -1531,7 +1535,7 @@ describe('bbox parsing edge cases', () => {
       .send(formBody(queryWithFewCoords));
 
     expect(response.statusCode).toBe(400);
-    expect(response.body.error).toBe('Bounding box required');
+    expect(response.body.error).toBe('Unsupported amenity query');
   });
 
   it('rejects bbox with too many coordinates', async () => {
@@ -1627,7 +1631,7 @@ describe('transparent proxy', () => {
     const url = `http://127.0.0.1:${typeof appAddress === 'object' && appAddress ? appAddress.port : 0}`;
 
     try {
-      const testBody = '[out:xml];node(1,1,2,2);out;';
+      const testBody = '[out:xml];node["amenity"="toilets"](1,1,2,2);out;';
       const response = await request(url)
         .post('/api/interpreter')
         .set('Content-Type', 'application/x-www-form-urlencoded')
@@ -1842,7 +1846,7 @@ describe('transparent proxy', () => {
     const url = `http://127.0.0.1:${typeof appAddress === 'object' && appAddress ? appAddress.port : 0}`;
 
     try {
-      const query = '[out:xml];node(1,1,2,2);out;';
+      const query = '[out:xml];node["amenity"="toilets"](1,1,2,2);out;';
       const initialHits = mockOverpass.hits.length;
       await request(url)
         .get(`/api/interpreter?data=${encodeURIComponent(query)}`)
@@ -1859,14 +1863,14 @@ describe('transparent proxy', () => {
   it('preserves request method for PUT', async () => {
     const mockOverpass = createMockOverpass();
     let capturedMethod: string | undefined;
-    mockOverpass.app.all('/api/custom', async (req, reply) => {
+    mockOverpass.app.all('/api/status', async (req, reply) => {
       capturedMethod = req.method;
       reply.send({ ok: true });
     });
     await mockOverpass.start(0);
     const address = mockOverpass.app.server.address();
     const port = typeof address === 'object' && address ? address.port : 0;
-    const upstreamUrl = `http://127.0.0.1:${port}/api/custom`;
+    const upstreamUrl = `http://127.0.0.1:${port}/api/status`;
 
     const { app } = await buildServer({
       configOverrides: {
@@ -1882,7 +1886,7 @@ describe('transparent proxy', () => {
     const url = `http://127.0.0.1:${typeof appAddress === 'object' && appAddress ? appAddress.port : 0}`;
 
     try {
-      await request(url).put('/api/custom').expect(200);
+      await request(url).put('/api/status').expect(200);
       expect(capturedMethod).toBe('PUT');
     } finally {
       await app.close();
@@ -1927,14 +1931,14 @@ describe('transparent proxy', () => {
   it('preserves request method for DELETE', async () => {
     const mockOverpass = createMockOverpass();
     let capturedMethod: string | undefined;
-    mockOverpass.app.all('/api/custom', async (req, reply) => {
+    mockOverpass.app.all('/api/status', async (req, reply) => {
       capturedMethod = req.method;
       reply.send({ ok: true });
     });
     await mockOverpass.start(0);
     const address = mockOverpass.app.server.address();
     const port = typeof address === 'object' && address ? address.port : 0;
-    const upstreamUrl = `http://127.0.0.1:${port}/api/custom`;
+    const upstreamUrl = `http://127.0.0.1:${port}/api/status`;
 
     const { app } = await buildServer({
       configOverrides: {
@@ -1950,7 +1954,7 @@ describe('transparent proxy', () => {
     const url = `http://127.0.0.1:${typeof appAddress === 'object' && appAddress ? appAddress.port : 0}`;
 
     try {
-      await request(url).delete('/api/custom').expect(200);
+      await request(url).delete('/api/status').expect(200);
       expect(capturedMethod).toBe('DELETE');
     } finally {
       await app.close();
@@ -2014,7 +2018,7 @@ describe('error handling', () => {
       .set('Content-Type', 'application/x-www-form-urlencoded')
       .send(formBody(queryWithoutBbox))
       .expect(400);
-    expect(response.body.error).toBe('Bounding box required');
+    expect(response.body.error).toBe('Unsupported amenity query');
   });
 
   it('returns 503 when upstream fails and tiles remain unresolved', async () => {
@@ -2112,7 +2116,7 @@ describe('error handling', () => {
     const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
 
     try {
-      const largeQuery = '[out:json];node["amenity"](0,0,10,10);out;';
+      const largeQuery = '[out:json];node["amenity"="toilets"](0,0,10,10);out;';
       const response413 = await request(url)
         .post('/api/interpreter')
         .set('Content-Type', 'application/x-www-form-urlencoded')
@@ -2222,7 +2226,7 @@ describe('GET request handling', () => {
     const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
 
     try {
-      const nonCacheableQuery = '[out:xml];node(1,1,2,2);out;';
+      const nonCacheableQuery = '[out:xml];node["amenity"="toilets"](1,1,2,2);out;';
       const query = encodeURIComponent(nonCacheableQuery);
       const response = await request(url)
         .get(`/api/interpreter?data=${query}`)
@@ -2448,23 +2452,43 @@ describe('statistics edge cases', () => {
 });
 
 describe('validation', () => {
-  it('proxies queries without amenity filter', async () => {
-    // These tests use baseUrl which should work if upstream is available
-    // If it fails, it's likely an upstream connectivity issue, not a test issue
+  it('rejects amenities outside the configured allowlist', async () => {
+    const redis = new InMemoryRedis();
+    const { app } = await buildServer({
+      configOverrides: { upstreamUrls, allowedAmenities: ['toilets'] },
+      redisClient: redis as unknown as Redis
+    });
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/interpreter',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: formBody(drinkingWaterQuery)
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ error: 'Amenity is not allowed', amenity: 'drinking_water' });
+    } finally {
+      await app.close();
+      await redis.quit();
+    }
+  });
+
+  it('rejects queries without an explicit amenity equality filter', async () => {
     const response = await request(baseUrl)
       .post('/api/interpreter')
       .set('Content-Type', 'application/x-www-form-urlencoded')
       .send(formBody('[out:json];node(1,1,2,2);out;'));
     
-    // Accept 200 (success) or 502/503 (upstream unavailable in test env)
-    expect([200, 502, 503]).toContain(response.statusCode);
+    expect(response.statusCode).toBe(400);
   });
 
   it('proxies non-json queries', async () => {
     const response = await request(baseUrl)
       .post('/api/interpreter')
       .set('Content-Type', 'application/x-www-form-urlencoded')
-      .send(formBody('[out:xml];node["amenity"](1,1,2,2);out;'));
+      .send(formBody('[out:xml];node["amenity"="toilets"](1,1,2,2);out;'));
     
     // Accept 200 (success) or 502/503 (upstream unavailable in test env)
     expect([200, 502, 503]).toContain(response.statusCode);
@@ -2641,10 +2665,6 @@ describe('client token auth', () => {
       capturedHeaders = req.headers as Record<string, string | string[] | undefined>;
       reply.send({ ok: true });
     });
-    mockOverpass.app.get('/api/custom', async (req, reply) => {
-      capturedHeaders = req.headers as Record<string, string | string[] | undefined>;
-      reply.send({ ok: true });
-    });
     await mockOverpass.start(0);
 
     const address = mockOverpass.app.server.address();
@@ -2659,7 +2679,6 @@ describe('client token auth', () => {
 
     try {
       await request(url).get('/api/status').expect(401);
-      await request(url).get('/api/custom').expect(401);
 
       await request(url)
         .get('/api/status')
@@ -2667,11 +2686,6 @@ describe('client token auth', () => {
         .expect(200);
       expect(capturedHeaders[clientAuthHeaderName.toLowerCase()]).toBeUndefined();
 
-      await request(url)
-        .get('/api/custom')
-        .set(clientAuthHeaderName, clientAuthToken)
-        .expect(200);
-      expect(capturedHeaders[clientAuthHeaderName.toLowerCase()]).toBeUndefined();
     } finally {
       await app.close();
       await redis.quit();

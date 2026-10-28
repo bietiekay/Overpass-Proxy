@@ -1,5 +1,5 @@
 import formbody from '@fastify/formbody';
-import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import { Redis } from 'ioredis';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -72,12 +72,6 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
     reply.send(html);
   });
 
-  // Preflight requests
-  app.options('*', async (_request: FastifyRequest, reply: FastifyReply) => {
-    reply.code(204);
-    reply.send();
-  });
-
   const summariseBody = (body: unknown): { kind: string; size: number; preview?: string } => {
     if (typeof body === 'string') {
       const size = Buffer.byteLength(body, 'utf8');
@@ -109,11 +103,13 @@ export const buildServer = async (options: BuildServerOptions = {}) => {
       'incoming request'
     );
 
-    if (
-      config.clientAuthToken !== null &&
-      request.method !== 'OPTIONS' &&
-      isApiRequestPath(request.url)
-    ) {
+    if (request.method === 'OPTIONS') {
+      reply.code(204);
+      reply.send();
+      return;
+    }
+
+    if (config.clientAuthToken !== null && isApiRequestPath(request.url)) {
       const clientToken = readClientAuthToken(request.headers);
       if (clientToken !== config.clientAuthToken) {
         reply.code(401);
