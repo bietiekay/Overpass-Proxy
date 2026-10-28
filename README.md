@@ -64,6 +64,7 @@ Environment variables are read at startup. Defaults are shown below:
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `ALLOWED_AMENITIES` | `toilets` | Comma-separated allowlist for `/api/interpreter`; all other amenity values are rejected before upstream or cache access |
 | `UPSTREAM_URLS` | *(unset)* | Comma or whitespace separated Overpass API endpoints used for load balancing |
 | `UPSTREAM_URL` | `https://overpass-api.de/api/interpreter` | Legacy single Overpass API endpoint (used when `UPSTREAM_URLS` is unset) |
 | `UPSTREAM_FAILURE_COOLDOWN_SECONDS` | `60` | Cooldown before retrying a failed upstream |
@@ -195,7 +196,8 @@ If you are integrating an app or frontend against this proxy, the minimum contra
 
 Integration notes:
 
-- Cacheable amenity JSON bbox queries go through the proxy cache; unsupported or non-cacheable queries are transparently forwarded upstream.
+- `/api/interpreter` accepts only queries in the AmenityOverpass-supported QL subset and whose `amenity` value is listed in `ALLOWED_AMENITIES`. Other amenities receive HTTP 403; missing or unsupported query syntax receives HTTP 400 and is never forwarded upstream.
+- The parser requires one amenity equality value, a shared bounding box, supported node/way/relation selectors, and supported output clauses. This prevents the proxy from silently dropping extra filters while building tile queries.
 - `401` means the proxy expects `X-Overpass-Proxy-Token` and it was missing or wrong.
 - `403` on cache invalidation means the invalidation secret was missing, wrong, or not configured.
 - `202` on statistics endpoints means the snapshot is still being prepared.

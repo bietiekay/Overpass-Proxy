@@ -2,6 +2,7 @@ import { env } from 'node:process';
 
 export interface AppConfig {
   port: number;
+  allowedAmenities: string[];
   upstreamUrls: string[];
   redisUrl: string;
   cacheTtlSeconds: number;
@@ -118,8 +119,14 @@ export const loadConfig = (): AppConfig => {
     upstreamUrls.push(env.UPSTREAM_URL ?? 'https://overpass-api.de/api/interpreter');
   }
 
+  const allowedAmenities = (env.ALLOWED_AMENITIES ?? 'toilets')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+
   return {
     port: toNumber(env.PORT, 8080),
+    allowedAmenities,
     upstreamUrls,
     redisUrl: env.REDIS_URL ?? 'redis://redis:6379',
     cacheTtlSeconds: cacheTtl,

@@ -5,6 +5,7 @@ services:
     environment:
       # Required / typical
       PORT: 8080
+      ALLOWED_AMENITIES: ${ALLOWED_AMENITIES:-toilets}
       # URL credentials must match REDIS_PASSWORD (percent-encode special characters).
       REDIS_URL: ${REDIS_URL:?Set REDIS_URL with Redis credentials}
       # Provide one or more upstreams (comma or space separated). Example with two:

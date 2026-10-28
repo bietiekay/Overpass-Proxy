@@ -4,12 +4,10 @@ import type { Redis } from 'ioredis';
 import { combineResponses } from './assemble.js';
 import {
   extractAmenityValue,
-  extractBoundingBox,
-  hasAmenityFilter,
-  hasJsonOutput,
   isValidBoundingBox,
   type BoundingBox
 } from './bbox.js';
+import { parseAmenityQuery } from './amenityQuery.js';
 import type { AppConfig } from './config.js';
 import type { BasicStatistics } from './basicStatistics.js';
 import { TooManyTilesError } from './errors.js';
@@ -198,81 +196,15 @@ const requestBodyToQuery = (request: InterpreterRequest): string | null => {
   return null;
 };
 
-const extractAmenityPreference = (request: InterpreterRequest, query: string): string => {
-  const fromQuery = extractAmenityValue(query);
-  if (fromQuery) {
-    return fromQuery;
-  }
-
-  const normalise = (value: unknown): string | null => {
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      return trimmed.length > 0 ? trimmed : null;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const normalised = normalise(item);
-        if (normalised) {
-          return normalised;
-        }
-      }
-    }
-    return null;
-  };
-
-  if (request.method === 'GET') {
-    const queryParams = request.query as Record<string, unknown>;
-    const maybe = normalise(queryParams?.amenity);
-    if (maybe) {
-      return maybe;
-    }
-  }
-
-  if (typeof request.body === 'string') {
-    try {
-      const params = new URLSearchParams(request.body);
-      const maybe = params.get('amenity');
-      if (maybe && maybe.trim().length > 0) {
-        return maybe.trim();
-      }
-    } catch {
-      // ignore parsing errors
-    }
-  } else if (Buffer.isBuffer(request.body)) {
-    try {
-      const params = new URLSearchParams(request.body.toString('utf8'));
-      const maybe = params.get('amenity');
-      if (maybe && maybe.trim().length > 0) {
-        return maybe.trim();
-      }
-    } catch {
-      // ignore parsing errors
-    }
-  } else if (request.body && typeof request.body === 'object') {
-    const maybe = normalise((request.body as Record<string, unknown>).amenity);
-    if (maybe) {
-      return maybe;
-    }
-  }
-
-  return 'toilets';
-};
-
 const handleCacheable = async (
   request: InterpreterRequest,
   reply: FastifyReply,
   deps: InterpreterDeps,
-  query: string,
-  amenity: string
+  amenity: string,
+  bbox: BoundingBox
 ): Promise<void> => {
   const upstreamOptions = { redis: deps.redis, clientKey: request.ip };
   const normalisedAmenity = amenity.trim().toLowerCase();
-  const bbox = extractBoundingBox(query);
-  if (!bbox) {
-    reply.code(400);
-    reply.send({ error: 'Bounding box required' });
-    return;
-  }
 
   logger.info(
     {
@@ -594,11 +526,6 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
     url: '/api/interpreter',
     handler: async (request, reply) => {
       const upstreamOptions = { redis: deps.redis, clientKey: request.ip };
-      if (deps.config.transparentOnly) {
-        await proxyTransparent(request, reply, deps.config, upstreamOptions);
-        return;
-      }
-
       const query = requestBodyToQuery(request as InterpreterRequest);
       if (!query) {
         reply.code(400);
@@ -606,15 +533,32 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
         return;
       }
 
-      // Proxy any non-cacheable requests upstream to keep full compatibility
-      if (!hasJsonOutput(query) || !hasAmenityFilter(query)) {
+      const requestedAmenity = extractAmenityValue(query)?.toLowerCase();
+      if (!requestedAmenity) {
+        reply.code(400);
+        reply.send({ error: 'An explicit amenity equality filter is required' });
+        return;
+      }
+      if (!deps.config.allowedAmenities.includes(requestedAmenity)) {
+        reply.code(403);
+        reply.send({ error: 'Amenity is not allowed', amenity: requestedAmenity });
+        return;
+      }
+
+      const parsed = parseAmenityQuery(query);
+      if (!parsed) {
+        reply.code(400);
+        reply.send({ error: 'Unsupported amenity query' });
+        return;
+      }
+
+      if (deps.config.transparentOnly || parsed.output !== 'json') {
         await proxyTransparent(request, reply, deps.config, upstreamOptions);
         return;
       }
 
       try {
-        const amenity = extractAmenityPreference(request as InterpreterRequest, query);
-        await handleCacheable(request as InterpreterRequest, reply, deps, query, amenity);
+        await handleCacheable(request as InterpreterRequest, reply, deps, parsed.amenity, parsed.bbox);
       } catch (error) {
         if (error instanceof TooManyTilesError) {
           reply.code(413);
@@ -761,7 +705,7 @@ export const registerInterpreterRoutes = (app: FastifyInstance, deps: Interprete
   }
 
   app.all('/api/*', async (request, reply) => {
-    const upstreamOptions = { redis: deps.redis, clientKey: request.ip };
-    await proxyTransparent(request, reply, deps.config, upstreamOptions);
+    reply.code(404);
+    reply.send({ error: 'Unknown API endpoint' });
   });
 };
